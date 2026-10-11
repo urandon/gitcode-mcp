@@ -179,3 +179,79 @@ metrics, exact-only entity joins and bounded safe copy. See
 [Service observation](admin-ui.md#service-observation) for navigation and recovery.
 Transport or UI availability alone does not qualify whole-feature rollout;
 final cross-surface qualification remains a separate gate.
+
+## Diagnose a failed or waiting job
+
+1. Open **Jobs**, select the retained job, and follow its exact observation
+   link to **Service**. Read execution health first; logging availability is a
+   separate question. A missing join is unavailable, not permission to choose
+   a similarly named job or source.
+2. Inspect the collection incident, its last confirmed success, retry deadline
+   and phase. `waiting_writer` means fetched work is staged but not published;
+   it is not a provider timeout. A scheduled retry is not an attempted retry.
+3. Filter the timeline by the returned opaque job/source references. Compare
+   actual provider outcomes, stage transitions and confirmed commits. Missing
+   events with partial coverage do not override durable job/frontier truth.
+4. **Copy safe context** copies only bounded typed evidence. Use it for agent
+   handoff or feedback; never paste a cache path, raw log or provider response.
+5. `observation_busy` calls for **Refresh observation**, or repeating the same
+   bounded CLI/MCP read. It does not authorize retrying execution. A changed
+   boot, retention boundary or loss epoch requires **Restart retained timeline**;
+   keep the discontinuity visible rather than claiming continuous history.
+
+A later confirmed success can recover a retained incident. Reloading the
+daemon's durable job state must not erase a prior failure, invent provider
+attempts, or promote staged work to success. No observation command performs
+that recovery: it merely reports the execution owner's current evidence.
+
+## Integrated qualification boundary
+
+The O5 suite is in `internal/qualification/observation_test.go`. It uses real
+local HTTP adapter requests, temporary SQLite stores, durable job owners,
+writer admission, a durable owner and same-ledger reload, private IPC, CLI JSON, MCP stdio and
+authenticated Admin HTTP. It compares the same Reader DTOs, verifies prior
+success and writer-wait recovery, and checks that observation does not increase
+provider traffic. Disabled, closed and storage-unavailable collectors are
+negative controls. Unsampled resource gauges and history remain missing rather
+than becoming fabricated zeroes; confirmed execution counters may already exist
+before the first resource sample. A closed collector is not an admission-drop
+test: post-seal emissions are deliberately ignored.
+
+`web/tests/observation-integrated.spec.ts` compiles that test-only fixture and
+drives the embedded Admin bundle against its real authenticated API. It does
+not replace HTTP responses or EventSource with mocks. It checks the selected
+incident's reason/last-success and the correlated terminal event's typed safe
+copy, including its byte ceiling. The fixture's synthetic
+launch authority and stdin continuation protocol are confined to this test;
+there is no additional production endpoint. The ordinary mocked semantic
+suite remains useful for rare cursor/error/selection states.
+
+Run the joined gates explicitly:
+
+```sh
+go test ./internal/qualification -run TestO5 -count=3
+go test -race ./internal/qualification -run TestO5
+cd web
+npm run test:e2e -- tests/observation-integrated.spec.ts
+```
+
+These tests are not a whole-feature completion receipt. The issue tracker must
+retain the following distinctions until exact-SHA qualification is complete:
+
+| Original #101 criterion | Evidence boundary / remaining qualification |
+|---|---|
+| Admin diagnosis without shell/file inspection | Real embedded browser reads/copy; complete causal timeout/retry and exact entity-navigation matrix remains O5 work. |
+| Bounded managed diagnostic data | Collector/output-writer tests and sanitized DTO contracts; native legacy-upgrade qualification is distinct from simulated platform responses. |
+| Units, reset and history semantics | Fixed metric catalog/history tests; actual-owner transport suite must not infer samples from counters or replay. |
+| Stable cross-surface correlation | Same actual-owner Reader across IPC/CLI/MCP/Admin; source joins and browser entity navigation have separate explicit gates. |
+| Retention, cursors and restart | Durable owner reload plus ledger/rotation/cursor tests; joined active-restart/rotation diagnosis remains O5 work. |
+| Observation is read-only | Isolated configuration, nil cache service in MCP, fixed Admin GETs and provider-call accounting; no install, sync or hidden repair. |
+| Go/frontend/browser contracts | Full repository, race, asset, type/unit and semantic gates plus independent exact-SHA review and head/main CI are required; individual focused runs are insufficient. |
+| Ownership and operations documentation | This playbook, architecture and contracts; final pass/skipped/blocked disposition belongs in issue comments, not an inferred release claim. |
+
+Launchd/systemd fixture tests establish the platform command/state contract;
+they do not certify an upgrade on an installed host. Native installation or
+legacy-output migration requires its own explicit scope and suitable host.
+Likewise, #191 tracks the live authentication class currently projected as
+generic `operation_failed`; provider-specific diagnosis is not yet qualified.
+No release or installed-service upgrade is implied by running the O5 suite.
