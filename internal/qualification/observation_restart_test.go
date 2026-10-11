@@ -347,7 +347,7 @@ func TestO5ActualStoppedWorkerRetryRecovery(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		metricBoundary = restartRetryMetricBoundary(snapshot, 0)
+		metricBoundary = restartRetryMetricBoundary(snapshot, 0, 0)
 		return metricBoundary != ""
 	})
 	t.Logf("new-boot retry metrics: %s", metricBoundary)
@@ -356,7 +356,7 @@ func TestO5ActualStoppedWorkerRetryRecovery(t *testing.T) {
 		t.Fatal("recovery replayed work or rewrote the provider-directed deadline")
 	}
 	assertRestartIncident(t, mustActiveSummary(t, ctx, reader), "retrying", "retry_wait", refs.Job, before.RetryAfter, baseline.LastSuccessAt)
-	assertRestartRetryMetric(t, ctx, reader, 0)
+	beforeAdmissionMetrics := assertRestartRetryMetric(t, ctx, reader, 0, 0)
 	parity(active)
 	finished := waitJobWithin(t, jobs, ready.Job.ID, identity.UUID, 40*time.Second)
 	view := restartCollection(finished, "issues")
@@ -364,7 +364,7 @@ func TestO5ActualStoppedWorkerRetryRecovery(t *testing.T) {
 		t.Fatal("actual resumed retry lost conservation or replayed successful sibling")
 	}
 	assertRestartIncident(t, mustActiveSummary(t, ctx, reader), "recovered", "retry_wait", refs.Job, nil, view.LastSuccessAt)
-	assertRestartRetryMetric(t, ctx, reader, 1)
+	assertRestartRetryMetric(t, ctx, reader, 1, beforeAdmissionMetrics.Dropped)
 	eventually(t, func() bool {
 		page, err = collector.Query(observability.Filter{}, "", 50)
 		if err != nil {
@@ -404,10 +404,11 @@ func TestO5ActualStoppedWorkerRetryRecovery(t *testing.T) {
 }
 
 // Metrics are not execution receipts. Complete counters are strict; a missing
-// origin or undercount is accepted only with explicit, sufficient loss. The
+// origin or undercount is accepted only with explicit, sufficient NEW aggregate
+// loss. This is not attribution to a named counter. The
 // actual job, provider, checkpoint and causal event assertions remain separate.
-func restartRetryMetricBoundary(snapshot observability.MetricsSnapshot, want float64) string {
-	if snapshot.State != "initializing" && snapshot.State != "ready" && snapshot.State != "partial" || snapshot.Dropped > 0 && snapshot.State == "ready" {
+func restartRetryMetricBoundary(snapshot observability.MetricsSnapshot, want float64, beforeLoss uint64) string {
+	if snapshot.Dropped < beforeLoss || snapshot.State != "initializing" && snapshot.State != "ready" && snapshot.State != "partial" || snapshot.Dropped > 0 && snapshot.State == "ready" {
 		return ""
 	}
 	for _, series := range snapshot.Series {
@@ -415,7 +416,11 @@ func restartRetryMetricBoundary(snapshot observability.MetricsSnapshot, want flo
 			continue
 		}
 		if series.Value == nil {
-			if series.Reason == "origin_unavailable" && snapshot.Dropped > 0 {
+			required := uint64(want)
+			if required == 0 {
+				required = 1 // Initial attachment loss, not a fabricated saved zero.
+			}
+			if series.Reason == "origin_unavailable" && snapshot.Dropped-beforeLoss >= required {
 				return "explicit_origin_loss"
 			}
 			return ""
@@ -427,7 +432,7 @@ func restartRetryMetricBoundary(snapshot observability.MetricsSnapshot, want flo
 		if value == want {
 			return "observed_count"
 		}
-		if want-value <= float64(snapshot.Dropped) {
+		if want-value <= float64(snapshot.Dropped-beforeLoss) {
 			return "explicit_recording_loss"
 		}
 		return ""
@@ -435,15 +440,16 @@ func restartRetryMetricBoundary(snapshot observability.MetricsSnapshot, want flo
 	return ""
 }
 
-func assertRestartRetryMetric(t *testing.T, ctx context.Context, reader *observability.Reader, want float64) {
+func assertRestartRetryMetric(t *testing.T, ctx context.Context, reader *observability.Reader, want float64, beforeLoss uint64) observability.MetricsSnapshot {
 	t.Helper()
 	snapshot, err := retryObservationRead(ctx, func() (observability.MetricsSnapshot, error) {
 		return reader.MetricSnapshot(ctx, observability.MetricsRequest{Name: "retry_admissions", HistoryMinutes: 1})
 	})
-	if err != nil || restartRetryMetricBoundary(snapshot, want) == "" {
+	if err != nil || restartRetryMetricBoundary(snapshot, want, beforeLoss) == "" {
 		t.Fatal("new-boot retry counter lost exact count or explicit loss boundary")
 	}
-	t.Logf("retry metric boundary: %s", restartRetryMetricBoundary(snapshot, want))
+	t.Logf("retry metric boundary: %s", restartRetryMetricBoundary(snapshot, want, beforeLoss))
+	return snapshot
 }
 
 func TestO5RestartRetryMetricBoundaryRejectsInventedCounts(t *testing.T) {
@@ -470,8 +476,32 @@ func TestO5RestartRetryMetricBoundaryRejectsInventedCounts(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			snapshot := observability.MetricsSnapshot{State: test.state, Dropped: test.dropped, Series: []observability.MetricSeries{{MetricPoint: observability.MetricPoint{Name: "retry_admissions", Labels: map[string]string{"collection": "issues"}, Value: test.value, Reason: test.reason}}}}
-			if restartRetryMetricBoundary(snapshot, test.want) != test.wantBoundary {
+			if restartRetryMetricBoundary(snapshot, test.want, 0) != test.wantBoundary {
 				t.Fatal("retry metric boundary accepted invented count or hid explicit loss")
+			}
+		})
+	}
+	for _, test := range []struct {
+		name          string
+		value         *float64
+		before, after uint64
+		wantBoundary  string
+	}{
+		{"stale_loss_cannot_excuse_undercount", &zero, 1, 1, ""},
+		{"stale_loss_cannot_excuse_missing_origin", nil, 1, 1, ""},
+		{"new_aggregate_loss_with_undercount", &zero, 1, 2, "explicit_recording_loss"},
+		{"new_aggregate_loss_with_missing_origin", nil, 1, 2, "explicit_origin_loss"},
+		{"counter_exact_despite_old_loss", &one, 1, 1, "observed_count"},
+		{"loss_regressed", &one, 2, 1, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			series := observability.MetricSeries{MetricPoint: observability.MetricPoint{Name: "retry_admissions", Labels: map[string]string{"collection": "issues"}, Value: test.value}}
+			if test.value == nil {
+				series.Reason = "origin_unavailable"
+			}
+			snapshot := observability.MetricsSnapshot{State: "partial", Dropped: test.after, Series: []observability.MetricSeries{series}}
+			if restartRetryMetricBoundary(snapshot, 1, test.before) != test.wantBoundary {
+				t.Fatal("old loss excused new admission deficit or aggregate loss boundary was erased")
 			}
 		})
 	}

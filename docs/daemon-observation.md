@@ -296,8 +296,10 @@ invent an attached origin from saved state; a real unclean ledger restart
 invalidates the old cursor explicitly and retains causal recovery events.
 Origin attachment and metric recording remain best effort: the crash suite
 labels observed counts separately from explicit origin/recording loss. Missing
-or undercounted metrics require reported loss; duplicate or fabricated counts
-still fail. Separate deterministic scheduler and held-metrics-lock controls
+or undercounted metrics require reported loss; a later admission deficit needs
+sufficient **new** aggregate loss since the pre-admission snapshot, not old
+loss or per-counter attribution. Duplicate or fabricated counts still fail.
+Separate deterministic scheduler and held-metrics-lock controls
 verify strict `0` to `1` admission counting and null `origin_unavailable` with
 exact loss respectively. Neither incomplete metrics nor observation failure
 replace the mandatory job, checkpoint, provider-call and causal event evidence.
