@@ -42,6 +42,23 @@ func TestObservabilityAdminSharedReaderAndPollIsolation(t *testing.T) {
 		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &got) != nil || !reflect.DeepEqual(got, expected) || response.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("Admin summary diverged from shared reader")
 		}
+		var browser struct {
+			Version   string                                             `json:"admin_observation_version"`
+			Filters   map[string][]string                                `json:"event_filters"`
+			Templates map[observability.Code]observability.EventTemplate `json:"event_templates"`
+		}
+		if len(response.Body.Bytes()) > observability.MaxSummaryBytes || json.Unmarshal(response.Body.Bytes(), &browser) != nil || browser.Version != "1" || !reflect.DeepEqual(browser.Filters, observability.FilterValues()) || !reflect.DeepEqual(browser.Templates, observability.EventTemplates()) {
+			t.Fatal("bounded browser catalog contract unavailable")
+		}
+	}
+	// Older O3 IPC clients disallow unknown fields. Browser metadata must never
+	// leak into the shared DTO used by IPC, CLI or MCP.
+	shared, _ := json.Marshal(expected)
+	decoder := json.NewDecoder(bytes.NewReader(shared))
+	decoder.DisallowUnknownFields()
+	var legacy observability.Summary
+	if decoder.Decode(&legacy) != nil || bytes.Contains(shared, []byte("event_filters")) || bytes.Contains(shared, []byte("event_templates")) || bytes.Contains(shared, []byte("admin_observation_version")) {
+		t.Fatal("browser metadata changed the strict shared protocol")
 	}
 	response := authorizedRequest(t, handler, cookie, "/api/admin/v1/observability/metrics?name=runtime_heap&history_minutes=3")
 	var gotMetrics observability.MetricsSnapshot
@@ -56,6 +73,19 @@ func TestObservabilityAdminSharedReaderAndPollIsolation(t *testing.T) {
 	}
 	if broadCalls.Load() != 0 || len(adminCompletedEvents(t, collector)) != 0 || metrics.Snapshot().SampledAt != (time.Time{}) {
 		t.Fatal("observation polls called broad bootstrap, recursively emitted events, or sampled")
+	}
+}
+
+func TestAdminObservationSummaryCeilingIncludesMetadata(t *testing.T) {
+	if _, err := boundedAdminObservationSummary(map[string]string{"catalog": strings.Repeat("x", observability.MaxSummaryBytes)}); err == nil {
+		t.Fatal("browser metadata escaped the total summary byte ceiling")
+	}
+	first := observability.EventTemplates()
+	for code := range first {
+		delete(first, code)
+	}
+	if len(observability.EventTemplates()) == 0 {
+		t.Fatal("caller mutated the reviewed event catalog")
 	}
 }
 

@@ -45,6 +45,9 @@ The authenticated `/api/admin/v1` surface is an in-process transport over the co
 | --- | --- |
 | `GET /session` | Return the authenticated browser session's API version and CSRF value; never returns the session cookie material. |
 | `GET /snapshot` | Coarse overview: service, attention, caches/repositories, jobs, maintenance, feedback readiness, diagnostics, capabilities, and a content revision. |
+| `GET /observability` | Independent bounded execution/observation health, sampled resources, and browser-only reviewed event catalog. |
+| `GET /observability/metrics` | Nullable per-boot metric series and at most 60 UTC-minute buckets. |
+| `GET /observability/events` | One bounded catalog-event page; finite filters and an opaque request cursor. |
 | `GET /caches` and `/caches/{cache_ref}` | Managed cache topology and safe storage/readiness metadata. |
 | `GET /caches/{cache_ref}/repositories/{repo_id}` | Binding, collection counts, five independent coverage lanes, active work, contention, retry, and last-stage errors. |
 | `GET /jobs` and `/jobs/{job_id}` | Structured bounded job history and progress; list filters accept state, type, cache, repository, and failure class. |
@@ -70,6 +73,54 @@ The authenticated `/api/admin/v1` surface is an in-process transport over the co
 | `GET /events?after=CURSOR` | Bounded SSE invalidation/progress replay. |
 
 Event cursors are opaque and monotonic. A reconnect within the retained window replays missed compact events. An expired cursor produces `snapshot_required`, after which the browser reloads the coarse snapshot. The browser exposes a quiet stream disconnect as a textual warning while native reconnection continues, offers an explicit snapshot refresh, and advances freshness from a local clock so an unchanged observation becomes visibly stale after five minutes. The stream never carries raw logs or cached record bodies.
+
+### Service observation
+
+The sixth navigation destination, **Service**, reads the three bounded
+observation endpoints after session establishment, independently of the broad
+snapshot and its cache/feedback/credential readiness. A direct Service URL does
+not request the broad snapshot. Context links use only authority already listed
+by another Admin section; until that authority exists, they remain explicitly
+unavailable. Unsupported daemons show a compatibility state rather than an
+empty healthy dashboard. The browser-only `admin_observation_version: "1"`,
+`event_filters`, and `event_templates` metadata do not change the strict
+`observability.v1` IPC, CLI or MCP summary contract. The total Admin summary,
+including this catalog, remains capped at 128 KiB.
+
+Execution health and observation health are separate. Incident cards retain
+active/recovered state, first/last authority timestamps, last success and
+scheduled retry. Repository-document inspection and indexing remain independent
+phases. Observed boots describe retained collector evidence, not an OS restart
+count. Nullable probes and incomplete intervals say **Not observed**, not zero.
+Metric definitions show type, unit, origin, reset and window. Histograms expose
+non-cumulative duration boundaries; counts and durations never assert success.
+Sample and browser-receipt freshness are independent of the broad snapshot.
+
+The event timeline holds one page, with at most 50 requested events, not an
+ever-growing browser log. Finite filters, paired UTC timestamps (at most seven
+days), opaque correlation references, page request cursor and selected evidence
+use bounded `obs_*` URL fields. Back/forward restores that selection. A sparse
+empty page with remaining retained records offers **Continue retained scan**;
+it never scans further automatically. SSE invalidations refresh the same request
+cursor, coalesce while a read is in flight, and fence late responses after
+selection changes or navigation. Every browser read has a four-second deadline.
+Cursor expiry, boot/generation change and event loss stop continuation and require
+an explicit **Restart retained timeline**. A disconnect preserves returned data
+with a warning; it does not manufacture a failed job.
+
+Jobs, Maintenance, Caches, documentation sources and supported Diagnostics rows
+offer read-only Service context links. Reverse navigation joins opaque refs to
+exact, unique, already-listed entities. Source-specific links preserve
+`doc_source_ref`; a disappearing or ambiguous source stays unavailable and
+cannot select a sibling or submit a source-less action. Service itself exposes
+no cancel, retry, reconcile, setup, provider probe, repair or installation action.
+
+**Copy safe context** creates a schema-1 allowlist from the returned summary and
+at most one currently returned event or incident, capped at 16 KiB. It never
+copies a broad Admin snapshot, raw log/error, display coordinate, path or provider
+body. Missing selections fail explicitly. Text, DOM roles, selected state and
+keyboard focus remain authoritative across Light/Dark/System and narrow layouts;
+the semantic browser suite captures no raster artifacts.
 
 Every mutation requires the authenticated session cookie, a same-origin request, the session CSRF value returned by `GET /session`, a public target id, and a fresh idempotency key. The daemon persists only hashes of idempotency material and bounded sets of 256 public receipts. Replaying a retained key returns the original receipt after restart; reusing it for a different target, action, or plan is rejected. A cancel receipt distinguishes a completed cancellation from a request still converging. Retry and reconcile do not force an identical historical execution: they reconcile current truth, then report whether work was created, coalesced, or no longer needed. A new retry intent is rejected before receipt reservation or maintenance work while its retained stage, collection, or legacy progress deadline is still in the future. An already prepared durable intent may still settle after restart without duplicating work.
 

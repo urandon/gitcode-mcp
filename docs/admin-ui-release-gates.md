@@ -26,6 +26,15 @@ The Playwright matrix covers authenticated loading, URL-preserved navigation and
 
 ## Resource budgets
 
+Service observation additionally gates direct startup without the broad
+snapshot, independent execution/observation health, nullable resources and
+minute buckets, finite URL/history filters, explicit sparse continuation,
+same-selection invalidation coalescing, late-response fencing, expired/reset
+cursor recovery, missing/ambiguous exact source joins, sanitized schema-1 copy,
+older-daemon compatibility and disconnected/stale samples. Tests assert no
+execution/provider/setup request from Service and repeat narrow layouts in
+Light, Dark and System without screenshot, video or trace output.
+
 The comparison baseline is the stripped macOS arm64 `v0.1.9` binary, the last tagged release before the admin epic. Build both binaries with the same toolchain and flags:
 
 ```sh

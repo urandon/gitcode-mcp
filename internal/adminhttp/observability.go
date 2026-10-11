@@ -102,6 +102,16 @@ func (c *Controller) readObservability(w http.ResponseWriter, r *http.Request, k
 		err = observability.DecodeReadRequest(raw, &struct{}{})
 		if err == nil {
 			value, err = c.cfg.Observability.Summary(ctx)
+			if err == nil {
+				// Browser-only metadata leaves observability.v1 IPC/CLI/MCP
+				// unchanged: existing strict clients reject unknown DTO fields.
+				value = struct {
+					observability.Summary
+					AdminObservationVersion string                                             `json:"admin_observation_version"`
+					EventFilters            map[string][]string                                `json:"event_filters"`
+					EventTemplates          map[observability.Code]observability.EventTemplate `json:"event_templates"`
+				}{value.(observability.Summary), "1", observability.FilterValues(), observability.EventTemplates()}
+			}
 		}
 	case "metrics":
 		var req observability.MetricsRequest
@@ -120,7 +130,26 @@ func (c *Controller) readObservability(w http.ResponseWriter, r *http.Request, k
 		writeObservationError(w, err)
 		return
 	}
+	if kind == "summary" {
+		data, marshalErr := boundedAdminObservationSummary(value)
+		if marshalErr != nil {
+			writeObservationError(w, marshalErr)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
 	writeJSON(w, http.StatusOK, value)
+}
+
+func boundedAdminObservationSummary(value any) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil || len(data) > observability.MaxSummaryBytes {
+		return nil, observability.QueryError{Code: "response_limit", Reason: "summary_limit"}
+	}
+	return data, nil
 }
 
 func writeObservationError(w http.ResponseWriter, err error) {

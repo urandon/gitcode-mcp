@@ -171,6 +171,11 @@ provider bodies, credentials, display coordinates, and broad incident lists are
 excluded. A missing/evicted selection fails explicitly instead of resolving a
 private id or looking up the filesystem.
 
-The dedicated Observability Admin UI cohort is tracked separately from this
-transport contract. Transport availability alone does not qualify its navigation,
-filtering, copy, stale-cursor recovery, or rollout.
+The Service Admin cohort uses these three endpoints without awaiting the broad
+cache/credential snapshot. Its summary adds browser-only version and reviewed
+catalog metadata; strict IPC/CLI/MCP DTOs stay unchanged. Browser state retains
+one event page, explicit sparse continuation, independently fresh nullable
+metrics, exact-only entity joins and bounded safe copy. See
+[Service observation](admin-ui.md#service-observation) for navigation and recovery.
+Transport or UI availability alone does not qualify whole-feature rollout;
+final cross-surface qualification remains a separate gate.

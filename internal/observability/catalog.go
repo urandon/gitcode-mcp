@@ -48,6 +48,23 @@ const (
 
 type template struct{ stream, severity, component, message string }
 
+// EventTemplate exposes reviewed product text, not retained output. UI clients
+// use this closed catalog for filters and safe context rather than raw messages.
+type EventTemplate struct {
+	Stream    string `json:"stream"`
+	Severity  string `json:"severity"`
+	Component string `json:"component"`
+	Message   string `json:"message"`
+}
+
+func EventTemplates() map[Code]EventTemplate {
+	out := make(map[Code]EventTemplate, len(catalog))
+	for code, value := range catalog {
+		out[code] = EventTemplate{value.stream, value.severity, value.component, value.message}
+	}
+	return out
+}
+
 var catalog = map[Code]template{
 	Boot:                    {"stdout", "info", "daemon", "Daemon observation started."},
 	RecoveryStarted:         {"stdout", "info", "recovery", "Recovery inspection started."},

@@ -492,6 +492,12 @@ var ragCapabilities = []Capability{
 
 var adminCapabilities = []Capability{
 	{
+		ID: "admin_service_observation", Category: CategoryAdmin, Safety: SafetyReadOnly,
+		CLIName: "service observe", ServiceCommand: "observability-summary",
+		Description: "Read bounded local daemon health, sampled metrics and catalog events; no provider, setup or execution side effects.",
+		UI: enabled("Available in the Service view; overall feature qualification remains separate."), CLI: enabled("Available through service observe, metrics and events."), MCP: disabled("The Admin cohort uses shared observation APIs; MCP has separate read tools."),
+	},
+	{
 		ID: "admin_feedback_setup", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
 		CLIName: "feedback", ServiceCommand: "feedback-setup",
 		Description: "Compatibility enablement of the immutable build-owned feedback destination, with reviewed local configuration and durable receipts.",

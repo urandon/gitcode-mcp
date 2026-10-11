@@ -6,9 +6,11 @@
   import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, jobNextAction, laneSummary, relativeAge, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceConflictResolutionPlan, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
+  import ServiceView from '$lib/ServiceView.svelte';
+  import { isRef, readServiceQuery, refProjection, writeServiceQuery, type ObservationTarget, type ServiceQuery } from '$lib/observation';
 
   const navigation: Array<{ name: AdminView; icon: typeof CircleGauge }> = [
-    { name: 'Overview', icon: CircleGauge }, { name: 'Caches', icon: Database }, { name: 'Jobs', icon: Activity }, { name: 'Maintenance', icon: Wrench }, { name: 'Diagnostics', icon: HeartPulse }
+    { name: 'Overview', icon: CircleGauge }, { name: 'Caches', icon: Database }, { name: 'Jobs', icon: Activity }, { name: 'Maintenance', icon: Wrench }, { name: 'Diagnostics', icon: HeartPulse }, { name: 'Service', icon: Gauge }
   ];
   const repositoryTabs: Array<{ value: RepositoryTab; label: string }> = [
     { value: 'coverage', label: 'Coverage' }, { value: 'collections', label: 'Collections' }, { value: 'documentation', label: 'Documentation' }, { value: 'search', label: 'Search status' }, { value: 'activity', label: 'Activity' }
@@ -122,6 +124,11 @@
   let repositoryDocsPlan: RepositoryDocsPlan | undefined;
   let repositoryDocsPlanRunning = false;
   let repositoryDocsSourceID = '';
+  let requestedDocsSourceRef = '';
+  let serviceReady = false;
+  let serviceQuery: ServiceQuery = {};
+  let serviceQueryInvalid = false;
+  let observationInvalidation = 0;
   let repositoryDocsSources: NonNullable<Repository['documentation']['sources']> = [];
   let selectedRepositoryDocsSource: NonNullable<Repository['documentation']['sources']>[number] | undefined;
   let repoTargets: Array<{ key: string; cache: CacheObservation; repo: Repository }> = [];
@@ -145,8 +152,14 @@
   $: conflictResolutionEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_conflict_resolution' && item.ui_enabled);
   $: repositoryDocsSearchEnabled = snapshot.capabilities.some((item) => item.id === 'repository_docs_search' && item.ui_enabled) && Boolean(selectedRepo?.documentation.search_available);
   $: repositoryDocsSources = selectedRepo?.documentation.sources || [];
-  $: if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
-  $: selectedRepositoryDocsSource = repositoryDocsSources.find((source) => source.source_registration_id === repositoryDocsSourceID);
+  $: {
+    if (requestedDocsSourceRef) {
+      const matches = repositoryDocsSources.filter((source) => source.observation_refs?.source_ref === requestedDocsSourceRef);
+      repositoryDocsSourceID = matches.length === 1 ? matches[0].source_registration_id : '';
+    }
+    else if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
+    selectedRepositoryDocsSource = repositoryDocsSources.find((source) => source.source_registration_id === repositoryDocsSourceID);
+  }
   $: repoTargets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
   $: maintenanceTargetAvailable = repoTargets.some((target) => target.key === maintenanceTargetKey) && (!requestedRegistrationID || snapshot.maintenance.some((item) => item.registration_id === requestedRegistrationID || item.legacy_registration_ids?.includes(requestedRegistrationID)));
 
@@ -241,7 +254,9 @@
     eventStream?.close(); eventConnection = 'connecting'; eventStream = new EventSource('/api/admin/v1/events');
     eventStream.addEventListener('open', () => { eventConnection = 'connected'; });
     eventStream.addEventListener('error', () => { eventConnection = 'disconnected'; });
-    for (const kind of ['snapshot_changed', 'snapshot_required']) eventStream.addEventListener(kind, () => void refresh());
+    eventStream.addEventListener('observability_changed', () => { observationInvalidation++; });
+    eventStream.addEventListener('snapshot_required', () => { observationInvalidation++; if (active !== 'Service') void refresh(); });
+    eventStream.addEventListener('snapshot_changed', () => { if (active !== 'Service') void refresh(); });
   }
 
   function hydrateLocation(): void {
@@ -261,6 +276,12 @@
     jobCacheFilter = params.get('job_cache') || ''; jobRepoFilter = params.get('job_repo') || ''; jobFailureFilter = params.get('job_failure') || '';
     jobSyncHealthFilter = params.get('job_sync_health') || '';
     jobCollectionFilter = params.get('job_collection') || '';
+    const parsedObservation = readServiceQuery(params); serviceQuery = parsedObservation.query; serviceQueryInvalid = parsedObservation.invalid;
+    requestedDocsSourceRef = isRef(params.get('doc_source_ref'), 'source') ? params.get('doc_source_ref')! : '';
+    if (active === 'Service') {
+      selectedCacheRef = ''; selectedRepoID = ''; selectedJobID = ''; requestedRegistrationID = ''; requestedDocsSourceRef = '';
+      updateLocation(true);
+    }
   }
 
   function updateLocation(replace = false): void {
@@ -269,6 +290,8 @@
     if (selectedCacheRef) params.set('cache', selectedCacheRef);
     if (selectedRepoID) params.set('repo', selectedRepoID);
     if (selectedRepoID && repoTab !== 'coverage') params.set('tab', repoTab);
+    if (active === 'Caches' && repoTab === 'documentation' && requestedDocsSourceRef) params.set('doc_source_ref', requestedDocsSourceRef);
+    if (active === 'Service') writeServiceQuery(params, serviceQuery);
     if (selectedRepoID && repoTab === 'search') {
       if (searchQuery) params.set('q', searchQuery);
       if (searchKind) params.set('kind', searchKind);
@@ -292,6 +315,7 @@
 
   function selectView(view: AdminView): void {
     active = view;
+    if (view !== 'Service' && !snapshot.revision && !loading) void refresh();
     if (view === 'Maintenance') {
       selectedCacheRef = maintenanceIntent.cache_ref; selectedRepoID = maintenanceIntent.repo_id;
       requestedRegistrationID = snapshot.maintenance.find((item) => item.cache_ref === selectedCacheRef && item.repo_id === selectedRepoID)?.registration_id || '';
@@ -299,6 +323,30 @@
     if (view !== 'Jobs') selectedJobID = '';
     if (view !== 'Maintenance') { requestedRegistrationID = ''; registrationRedirectNotice = ''; }
     updateLocation();
+  }
+  function changeServiceQuery(next: ServiceQuery): void { serviceQuery = next; serviceQueryInvalid = false; updateLocation(); }
+  function openObservation(refs: unknown): void {
+    serviceQuery = refProjection(refs); serviceQueryInvalid = false; active = 'Service';
+    requestedRegistrationID = ''; selectedCacheRef = ''; selectedRepoID = ''; selectedJobID = ''; updateLocation();
+  }
+  function openObservationTarget(target: ObservationTarget): void {
+    requestedRegistrationID = ''; selectedJobID = ''; selectedCacheRef = ''; selectedRepoID = ''; requestedDocsSourceRef = '';
+    if (target.kind === 'job') { active = 'Jobs'; selectedJobID = target.id; }
+    else if (target.kind === 'maintenance') { active = 'Maintenance'; requestedRegistrationID = target.id; canonicalizeRegistrationDeepLink(); }
+    else {
+      active = 'Caches'; selectedCacheRef = target.cache;
+      if (target.kind === 'repo' || target.kind === 'source') {
+        selectedRepoID = target.repo; repoTab = target.kind === 'source' ? 'documentation' : 'coverage';
+        if (target.kind === 'source') requestedDocsSourceRef = snapshot.caches.find(c => c.cache_ref === target.cache)?.repositories.find(r => r.repo_id === target.repo)?.documentation.sources?.find(s => s.source_registration_id === target.source)?.observation_refs?.source_ref || '';
+      }
+    }
+    updateLocation();
+  }
+  function diagnosticObservationRefs(item: Diagnostic): unknown {
+    if (item.entity_type === 'job') return snapshot.jobs.find(j => j.id === item.entity_id)?.observation_refs;
+    if (item.entity_type === 'maintenance' || item.entity_type === 'registration') return snapshot.maintenance.find(r => r.registration_id === item.entity_id)?.observation_refs;
+    if (item.entity_type === 'cache') return snapshot.caches.find(c => c.cache_ref === item.entity_id)?.observation_refs;
+    return undefined;
   }
   function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; synchronizeMaintenanceTarget(`${cache.cache_ref}\u0000${repo.repo_id}`); repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
@@ -367,6 +415,7 @@
   }
 
   async function copyDocumentationCommand(kind: 'index' | 'search'): Promise<void> {
+    if (requestedDocsSourceRef && !selectedRepositoryDocsSource) return;
     const command = kind === 'index' ? selectedRepo?.documentation.index_handoff : selectedRepo?.documentation.search_handoff;
     if (!command) return;
     try { await navigator.clipboard.writeText(command); copied = `documentation-${kind}`; window.setTimeout(() => (copied = ''), 1800); }
@@ -393,6 +442,7 @@
   }
 
   function repositoryDocsSelector(): Record<string, string | number> {
+    if (requestedDocsSourceRef && !selectedRepositoryDocsSource) throw new Error('Selected documentation source is unavailable. Select an authority explicitly; no sibling fallback is allowed.');
     return selectedRepositoryDocsSource ? { source_registration_id: selectedRepositoryDocsSource.source_registration_id, source_registration_generation: selectedRepositoryDocsSource.source_registration_generation } : {};
   }
 
@@ -706,7 +756,7 @@
   onMount(async () => {
     theme = normalizeTheme(localStorage.getItem(themeStorageKey)); applyTheme(theme); hydrateLocation(); window.addEventListener('popstate', onPopState);
     freshnessTimer = window.setInterval(() => { freshnessNow = Date.now(); }, 5_000);
-    try { await establishSession(); await refresh(); connectEvents(); }
+    try { await establishSession(); serviceReady = true; connectEvents(); if (active !== 'Service') void refresh(); else loading = false; }
     catch (value) { error = value instanceof Error ? value.message : 'Admin session is unavailable.'; loading = false; }
   });
   onDestroy(() => { eventStream?.close(); if (freshnessTimer !== undefined) window.clearInterval(freshnessTimer); window.removeEventListener('popstate', onPopState); });
@@ -725,8 +775,10 @@
 
   <main>
     <header class="topbar"><div class="crumb"><span>Admin</span><ChevronRight size={14} /><strong>{active}</strong></div><div class="version">v{snapshot.service.version || 'dev'}</div></header>
-    <section class="content" aria-busy={loading}>
-      {#if snapshot.api_version !== adminApiVersion}
+    <section class="content" aria-busy={active !== 'Service' && loading}>
+      {#if active === 'Service'}
+        <ServiceView ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
+      {:else if snapshot.api_version !== adminApiVersion}
         <section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>UI/API version mismatch</strong><p>This UI expects API v{adminApiVersion}, but the daemon returned v{snapshot.api_version || 'unknown'}. Update browser assets and daemon together.</p></div></section>
       {:else}
         {#if error}<section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>Observation unavailable</strong><p>{error}</p></div></section>{/if}
@@ -770,7 +822,9 @@
           {/if}
 
         {:else if active === 'Caches'}
+          {#if selectedCache?.observation_refs}<button class="text-action" onclick={() => openObservation(selectedCache?.observation_refs)}>Observe cache in Service</button>{:else if !selectedCacheRef}{#each snapshot.caches as cache}{#if cache.observation_refs}<button class="text-action" onclick={() => openObservation(cache.observation_refs)}>Observe {cache.cache_ref} in Service</button>{/if}{/each}{/if}
           {#if selectedRepo}
+            {#if selectedRepo.observation_refs}<button class="text-action" onclick={() => openObservation(selectedRepo?.observation_refs)}>Observe repository in Service</button>{/if}
             <div class="entity-header"><button class="back-link" onclick={closeRepository}><ArrowLeft size={16} />All caches</button><div class="intro section-intro"><p class="eyebrow">REPOSITORY</p><h1>{selectedRepo.display_name || selectedRepo.repo_id}</h1><p>{selectedCache?.cache_ref} · {selectedRepo.scopes?.join(', ') || 'cached observation'} · {humanize(selectedRepo.binding_state)}</p></div></div>
             <div class="tab-list" role="tablist" aria-label="Repository details">{#each repositoryTabs as tab}<button role="tab" aria-selected={repoTab === tab.value} class:active={repoTab === tab.value} onclick={() => selectRepositoryTab(tab.value)}>{tab.label}</button>{/each}</div>
             {#if repoTab === 'coverage'}
@@ -780,6 +834,8 @@
               <section class="repository-section" aria-labelledby="collections-title"><div class="section-heading"><div><p class="section-kicker">CORPUS</p><h2 id="collections-title">Collections and frontiers</h2></div></div>{#if selectedRepo.collections.length === 0}<div class="empty-state"><Layers3 size={24} /><h3>No collection observations</h3><p>The binding exists, but no counts or frontiers have been observed.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Cached collection counts and coverage</caption><thead><tr><th>Collection</th><th>Cached</th><th>Head freshness</th><th>Tail completeness</th></tr></thead><tbody>{#each selectedRepo.collections as collection}<tr><th scope="row">{humanize(collection.kind)}</th><td>{collection.count.toLocaleString()}</td><td><StatusChip value={collection.head.state} label={laneSummary('head', collection.head)} /></td><td><StatusChip value={collection.tail.state} label={laneSummary('tail', collection.tail)} /></td></tr>{/each}</tbody></table></div>{/if}<div class="secondary-summary"><div><span>Secondary total</span><strong>{selectedRepo.counts.secondary.total.toLocaleString()}</strong></div><div><span>Pending</span><strong>{selectedRepo.counts.secondary.pending.toLocaleString()}</strong></div><div><span>Deferred</span><strong>{selectedRepo.counts.secondary.deferred.toLocaleString()}</strong></div><div><span>Complete</span><strong>{selectedRepo.counts.secondary.complete.toLocaleString()}</strong></div></div></section>
             {:else if repoTab === 'documentation'}
               <section class="repository-section" aria-labelledby="documentation-title">
+                {#if selectedRepositoryDocsSource?.observation_refs}<button class="text-action" onclick={() => openObservation(selectedRepositoryDocsSource?.observation_refs)}>Observe exact documentation source in Service</button>{/if}
+                {#if requestedDocsSourceRef && !selectedRepositoryDocsSource}<p role="alert">Selected documentation source is unavailable. No sibling fallback was selected.</p>{/if}
                 <div class="section-heading"><div><p class="section-kicker">VERSIONED GIT AUTHORITY</p><h2 id="documentation-title">Repository documentation RAG</h2><p>Policy is committed with the repository. The cache keeps revision membership and vectors only; source text is hydrated from the exact Git blob or an explicit tracked worktree overlay.</p></div><StatusChip value={selectedRepo.documentation.state} /></div>
                 <div class="context-grid">
                   <article><span>Revision sets</span><strong>{selectedRepo.documentation.revision_set_count}</strong><p>{selectedRepo.documentation.revision_set_id || 'No index published'}</p></article>
@@ -796,7 +852,7 @@
 				{#if selectedRepo.documentation.exclusions?.length}<div class="cohort-strip" aria-label="Repository documentation exclusion reasons">{#each selectedRepo.documentation.exclusions as exclusion}<div><span>{humanize(exclusion.reason)}</span><strong>{exclusion.count}</strong></div>{/each}</div>{/if}
                 <div class="rag-operator-panel">
 				  <div><p class="section-kicker">REGISTERED GIT AUTHORITY</p><h3>Index and supervise</h3><p>{selectedRepo.documentation.registered ? 'Reconcile resolves current HEAD and committed policy from the selected private daemon authority, schedules an immutable revision-set job when needed, and never fetches GitCode.' : 'The Admin UI never accepts an absolute worktree path. Run indexing once from the intended worktree to create the private registration, then controls become available here.'}</p></div>
-                  {#if repositoryDocsSources.length > 0}<label><span>Git authority</span><select bind:value={repositoryDocsSourceID}>{#each repositoryDocsSources as source}<option value={source.source_registration_id}>{source.source_registration_id.slice(0, 24)} · generation {source.source_registration_generation} · {humanize(source.state)}</option>{/each}</select></label>{/if}
+                  {#if repositoryDocsSources.length > 0}<label><span>Git authority</span><select bind:value={repositoryDocsSourceID} onchange={() => { requestedDocsSourceRef = ''; updateLocation(); }}>{#if requestedDocsSourceRef && !selectedRepositoryDocsSource}<option value="">Selected source unavailable</option>{/if}{#each repositoryDocsSources as source}<option value={source.source_registration_id}>{source.source_registration_id.slice(0, 24)} · generation {source.source_registration_generation} · {humanize(source.state)}</option>{/each}</select></label>{/if}
                   <div class="rag-action-form documentation-actions"><button disabled={!csrfToken || !selectedMaintenance || !selectedRepo.documentation.registered || repositoryDocsPlanRunning} onclick={() => void runRepositoryDocsPlan()}><FileCheck2 size={16} />{repositoryDocsPlanRunning ? 'Planning…' : 'Preview exact plan'}</button><button class="primary-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance || !selectedRepo.documentation.registered || controlRunning} onclick={(event) => void confirmControl('repository_docs_index', event.currentTarget)}><RotateCcw size={16} />Index current HEAD</button><button onclick={openRepositoryDocsJobs} disabled={!selectedRepo.documentation.registered}><Activity size={16} />Open index jobs</button><button onclick={() => void copyDocumentationCommand('index')} disabled={!selectedRepo.documentation.index_handoff}><FileText size={16} />{copied === 'documentation-index' ? 'Copied index command' : 'Copy CLI handoff'}</button><button onclick={() => void copyRepositoryDocsRebind()} disabled={!selectedRepositoryDocsSource}><GitFork size={16} />{copied === 'documentation-rebind' ? 'Copied rebind command' : 'Copy rebind command'}</button></div>
                   <p class="privacy search-boundary"><ShieldCheck size={15} />The browser sends only the opaque registration id. Filesystem authority remains in the daemon's private registry.</p>
 				  {#if repositoryDocsPlan}<div class="action-result" role="status"><FileCheck2 size={17} /><div><strong>{repositoryDocsPlan.eligible_files} eligible files · {repositoryDocsPlan.eligible_bytes} bytes</strong><span>{repositoryDocsPlan.excluded_files} excluded · {repositoryDocsPlan.missing_objects} missing · commit {repositoryDocsPlan.commit_oid.slice(0, 12)}{repositoryDocsPlan.tracked_changes ? ` · ${repositoryDocsPlan.tracked_changes} tracked changes` : ''}</span><span>Effective include: {(repositoryDocsPlan.effective_include || []).join(', ') || 'none'} · exclude: {(repositoryDocsPlan.effective_exclude || []).join(', ') || 'none'}</span><button onclick={() => void copyRepositoryDocsConfig()}><Clipboard size={15} />{copied === 'documentation-config' ? 'Copied committed config' : 'Copy committed config'}</button></div></div>{/if}
@@ -884,6 +940,7 @@
             {#if selectedJob}
               <div class="intro section-intro job-heading"><p class="eyebrow">JOB DETAIL</p><h1>{humanize(selectedJob.type)}</h1><p>{selectedJob.id} · {selectedJob.repo_id || 'service-wide'} · {selectedJob.cache_ref || 'unscoped'}</p></div>
               <section class="job-state-card" aria-labelledby="job-state-title">
+                {#if selectedJob.observation_refs}<button class="text-action" onclick={() => openObservation(selectedJob?.observation_refs)}>Observe job in Service</button>{/if}
                 <div class="job-state-heading"><div><span class="entity-icon"><Gauge size={18} /></span><div><p class="section-kicker">CURRENT STATE</p><h2 id="job-state-title">{humanize(selectedJob.status)}</h2>{#if selectedJob.sync_health}<p>Sync health: {humanize(selectedJob.sync_health)}</p>{/if}</div></div><StatusChip value={selectedJob.sync_health || selectedJob.status} label={selectedJob.sync_health ? `Sync ${humanize(selectedJob.sync_health)}` : humanize(selectedJob.status)} /></div>
                 <div class="job-progress" aria-label={`Job progress ${selectedJob.completed || 0} of ${selectedJob.steps || 0}`}><span style={`width: ${selectedJob.steps ? Math.min(100, ((selectedJob.completed || 0) / selectedJob.steps) * 100) : 0}%`}></span></div>
 				<dl class="job-metrics"><div><dt>Progress</dt><dd>{selectedJob.completed || 0}/{selectedJob.steps || '—'}</dd></div><div><dt>Throughput</dt><dd>{selectedJob.throughput_per_second ? `${selectedJob.throughput_per_second.toFixed(2)}/s` : 'Not enough data'}</dd></div><div><dt>ETA</dt><dd>{selectedJob.eta_seconds ? `${selectedJob.eta_seconds}s` : 'Not available'}</dd></div><div><dt>Work identity</dt><dd>{selectedJob.work_ref || 'Legacy job'}</dd></div></dl>
@@ -953,6 +1010,7 @@
 
           {#if selectedMaintenance}
             <section class="control-workbench identity-workbench" aria-labelledby="identity-title">
+              {#if selectedMaintenance.observation_refs}<button class="text-action" onclick={() => openObservation(selectedMaintenance?.observation_refs)}>Observe registration in Service</button>{/if}
               <div class="control-heading"><div><span class="large-icon"><GitFork size={22} /></span><div><p class="section-kicker">CANONICAL IDENTITY</p><h2 id="identity-title">{selectedMaintenance.repo_id}</h2><p>Registration <code>{selectedMaintenance.registration_id}</code></p></div></div><StatusChip value={selectedMaintenance.identity_conflict?.kind || (selectedMaintenance.aliases?.length ? 'alias' : 'canonical')} label={selectedMaintenance.identity_conflict ? humanize(selectedMaintenance.identity_conflict.kind) : selectedMaintenance.aliases?.length ? 'Harmless aliases' : 'Canonical'} /></div>
               <dl class="binding-preview"><div><dt>Canonical repository</dt><dd>{selectedMaintenance.repo_id}</dd></div><div><dt>Known aliases</dt><dd>{selectedMaintenance.aliases?.join(', ') || 'None'}</dd></div><div><dt>Legacy registrations</dt><dd>{selectedMaintenance.legacy_registration_ids?.join(', ') || 'None'}</dd></div></dl>
               {#if !selectedMaintenance.identity_conflict && selectedMaintenance.aliases?.length}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>Aliases resolve safely</strong><span>These names point to the same cache-backed repository binding; no policy choice is required.</span></div></div>{/if}
@@ -1027,6 +1085,7 @@
 
         {:else}
           <div class="intro section-intro"><p class="eyebrow">GOVERNANCE & RECOVERY</p><h1>Diagnostics</h1><p>Typed failures, recovered state, exact remediation, and capability boundaries.</p></div>
+          {#each visibleDiagnostics as item}{#if diagnosticObservationRefs(item)}<button class="text-action" onclick={() => openObservation(diagnosticObservationRefs(item))}>Observe {humanize(item.failure_class)} in Service</button>{/if}{/each}
           <div class="filter-bar" aria-label="Diagnostic state filter">{#each ['current', 'recovered', 'all'] as value}<button class:active={diagnosticsFilter === value} aria-pressed={diagnosticsFilter === value} onclick={() => selectDiagnosticFilter(value as 'current' | 'recovered' | 'all')}>{humanize(value)}</button>{/each}</div>
           <section class="repository-section" aria-labelledby="diagnostics-title"><div class="section-heading"><div><p class="section-kicker">TYPED FAILURES</p><h2 id="diagnostics-title">{humanize(diagnosticsFilter)} diagnostics</h2></div><span class="count-badge">{visibleDiagnostics.length}</span></div>{#if visibleDiagnostics.length === 0}<div class="empty-state"><CheckCircle2 size={24} /><h3>No {diagnosticsFilter} diagnostics</h3><p>No matching typed failure is retained.</p></div>{:else}<div class="diagnostic-list">{#each visibleDiagnostics as item}<article class:recovered={!item.current}><div class="diagnostic-heading"><div><span class="entity-icon"><AlertTriangle size={17} /></span><div><strong>{humanize(item.failure_class)}</strong><span>{humanize(item.entity_type)} · {item.entity_id}</span></div></div><StatusChip value={item.current ? item.severity : 'current'} label={item.current ? humanize(item.severity) : 'Recovered'} /></div><p>{item.message}</p>{#if item.remediation}<div class="remediation"><strong>Safe remediation</strong><span>{item.remediation}</span></div>{/if}<div class="command-row"><code>{cliHandoff(item)}</code><button onclick={() => void copyCommand(item)} aria-label={`Copy CLI handoff for ${humanize(item.failure_class)}`}><Clipboard size={15} />{copied === item.id ? 'Copied' : 'Copy CLI'}</button></div></article>{/each}</div>{/if}</section>
           <section class="repository-section" aria-labelledby="capabilities-title"><div class="section-heading"><div><p class="section-kicker">SAFETY CATALOG</p><h2 id="capabilities-title">Capabilities</h2></div><span class="count-badge">{snapshot.capabilities.length}</span></div>{#if snapshot.capabilities.length === 0}<div class="empty-state"><ShieldCheck size={24} /><h3>No capability catalog</h3><p>The daemon did not expose capability metadata.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Capability safety and availability</caption><thead><tr><th>Capability</th><th>Safety</th><th>UI</th><th>CLI</th><th>MCP</th></tr></thead><tbody>{#each snapshot.capabilities as capability}<tr><th scope="row"><span class="table-primary">{capability.id}</span><small>{capability.description}</small></th><td>{humanize(capability.safety_class)}</td><td><StatusChip value={capability.ui_enabled ? 'ready' : 'disabled'} label={capability.ui_enabled ? 'Available' : capability.ui_reason || 'Unavailable'} /></td><td>{capability.cli_enabled ? capability.cli_name || 'Available' : 'Unavailable'}</td><td>{capability.mcp_enabled ? capability.mcp_name || 'Available' : 'Unavailable'}</td></tr>{/each}</tbody></table></div>{/if}</section>
