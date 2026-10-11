@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -365,7 +366,11 @@ func classifySyncCollectionFailure(err error) syncCollectionFailurePolicy {
 	var unavailable gitcode.ErrNetworkUnavailable
 	if errors.As(err, &unavailable) {
 		class := "network_unavailable"
-		if errors.Is(unavailable.Cause, context.DeadlineExceeded) {
+		// HTTP client timeouts need not wrap context.DeadlineExceeded on
+		// every supported Go toolchain. Preserve the typed provider cause,
+		// without treating arbitrary error text as retry authority.
+		var networkError net.Error
+		if errors.Is(unavailable.Cause, context.DeadlineExceeded) || errors.As(unavailable.Cause, &networkError) && networkError.Timeout() {
 			class = "network_timeout"
 		}
 		return syncCollectionFailurePolicy{ErrorClass: class, Transient: unavailable.Status == 0 || unavailable.Status >= 500 && unavailable.Status <= 599}

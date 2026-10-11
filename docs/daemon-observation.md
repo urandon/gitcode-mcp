@@ -266,4 +266,7 @@ deadlines. They retain `network_timeout`/`partial_response` as
 terminal classes. Provider-call accounting includes all four failed attempts
 and verifies that observation adds no request. These terminal controls do not
 qualify a live retry-in-progress stream or an interrupted active retry.
+Timeout classification accepts both a context deadline and a typed timeout
+inside the provider's network error, including on the Go 1.22 baseline. This
+does not broaden status-based retry eligibility or interpret raw error text.
 No release or installed-service upgrade is implied by running the O5 suite.
