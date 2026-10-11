@@ -397,6 +397,11 @@ must survive. Both fixed legacy files must stay absent after restart. Teardown
 unloads the exact fixture and joins its process/socket before deleting private
 files; failure to prove quiescence retains those files and fails qualification.
 Platform output stays bounded in memory and is never printed.
+Only a typed `observation_busy` from the fixture's `Observability.Summary` read
+is retried, at most five attempts with 10 ms spacing inside the same three-second
+call deadline. Execution RPCs, platform writes, cancellation, timeouts and unknown
+failures are never retried. Default deterministic controls hold the actual RPC
+collector read lock, then prove bounded read recovery and joined ownership.
 
 Default tests skip this native operation. On a suitable macOS GUI session,
 explicitly run:

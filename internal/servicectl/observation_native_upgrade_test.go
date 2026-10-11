@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,7 +142,10 @@ func (f *nativeObservationFixture) derive() error {
 		}
 		text = strings.Replace(text, "ExecStart="+quoteSystemdArgument(f.manager.BinaryPath)+" service run", "ExecStart="+strings.Join(quoted, " "), 1)
 		// Never claim or remove the canonical user's RuntimeDirectory.
-		text = strings.Replace(text, "RuntimeDirectory=gitcode-mcp\n", "WorkingDirectory="+quoteSystemdArgument(filepath.Join(f.root, "work"))+"\n", 1)
+		// WorkingDirectory is a path setting, not an ExecStart word. Quotes
+		// become part of the path and make an absolute path invalid in systemd.
+		work := strings.ReplaceAll(filepath.Join(f.root, "work"), "%", "%%")
+		text = strings.Replace(text, "RuntimeDirectory=gitcode-mcp\n", "WorkingDirectory="+work+"\n", 1)
 	}
 	// Only a bounded logical definition passes the managed-output marker to
 	// the daemon. A legacy instance must still report migration_required.
@@ -249,6 +254,9 @@ func TestNativeObservationFixtureDefinitionIsolation(t *testing.T) {
 				if strings.Contains(text, "GITCODE_MCP_OBSERVATION_OUTPUT=bounded-v1") != managed {
 					t.Fatal("derived marker does not match logical definition")
 				}
+				if goos == "linux" && !strings.Contains(text, "\nWorkingDirectory="+strings.ReplaceAll(filepath.Join(root, "work"), "%", "%%")+"\n") {
+					t.Fatal("native systemd working directory is not an unquoted absolute path")
+				}
 			}
 			if writePrivateFile(paths.InstallPath, []byte("unknown definition")) != nil || f.derive() == nil {
 				t.Fatal("unknown logical definition admitted")
@@ -265,6 +273,171 @@ func TestNativeObservationOutputBound(t *testing.T) {
 	}
 	if n, err := b.Write(p); err != nil || n != len(p) || b.Len() != 64<<10 {
 		t.Fatal("native output grew beyond cap")
+	}
+}
+
+// Retry only the observation read's typed admission contention. No execution
+// RPC, platform effect, cancellation or unknown error may be replayed here.
+func nativeObservationCall(ctx context.Context, method string, call func() error) error {
+	for attempt := 0; attempt < 5; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := call()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var query observability.QueryError
+		if method != "Observability.Summary" || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			!errors.As(err, &query) || query.Code != "observation_busy" || attempt == 4 {
+			return err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	panic("unreachable native observation read budget")
+}
+
+func TestNativeObservationReadRetryFence(t *testing.T) {
+	busy := observability.QueryError{Code: "observation_busy", Reason: "ledger_busy"}
+	for _, tc := range []struct {
+		name, method string
+		failure      error
+		failures     int
+		wantCalls    int
+	}{
+		{"success", "Observability.Summary", nil, 0, 1},
+		{"busy_recovers", "Observability.Summary", busy, 2, 3},
+		{"busy_exhausted", "Observability.Summary", busy, 9, 5},
+		{"write_busy", "Jobs.StartFake", busy, 9, 1},
+		{"other_read", "Jobs.List", busy, 9, 1},
+		{"unavailable", "Observability.Summary", observability.QueryError{Code: "observation_unavailable"}, 9, 1},
+		{"raw_text", "Observability.Summary", errors.New("observation_busy"), 9, 1},
+		{"cancelled", "Observability.Summary", errors.Join(context.Canceled, busy), 9, 1},
+		{"timeout", "Observability.Summary", errors.Join(context.DeadlineExceeded, busy), 9, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := nativeObservationCall(context.Background(), tc.method, func() error {
+				calls++
+				if calls <= tc.failures {
+					return tc.failure
+				}
+				return nil
+			})
+			if calls != tc.wantCalls || (tc.failures < tc.wantCalls && err != nil) || (tc.failures >= tc.wantCalls && !errors.Is(err, tc.failure)) {
+				t.Fatal("native read violated exact retry/result fence")
+			}
+		})
+	}
+	for _, duringRead := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if !duringRead {
+			cancel()
+		}
+		calls := 0
+		err := nativeObservationCall(ctx, "Observability.Summary", func() error {
+			calls++
+			cancel()
+			return busy
+		})
+		cancel()
+		want := 0
+		if duringRead {
+			want = 1
+		}
+		if calls != want || !errors.Is(err, context.Canceled) {
+			t.Fatal("native read retried after cancellation")
+		}
+	}
+}
+
+type nativeHeldObservationRead struct {
+	context.Context
+	checks           atomic.Int32
+	entered, release chan struct{}
+}
+
+func (c *nativeHeldObservationRead) Err() error {
+	if c.checks.Add(1) == 2 {
+		close(c.entered)
+		select {
+		case <-c.release:
+		case <-c.Context.Done():
+		}
+	}
+	return c.Context.Err()
+}
+
+func TestNativeObservationActualRPCBusyRecovery(t *testing.T) {
+	collector := maintenanceEventCollector(t)
+	server := RPCServer{Observability: &observability.Reader{Collector: collector}}
+	client := observationTestPeer(t, func(conn net.Conn, request RPCRequest) {
+		_ = json.NewEncoder(conn).Encode(server.handleRequest(context.Background(), request))
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var summary observability.Summary
+	if err := client.Call(ctx, "Observability.Summary", nil, &summary); err != nil {
+		t.Fatal("native healthy RPC control unavailable")
+	}
+	held := &nativeHeldObservationRead{Context: ctx, entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { _, err := collector.QueryContext(held, observability.Filter{}, "", 1); done <- err }()
+	released, joined := false, false
+	defer func() {
+		if !released {
+			close(held.release)
+		}
+		if !joined {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Error("native held reader join failed")
+				}
+			case <-time.After(time.Second):
+				t.Error("native held reader did not join")
+			}
+		}
+	}()
+	select {
+	case <-held.entered:
+	case <-ctx.Done():
+		t.Fatal("native held reader did not enter")
+	}
+	calls := 0
+	err := nativeObservationCall(ctx, "Observability.Summary", func() error {
+		calls++
+		err := client.Call(ctx, "Observability.Summary", nil, &summary)
+		if calls == 1 {
+			var query observability.QueryError
+			if !errors.As(err, &query) || query.Code != "observation_busy" {
+				t.Fatal("actual held reader did not return typed busy")
+			}
+			close(held.release)
+			released = true
+			select {
+			case joinErr := <-done:
+				joined = true
+				if joinErr != nil {
+					t.Fatal("native released reader failed")
+				}
+			case <-ctx.Done():
+				t.Fatal("native released reader did not join")
+			}
+		}
+		return err
+	})
+	if err != nil || calls != 2 || !joined {
+		t.Fatal("native actual typed RPC contention did not recover within read budget")
 	}
 }
 
@@ -446,7 +619,7 @@ func TestNativeObservationUpgradeRecovery(t *testing.T) {
 		t.Helper()
 		callCtx, done := context.WithTimeout(ctx, 3*time.Second)
 		defer done()
-		if client.Call(callCtx, method, params, out) != nil {
+		if nativeObservationCall(callCtx, method, func() error { return client.Call(callCtx, method, params, out) }) != nil {
 			t.Fatal("native fixture RPC failed: " + method)
 		}
 	}
