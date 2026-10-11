@@ -198,6 +198,23 @@ func (c *Collector) Coverage() Coverage {
 	c.absorbLossLocked()
 	return c.coverage
 }
+
+// CoverageContext never waits for the writer or folds loss after cancellation.
+// It does not start ingestion, probe managed output, or create a read worker.
+func (c *Collector) CoverageContext(ctx context.Context) (Coverage, error) {
+	if err := ctx.Err(); err != nil {
+		return Coverage{}, err
+	}
+	if !c.mu.TryLock() {
+		return Coverage{}, QueryError{Code: "observation_busy", Reason: "ledger_busy"}
+	}
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Coverage{}, err
+	}
+	c.absorbLossLocked()
+	return c.coverage, nil
+}
 func (c *Collector) Close(ctx context.Context, workersUnwound bool) bool {
 	c.mu.Lock()
 	if !c.closing {

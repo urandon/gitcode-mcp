@@ -20,6 +20,7 @@ import (
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
@@ -98,6 +99,10 @@ func (s *Server) feedbackReadiness(ctx context.Context) (feedback.Readiness, err
 }
 
 type RPCHandler struct {
+	toolRelease          func()
+	bootstrapDiagnostic  func() StartupDiagnostic
+	toolBootstrap        ToolBootstrap
+	serviceClient        func() (*servicectl.RPCClient, error)
 	svc                  serviceInterface
 	startupDiagnostic    StartupDiagnostic
 	minimal              bool
@@ -114,6 +119,8 @@ type RPCHandler struct {
 }
 
 type Server struct {
+	bootstrapDiagnostic  func() StartupDiagnostic
+	toolBootstrap        ToolBootstrap
 	reader               io.Reader
 	writer               io.Writer
 	stderr               io.Writer
@@ -248,6 +255,10 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 	}
 	var buf bytes.Buffer
 	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, repositoryDocsPolicy: h.repositoryDocsPolicy, repositoryDocsStatus: h.repositoryDocsStatus, repositoryDocsSearch: h.repositoryDocsSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
+	server.serviceClient, server.toolBootstrap = h.serviceClient, h.toolBootstrap
+	if h.bootstrapDiagnostic != nil {
+		server.startupDiagnostic = h.bootstrapDiagnostic()
+	}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -281,34 +292,37 @@ type rpcError struct {
 }
 
 type errorData struct {
-	Code                 string `json:"code"`
-	Message              string `json:"message"`
-	FailureClass         string `json:"failure_class,omitempty"`
-	Operation            string `json:"operation,omitempty"`
-	RepoID               string `json:"repo_id,omitempty"`
-	StartedAt            string `json:"started_at,omitempty"`
-	PID                  int    `json:"pid,omitempty"`
-	CacheRef             string `json:"cache_ref,omitempty"`
-	AccessMode           string `json:"access_mode,omitempty"`
-	Remediation          string `json:"remediation,omitempty"`
-	IdempotencyKey       string `json:"idempotency_key,omitempty"`
-	RemotePath           string `json:"remote_path,omitempty"`
-	WritePhase           string `json:"write_phase,omitempty"`
-	MutationAttempted    *bool  `json:"mutation_attempted,omitempty"`
-	ProviderFailureClass string `json:"provider_failure_class,omitempty"`
+	Observation          *observability.QueryError `json:"observation,omitempty"`
+	Code                 string                    `json:"code"`
+	Message              string                    `json:"message"`
+	FailureClass         string                    `json:"failure_class,omitempty"`
+	Operation            string                    `json:"operation,omitempty"`
+	RepoID               string                    `json:"repo_id,omitempty"`
+	StartedAt            string                    `json:"started_at,omitempty"`
+	PID                  int                       `json:"pid,omitempty"`
+	CacheRef             string                    `json:"cache_ref,omitempty"`
+	AccessMode           string                    `json:"access_mode,omitempty"`
+	Remediation          string                    `json:"remediation,omitempty"`
+	IdempotencyKey       string                    `json:"idempotency_key,omitempty"`
+	RemotePath           string                    `json:"remote_path,omitempty"`
+	WritePhase           string                    `json:"write_phase,omitempty"`
+	MutationAttempted    *bool                     `json:"mutation_attempted,omitempty"`
+	ProviderFailureClass string                    `json:"provider_failure_class,omitempty"`
 }
 
 type toolDefinition struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema inputSchema    `json:"inputSchema"`
-	Meta        map[string]any `json:"_meta,omitempty"`
+	Annotations map[string]bool `json:"annotations,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema inputSchema     `json:"inputSchema"`
+	Meta        map[string]any  `json:"_meta,omitempty"`
 }
 
 type inputSchema struct {
-	Type       string                `json:"type"`
-	Properties map[string]schemaProp `json:"properties"`
-	Required   []string              `json:"required,omitempty"`
+	AdditionalProperties *bool                 `json:"additionalProperties,omitempty"`
+	Type                 string                `json:"type"`
+	Properties           map[string]schemaProp `json:"properties"`
+	Required             []string              `json:"required,omitempty"`
 }
 
 type schemaProp struct {
@@ -902,6 +916,11 @@ func (s *Server) toolsList(ctx context.Context, req request) {
 		}
 		definition := tool.definition
 		if name == "submit_feedback" {
+			if s.toolBootstrap != nil && s.svc == nil {
+				definition.Description += " Runtime readiness is not evaluated during discovery; call feedback_status explicitly."
+				tools = append(tools, definition)
+				continue
+			}
 			readiness, err := s.feedbackReadiness(ctx)
 			if err != nil {
 				readiness = feedback.Readiness{
@@ -942,6 +961,12 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
 		return
 	}
+	if _, observation := observationToolDefinition(params.Name); observation {
+		if err := decodeObservationCall(*req.Params, &params); err != nil {
+			s.writeObservationError(req.ID, err)
+			return
+		}
+	}
 
 	if s.toolDisabledByPolicy(params.Name) {
 		s.writeToolDisabledByPolicy(req.ID, params.Name)
@@ -962,6 +987,29 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	if !ok {
 		s.writeError(req.ID, -32601, "Method not found", &errorData{Code: "unknown_tool", Message: fmt.Sprintf("unknown tool %q", params.Name)})
 		return
+	}
+	if s.toolBootstrap != nil && toolNeedsBootstrap(params.Name) {
+		dependencies, err := s.toolBootstrap(ctx, params.Name, args)
+		if err != nil {
+			var startup BootstrapError
+			if params.Name == "doctor" && errors.As(err, &startup) {
+				s.startupDiagnostic = startup.Diagnostic
+				tool.handler(ctx, req.ID, args)
+				return
+			}
+			s.writeOperationalError(req.ID, err, domainErrorContext{Operation: params.Name})
+			return
+		}
+		if dependencies != nil && dependencies.toolRelease != nil {
+			defer dependencies.toolRelease()
+		}
+		if dependencies == nil || dependencies.svc == nil {
+			s.writeOperationalError(req.ID, errors.New("tool dependency bootstrap unavailable"), domainErrorContext{Operation: params.Name})
+			return
+		}
+		s.svc = dependencies.svc
+		s.ragStatus, s.ragSearch = dependencies.ragStatus, dependencies.ragSearch
+		s.repositoryDocsPolicy, s.repositoryDocsStatus, s.repositoryDocsSearch = dependencies.repositoryDocsPolicy, dependencies.repositoryDocsStatus, dependencies.repositoryDocsSearch
 	}
 	tool.handler(ctx, req.ID, args)
 }
@@ -984,6 +1032,9 @@ var preWriteToolListOrder = []string{
 	"diff_snapshot",
 	"repo_status",
 	"service_status",
+	"service_observability",
+	"service_metrics",
+	"service_events",
 	"maintenance_status",
 	"maintenance_plan",
 	"enable_cache_maintenance",
@@ -1016,6 +1067,9 @@ func buildToolListOrder() []string {
 }
 
 func toolDefinitionByName(name string) toolDefinition {
+	if definition, ok := observationToolDefinition(name); ok {
+		return definition
+	}
 	for _, def := range toolDefs {
 		if def.Name == name {
 			return def
@@ -1058,6 +1112,9 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 
 func (s *Server) toolRegistry() toolRegistry {
 	registry := toolRegistry{}
+	registerTool(registry, "service_observability", s.callServiceObservability)
+	registerTool(registry, "service_metrics", s.callServiceMetrics)
+	registerTool(registry, "service_events", s.callServiceEvents)
 	if s.minimal {
 		registerTool(registry, "doctor", s.callDoctor)
 		return registry
@@ -2595,8 +2652,13 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 	var schemaErr *cache.SchemaVersionError
 	var parentMissing service.ErrParentPRNotCached
 	var rpcErr servicectl.RPCDomainError
+	var bootstrapErr BootstrapError
 
 	switch {
+	case errors.As(err, &bootstrapErr):
+		data.Code = bootstrapErr.Diagnostic.ErrorClass
+		data.Message = bootstrapErr.Diagnostic.Message
+		data.Remediation = bootstrapErr.Diagnostic.Remediation
 	case errors.As(err, &notFound) && notFound.Kind == "repository":
 		data.Code = "missing_repository_binding"
 		data.Message = fmt.Sprintf("repository binding %q is not configured", firstNonEmpty(data.RepoID, notFound.ID))

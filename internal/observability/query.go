@@ -1,20 +1,34 @@
 package observability
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"strings"
 )
 
 type Filter struct {
-	Stream    string `json:"stream,omitempty"`
-	Severity  string `json:"severity,omitempty"`
-	Component string `json:"component,omitempty"`
-	Code      Code   `json:"code,omitempty"`
+	Stream                  string `json:"stream,omitempty"`
+	Severity                string `json:"severity,omitempty"`
+	Component               string `json:"component,omitempty"`
+	Code                    Code   `json:"code,omitempty"`
+	Phase                   string `json:"phase,omitempty"`
+	Collection              string `json:"collection,omitempty"`
+	Outcome                 string `json:"outcome,omitempty"`
+	FailureClass            string `json:"failure_class,omitempty"`
+	JobRef                  string `json:"job_ref,omitempty"`
+	RegistrationRef         string `json:"registration_ref,omitempty"`
+	CacheRef                string `json:"cache_ref,omitempty"`
+	RepoRef                 string `json:"repo_ref,omitempty"`
+	CorrelationRef          string `json:"correlation_ref,omitempty"`
+	StageRef                string `json:"stage_ref,omitempty"`
+	SourceRef               string `json:"source_ref,omitempty"`
+	PreviousRegistrationRef string `json:"previous_registration_ref,omitempty"`
+	Since                   string `json:"since,omitempty"`
+	Until                   string `json:"until,omitempty"`
 }
 type cursor struct {
 	Signature  string `json:"h"`
@@ -31,7 +45,8 @@ type QueryError struct {
 	Latest   uint64 `json:"latest,omitempty"`
 }
 
-func (e QueryError) Error() string { return e.Code + ": " + e.Reason }
+func (e QueryError) Error() string          { return e.Code + ": " + e.Reason }
+func (e QueryError) DiagnosticCode() string { return e.Code }
 
 type Page struct {
 	Events   []Event  `json:"events"`
@@ -44,41 +59,54 @@ func normalizeFilter(f Filter) (Filter, string, error) {
 	f.Stream = strings.ToLower(strings.TrimSpace(f.Stream))
 	f.Severity = strings.ToLower(strings.TrimSpace(f.Severity))
 	f.Component = strings.ToLower(strings.TrimSpace(f.Component))
-	if f.Stream != "" && f.Stream != "stdout" && f.Stream != "stderr" {
-		return f, "", errors.New("invalid filter")
-	}
-	if f.Severity != "" && f.Severity != "info" && f.Severity != "warning" && f.Severity != "error" {
-		return f, "", errors.New("invalid filter")
-	}
-	if f.Component != "" {
-		known := false
-		for _, t := range catalog {
-			known = known || f.Component == t.component
-		}
-		if !known {
-			return f, "", errors.New("invalid filter")
-		}
-	}
-	if f.Code != "" {
-		if _, ok := catalog[f.Code]; !ok {
-			return f, "", errors.New("invalid filter")
-		}
+	var err error
+	f, err = validateFilter(f)
+	if err != nil {
+		return f, "", err
 	}
 	b, _ := json.Marshal(f)
 	sum := sha256.Sum256(b)
 	return f, hex.EncodeToString(sum[:16]), nil
 }
 func (f Filter) match(e Event) bool {
-	return (f.Stream == "" || e.Stream == f.Stream) && (f.Severity == "" || e.Severity == f.Severity) && (f.Component == "" || e.Component == f.Component) && (f.Code == "" || e.Code == f.Code)
+	return f.matchSelectors(e) && (f.Since == "" || !e.OccurredAt.Before(parseFilterTime(f.Since))) && (f.Until == "" || !e.OccurredAt.After(parseFilterTime(f.Until)))
 }
 func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
+	return c.query(context.Background(), f, token, limit, false)
+}
+
+// QueryContext is the transport read boundary. A busy collector is unavailable,
+// not a reason to block a poll or leave a timeout goroutine behind. Validation
+// precedes observation access; formatting uses an independent retained copy.
+func (c *Collector) QueryContext(ctx context.Context, f Filter, token string, limit int) (Page, error) {
+	return c.query(ctx, f, token, limit, true)
+}
+
+func (c *Collector) query(ctx context.Context, f Filter, token string, limit int, nonblocking bool) (Page, error) {
 	f, fingerprint, err := normalizeFilter(f)
 	if err != nil || limit < 1 || limit > MaxPageEvents {
 		return Page{}, QueryError{Code: "invalid_query", Reason: "unsupported_filter_or_limit"}
 	}
-	c.mu.Lock()
+	supplied, err := readCursor(token, fingerprint)
+	if err != nil {
+		return Page{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Page{}, err
+	}
+	if nonblocking {
+		if !c.mu.TryLock() {
+			return Page{}, QueryError{Code: "observation_busy", Reason: "ledger_busy"}
+		}
+	} else {
+		c.mu.Lock()
+	}
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return Page{}, err
+	}
 	c.absorbLossLocked()
-	events := c.events
+	events := append([]Event(nil), c.events...)
 	generation := c.generation
 	coverage := c.coverage
 	key := c.cursorKey
@@ -99,16 +127,7 @@ func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
 	}
 	cur := cursor{Schema: 1, Generation: generation, Filter: fingerprint, Loss: coverage.LossEpoch, Position: earliest - 1}
 	if token != "" {
-		if len(token) > 512 {
-			return Page{}, QueryError{Code: "invalid_cursor", Reason: "malformed"}
-		}
-		b, e := base64.RawURLEncoding.DecodeString(token)
-		if e != nil || decodeStrict(b, &cur) != nil || cur.Schema != 1 || !hexID.MatchString(cur.Generation) || !hexID.MatchString(cur.Filter) {
-			return Page{}, QueryError{Code: "invalid_cursor", Reason: "malformed"}
-		}
-		if cur.Filter != fingerprint {
-			return Page{}, QueryError{Code: "invalid_cursor", Reason: "filter_changed"}
-		}
+		cur = supplied
 		if !validSignature(cur, key) {
 			return Page{}, QueryError{Code: "invalid_cursor", Reason: "foreign_or_modified"}
 		}
@@ -125,6 +144,9 @@ func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
 	p := Page{Events: []Event{}, Coverage: coverage}
 	scanned, bytes := 0, 0
 	for _, e := range events {
+		if err := ctx.Err(); err != nil {
+			return Page{}, err
+		}
 		if e.Sequence <= cur.Position {
 			continue
 		}
@@ -146,7 +168,31 @@ func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
 	cur.Signature = signCursor(cur, key)
 	b, _ := json.Marshal(cur)
 	p.Cursor = base64.RawURLEncoding.EncodeToString(b)
+	if err := ctx.Err(); err != nil {
+		return Page{}, err
+	}
 	return p, nil
+}
+
+func readCursor(token, fingerprint string) (cursor, error) {
+	var supplied cursor
+	if token == "" {
+		return supplied, nil
+	}
+	if len(token) > 512 {
+		return supplied, QueryError{Code: "invalid_cursor", Reason: "malformed"}
+	}
+	b, e := base64.RawURLEncoding.DecodeString(token)
+	if e != nil || DecodeReadRequest(b, &supplied) != nil || supplied.Schema != 1 || !hexID.MatchString(supplied.Generation) || !hexID.MatchString(supplied.Filter) || len(supplied.Signature) != 64 {
+		return supplied, QueryError{Code: "invalid_cursor", Reason: "malformed"}
+	}
+	if _, err := hex.DecodeString(supplied.Signature); err != nil {
+		return supplied, QueryError{Code: "invalid_cursor", Reason: "malformed"}
+	}
+	if supplied.Filter != fingerprint {
+		return supplied, QueryError{Code: "invalid_cursor", Reason: "filter_changed"}
+	}
+	return supplied, nil
 }
 func signCursor(cur cursor, key string) string {
 	cur.Signature = ""

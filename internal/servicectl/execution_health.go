@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -73,20 +74,31 @@ func healthRemoteCollection(remote string) string {
 // job/registry truth. It never uses observation storage/counters as authority.
 // Missing or oversized evidence is not a healthy empty result.
 func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.ExecutionHealth {
+	out, _ := m.ExecutionHealthContext(context.Background(), at)
+	return out
+}
+
+func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time.Time) (observability.ExecutionHealth, error) {
+	if err := ctx.Err(); err != nil {
+		return observability.ExecutionHealth{}, err
+	}
 	if m == nil || m.jobs == nil {
-		return observability.UnavailableExecutionHealth(at, "authority_missing")
+		return observability.UnavailableExecutionHealth(at, "authority_missing"), nil
 	}
 	if !m.mu.TryLock() {
-		return observability.UnavailableExecutionHealth(at, "authority_busy")
+		return observability.UnavailableExecutionHealth(at, "authority_busy"), nil
 	}
 	if !m.jobs.mu.TryLock() {
 		m.mu.Unlock()
-		return observability.UnavailableExecutionHealth(at, "authority_busy")
+		return observability.UnavailableExecutionHealth(at, "authority_busy"), nil
 	}
 	records := make([]healthAuthorityRecord, 0, min(len(m.jobs.jobs)*2, observability.MaxHealthEvidence))
 	limited := false
 	visited := 0
 	visit := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		visited++
 		if visited > observability.MaxHealthEvidence {
 			limited = true
@@ -373,12 +385,22 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 	}
 	m.jobs.mu.Unlock()
 	m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return observability.ExecutionHealth{}, err
+	}
 	if limited {
-		return observability.UnavailableExecutionHealth(at, "evidence_limit")
+		return observability.UnavailableExecutionHealth(at, "evidence_limit"), nil
 	}
 	evidence := make([]observability.HealthEvidence, 0, len(records))
 	for _, r := range records {
+		if err := ctx.Err(); err != nil {
+			return observability.ExecutionHealth{}, err
+		}
 		var cohort observability.Ref
+		var source observability.Ref
+		if r.kind == "repository_docs" {
+			source = observability.KnownRef("source", r.source)
+		}
 		if boundedHealthIdentity(r) {
 			key := strings.Join([]string{r.kind, r.cache, r.repo, r.registration, r.source, r.collection}, "\x00")
 			if r.phase == "inspection" {
@@ -387,7 +409,7 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 			cohort = observability.KnownRef("correlation", key)
 		}
 		evidence = append(evidence, observability.HealthEvidence{Cohort: cohort, Origin: r.kind, Collection: r.collection, Phase: r.phase, Signal: r.signal, Reason: r.reason, Coverage: r.coverage, At: r.at, LastSuccess: r.lastSuccess, RetryAfter: r.retry,
-			Refs: observability.Context{Job: observability.KnownRef("job", r.job), Registration: observability.KnownRef("registration", r.registration), Cache: observability.KnownRef("cache", r.cache), Repo: observability.KnownRef("repo", r.repo)}})
+			Refs: observability.Context{Job: observability.KnownRef("job", r.job), Registration: observability.KnownRef("registration", r.registration), Cache: observability.KnownRef("cache", r.cache), Repo: observability.KnownRef("repo", r.repo), Source: source}})
 	}
-	return observability.ProjectExecutionHealth(at, evidence)
+	return observability.ProjectExecutionHealthContext(ctx, at, evidence)
 }

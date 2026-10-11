@@ -199,6 +199,21 @@ preserves original events without replaying job/provider/commit throughput.
 Registered observability polling emits no self-events; unsupported/user-prefix
 paths remain observable ordinary requests. Synthetic control, cookie, body,
 header, request-id and URL sentinels must be absent from retained evidence.
+Shared observation qualification uses actual private TCP IPC plus CLI, stdio,
+normal/minimal HTTP/SSE, and authenticated Admin routes. Tests reject malformed
+arguments before connection/retained reads, hold actual snapshot locks, cancel
+silent established peers, fence whole-filter cursors, and compare serialized
+DTOs including full sampled 60-minute metric windows above 64 KiB. IPC pipeline
+framing and shutdown-handler joining are explicit invariants. Entrypoint fault
+fixtures cover missing/damaged/old/future/cache-parent state and actual adapter
+construction failure: discovery and observation do not create/migrate the cache
+or resolve credentials. Later explicit live writes use offline HTTP fixtures to
+prove provider confirmation, audit, and one POST on idempotent replay; absent
+credentials/offline requests fail closed rather than selecting fixture writes.
+Safe-copy fixtures accept only returned catalog/incident evidence, reject raw
+free-form reasons, and preserve omitted unknown authority references. The
+dedicated UI and integrated rollout remain separately qualified cohorts; see
+[Daemon observation](daemon-observation.md).
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"sort"
 	"time"
 )
@@ -33,6 +34,7 @@ type Incident struct {
 	RegistrationRef string     `json:"registration_ref,omitempty"`
 	CacheRef        string     `json:"cache_ref,omitempty"`
 	RepoRef         string     `json:"repo_ref,omitempty"`
+	SourceRef       string     `json:"source_ref,omitempty"`
 	Coverage        string     `json:"coverage"`
 }
 type ExecutionHealth struct {
@@ -68,12 +70,23 @@ type incidentCohort struct {
 // reconstructed from retained durable evidence on every read, also after boot.
 // This deliberately makes no claim about pruned jobs or unobserved work.
 func ProjectExecutionHealth(at time.Time, evidence []HealthEvidence) ExecutionHealth {
+	out, _ := ProjectExecutionHealthContext(context.Background(), at, evidence)
+	return out
+}
+
+func ProjectExecutionHealthContext(ctx context.Context, at time.Time, evidence []HealthEvidence) (ExecutionHealth, error) {
+	if err := ctx.Err(); err != nil {
+		return ExecutionHealth{}, err
+	}
 	if len(evidence) > MaxHealthEvidence {
-		return UnavailableExecutionHealth(at, "evidence_limit")
+		return UnavailableExecutionHealth(at, "evidence_limit"), nil
 	}
 	out := ExecutionHealth{Schema: 1, ObservedAt: at.UTC(), State: "healthy", Coverage: "retained", Reason: "durable_retention_boundary", Source: "durable_jobs_and_maintenance", Limit: MaxIncidents, Incidents: []Incident{}}
 	cohorts := make(map[string]*incidentCohort)
 	for _, e := range evidence {
+		if err := ctx.Err(); err != nil {
+			return ExecutionHealth{}, err
+		}
 		if !validHealthEvidence(e) {
 			out.Coverage, out.Reason = "partial", "invalid_authority_evidence"
 			continue
@@ -111,12 +124,15 @@ func ProjectExecutionHealth(at time.Time, evidence []HealthEvidence) ExecutionHe
 		c.hasProblem = true
 	}
 	for key, c := range cohorts {
+		if err := ctx.Err(); err != nil {
+			return ExecutionHealth{}, err
+		}
 		if !c.hasProblem {
 			continue
 		}
 		e := c.problem
 		i := Incident{IncidentRef: key, Origin: e.Origin, Collection: e.Collection, Phase: e.Phase, State: "active", Reason: e.Reason, FirstObservedAt: c.first, LastObservedAt: c.last,
-			JobRef: e.Refs.Job.value, RegistrationRef: e.Refs.Registration.value, CacheRef: e.Refs.Cache.value, RepoRef: e.Refs.Repo.value, Coverage: "retained"}
+			JobRef: e.Refs.Job.value, RegistrationRef: e.Refs.Registration.value, CacheRef: e.Refs.Cache.value, RepoRef: e.Refs.Repo.value, SourceRef: e.Refs.Source.value, Coverage: "retained"}
 		if e.Coverage == "partial" {
 			i.Coverage = "partial"
 		}
@@ -160,7 +176,10 @@ func ProjectExecutionHealth(at time.Time, evidence []HealthEvidence) ExecutionHe
 	if out.State == "healthy" && out.Coverage == "partial" {
 		out.State = "unknown"
 	}
-	return out
+	if err := ctx.Err(); err != nil {
+		return ExecutionHealth{}, err
+	}
+	return out, nil
 }
 
 func laterHealthTie(a, b HealthEvidence) bool {
@@ -237,5 +256,5 @@ func validHealthEvidence(e HealthEvidence) bool {
 	default:
 		return false
 	}
-	return validRef(e.Refs.Job.value, "job") && validRef(e.Refs.Registration.value, "registration") && validRef(e.Refs.Cache.value, "cache") && validRef(e.Refs.Repo.value, "repo") && validRef(e.Refs.Correlation.value, "correlation")
+	return validRef(e.Refs.Job.value, "job") && validRef(e.Refs.Registration.value, "registration") && validRef(e.Refs.Cache.value, "cache") && validRef(e.Refs.Repo.value, "repo") && validRef(e.Refs.Correlation.value, "correlation") && validRef(e.Refs.Source.value, "source") && (e.Refs.Source.value == "" || e.Origin == "repository_docs")
 }

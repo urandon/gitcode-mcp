@@ -18,6 +18,7 @@ import (
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/feedback"
+	"gitcode-mcp/internal/observability"
 )
 
 type adminMaintenanceEntry struct {
@@ -349,7 +350,8 @@ func canonicalAdminCachePath(path string) string {
 
 func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64, binaryVersion, binaryCommit string, schemaMin, schemaMax int) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
 	view := adminhttp.CacheObservation{
-		CacheRef: publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
+		ObservationRefs: observability.ProjectEntityRefs(observability.Context{Cache: observability.KnownRef("cache", group.uuid)}),
+		CacheRef:        publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
 		StorageMode: "managed", Readiness: "unavailable", ExpectedSchemaVersion: cache.CurrentSchemaVersion(),
 		DaemonBinaryVersion: binaryVersion, DaemonBinaryCommit: binaryCommit,
 	}
@@ -381,6 +383,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	if identity, identityErr := store.CacheIdentity(ctx); identityErr == nil && identity.UUID != "" {
 		group.uuid = identity.UUID
 		view.CacheRef = publicCacheRef(identity.UUID, group.path)
+		view.ObservationRefs = observability.ProjectEntityRefs(observability.Context{Cache: observability.KnownRef("cache", identity.UUID)})
 		view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, identity.UUID)
 	}
 	view.Readiness = "ready"
@@ -422,7 +425,8 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 			continue
 		}
 		view.Repositories = append(view.Repositories, adminhttp.RepositoryObservation{
-			RepoID: item.entry.RepoID, BindingState: "registration_without_binding",
+			ObservationRefs: observability.ProjectEntityRefs(observability.Context{Repo: observability.KnownRef("repo", item.entry.RepoID)}),
+			RepoID:          item.entry.RepoID, BindingState: "registration_without_binding",
 			Coverage:  coverageFromEntry(item.entry, adminhttp.SecondaryCount{}, 0, 0),
 			Execution: executionFromEntry(item.entry, jobs),
 		})
@@ -433,7 +437,8 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 
 func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, repository cache.RepositoryBinding, entry *MaintenanceEntry, jobs []Job, vectorByteCeiling int64) adminhttp.RepositoryObservation {
 	view := adminhttp.RepositoryObservation{
-		RepoID: repository.RepoID, DisplayName: repository.DisplayName, Aliases: append([]string(nil), repository.Aliases...),
+		ObservationRefs: observability.ProjectEntityRefs(observability.Context{Repo: observability.KnownRef("repo", repository.RepoID)}),
+		RepoID:          repository.RepoID, DisplayName: repository.DisplayName, Aliases: append([]string(nil), repository.Aliases...),
 		BindingState: "bound",
 	}
 	for _, scope := range repository.Scopes {
@@ -495,7 +500,7 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 	filter := cache.RepositoryDocRevisionSetFilter{RepoID: repoID}
 	if entry != nil {
 		for _, source := range entry.RepositoryDocsSources {
-			view.Sources = append(view.Sources, adminhttp.RepositoryDocumentationSource{SourceID: source.SourceRegistrationID, SourceGeneration: source.SourceRegistrationGeneration, State: source.State, GitStoreRef: source.GitStoreRef, WorktreeRef: source.WorktreeRef, CommitOID: source.CommitOID, PolicyHash: source.PolicyHash})
+			view.Sources = append(view.Sources, adminhttp.RepositoryDocumentationSource{ObservationRefs: observability.ProjectEntityRefs(observability.Context{Source: observability.KnownRef("source", source.SourceRegistrationID)}), SourceID: source.SourceRegistrationID, SourceGeneration: source.SourceRegistrationGeneration, State: source.State, GitStoreRef: source.GitStoreRef, WorktreeRef: source.WorktreeRef, CommitOID: source.CommitOID, PolicyHash: source.PolicyHash})
 		}
 		sort.Slice(view.Sources, func(i, j int) bool { return view.Sources[i].SourceID < view.Sources[j].SourceID })
 	}
@@ -504,6 +509,7 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 		view.Registered = true
 		view.RegistrationID = entry.RegistrationID
 		view.SourceID = state.SourceRegistrationID
+		view.ObservationRefs = observability.ProjectEntityRefs(observability.Context{Source: observability.KnownRef("source", state.SourceRegistrationID), Registration: observability.KnownRef("registration", entry.RegistrationID)})
 		view.SourceGeneration = state.SourceRegistrationGeneration
 		view.ReconcileState = state.State
 		view.TargetCommitOID = state.CommitOID
@@ -764,7 +770,8 @@ func executionFromEntry(entry MaintenanceEntry, jobs []Job) adminhttp.ExecutionO
 func adminJobObservation(job Job) adminhttp.JobObservation {
 	now := time.Now().UTC()
 	view := adminhttp.JobObservation{
-		ID: job.ID, Type: job.Type, CacheRef: publicCacheRef(job.CacheUUID, ""), RepoID: job.RepoID,
+		ObservationRefs: observability.ProjectEntityRefs(observability.Context{Job: observability.KnownRef("job", job.ID), Registration: observability.KnownRef("registration", job.RegistrationID), Cache: observability.KnownRef("cache", job.CacheUUID), Repo: observability.KnownRef("repo", job.RepoID), Source: observability.KnownRef("source", job.SourceRegistrationID)}),
+		ID:              job.ID, Type: job.Type, CacheRef: publicCacheRef(job.CacheUUID, ""), RepoID: job.RepoID,
 		ProfileID: job.ProfileID, NamespaceID: job.NamespaceID, RegistrationID: job.RegistrationID,
 		Status: job.Status, CreatedAt: job.CreatedAt, StartedAt: job.StartedAt, UpdatedAt: job.UpdatedAt,
 		FinishedAt: job.FinishedAt, Steps: job.Steps, Completed: job.Completed, FailureClass: job.ErrorClass,
@@ -860,7 +867,8 @@ func publicWorkRef(value string) string {
 
 func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceObservation {
 	view := adminhttp.MaintenanceObservation{
-		RegistrationID: entry.RegistrationID, CacheRef: publicCacheRef(entry.CacheUUID, ""), RepoID: entry.RepoID,
+		ObservationRefs: observability.ProjectEntityRefs(observability.Context{Registration: observability.KnownRef("registration", entry.RegistrationID), Cache: observability.KnownRef("cache", entry.CacheUUID), Repo: observability.KnownRef("repo", entry.RepoID)}),
+		RegistrationID:  entry.RegistrationID, CacheRef: publicCacheRef(entry.CacheUUID, ""), RepoID: entry.RepoID,
 		Aliases: append([]string(nil), entry.Aliases...), LegacyRegistrationIDs: append([]string(nil), entry.LegacyRegistrationIDs...),
 		NamespaceID: entry.NamespaceID, Enabled: entry.Enabled, State: entry.State, Generation: entry.Generation,
 		NextReconcileAt: adminTimePointer(entry.NextReconcileAt),

@@ -2591,9 +2591,7 @@ func TestStartupDiagnosticInjection(t *testing.T) {
 	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass == "" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
 		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
-		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
-	}
+	assertMinimalObservationTools(t, list.Tools)
 
 	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
 	doctorID := json.RawMessage(`"doctor"`)
@@ -2659,9 +2657,7 @@ func TestStartupDiagnosticSchemaIncompatible(t *testing.T) {
 	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "schema_incompatible" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
 		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
-		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
-	}
+	assertMinimalObservationTools(t, list.Tools)
 
 	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
 	doctorID := json.RawMessage(`"doctor"`)
@@ -2725,9 +2721,7 @@ func TestStartupDiagnosticCacheLockContention(t *testing.T) {
 	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "cache_lock_contention" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
 		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
-		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
-	}
+	assertMinimalObservationTools(t, list.Tools)
 
 	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
 	doctorID := json.RawMessage(`"doctor"`)
@@ -2797,9 +2791,7 @@ func TestStartupDiagnosticStartupFailure(t *testing.T) {
 	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "startup-failure" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
 		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
 	}
-	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
-		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
-	}
+	assertMinimalObservationTools(t, list.Tools)
 
 	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
 	doctorID := json.RawMessage(`"doctor"`)
@@ -2872,9 +2864,7 @@ func TestStartupDiagnosticAllScenarios(t *testing.T) {
 			if !strings.Contains(list.StartupDiagnostic.Remediation, tt.remediation) {
 				t.Fatalf("tools/list startup diagnostic remediation=%q does not contain %q", list.StartupDiagnostic.Remediation, tt.remediation)
 			}
-			if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
-				t.Fatalf("minimal tools/list returned tools=%+v", list.Tools)
-			}
+			assertMinimalObservationTools(t, list.Tools)
 
 			doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
 			doctorID := json.RawMessage(`"doctor"`)

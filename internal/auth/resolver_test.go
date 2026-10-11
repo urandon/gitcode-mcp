@@ -3,7 +3,10 @@ package auth
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"gitcode-mcp/internal/config"
 )
@@ -139,5 +142,84 @@ func TestCredentialResolverEnvOverKeyring(t *testing.T) {
 	}
 	if result.Token != "env-token" {
 		t.Fatalf("expected token 'env-token', got %q", result.Token)
+	}
+}
+
+type blockingCredentialFixture struct {
+	calls   atomic.Int64
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingCredentialFixture) Resolve(ctx context.Context, _ config.EffectiveConfig) (config.SecretString, config.CredentialStatus, error) {
+	p.calls.Add(1)
+	close(p.started)
+	select {
+	case <-p.release:
+		return config.NewSecretString("synthetic-private-credential"), config.CredentialStatus{Source: "mock-keyring", Present: true}, nil
+	case <-ctx.Done():
+		return config.SecretString{}, config.CredentialStatus{}, ctx.Err()
+	}
+}
+func (p *blockingCredentialFixture) Status(ctx context.Context, eff config.EffectiveConfig) config.CredentialStatus {
+	_, status, _ := p.Resolve(ctx, eff)
+	return status
+}
+
+func TestCredentialResolverConcurrentLazyFirstUseDoesNotWaitOrCacheBusy(t *testing.T) {
+	p := &blockingCredentialFixture{started: make(chan struct{}), release: make(chan struct{})}
+	r := NewCredentialResolverWithProvider(p)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan Result, 1)
+	go func() { done <- r.Resolve(ctx, config.EffectiveConfig{}) }()
+	select {
+	case <-p.started:
+	case <-time.After(time.Second):
+		t.Fatal("credential fixture did not start")
+	}
+	var wg sync.WaitGroup
+	var wrong atomic.Bool
+	start := time.Now()
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result := r.Status(context.Background(), config.EffectiveConfig{})
+			if result.Present || result.Token != "" || result.ErrorClass != "credential-resolution-busy" {
+				wrong.Store(true)
+			}
+		}()
+	}
+	wg.Wait()
+	if wrong.Load() || p.calls.Load() != 1 || time.Since(start) > time.Second {
+		t.Error("concurrent first use waited, amplified credential calls or cached busy state")
+	}
+	close(p.release)
+	select {
+	case result := <-done:
+		if !result.Present {
+			t.Fatal("owning credential resolution failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("credential owner did not join")
+	}
+	if !r.Status(context.Background(), config.EffectiveConfig{}).Present || p.calls.Load() != 1 {
+		t.Fatal("completed credential result was not reused")
+	}
+}
+
+func TestCredentialResolverCancelledReadDoesNotResolveOrCacheAbsence(t *testing.T) {
+	src := newTestSource()
+	src.env[config.EnvToken] = "synthetic-private-credential"
+	r := NewCredentialResolverWithProvider(config.EnvCredentialProvider{Source: src})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := r.Resolve(ctx, config.EffectiveConfig{})
+	if result.Present || result.ErrorClass != "credential-resolution-cancelled" || r.result != nil {
+		t.Fatal("cancelled resolution cached absence or ignored context")
+	}
+	if !r.Resolve(context.Background(), config.EffectiveConfig{}).Present {
+		t.Fatal("cancelled first use prevented later explicit resolution")
 	}
 }
