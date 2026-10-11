@@ -41,7 +41,7 @@ test('actual failed job survives durable reload and recovers without observation
     });
     // Never echo arbitrary fixture output or local coordinates into reports.
     child.stderr.resume();
-    const origins: Array<{ url: string; state: string }> = [];
+    const origins: Array<{ url: string; state: string; job_ref: string }> = [];
     lines = createInterface({ input: child.stdout });
     let finished = false;
     let exitCode: number | null = null;
@@ -52,7 +52,7 @@ test('actual failed job survives durable reload and recovers without observation
       if (!line.startsWith('O5_BROWSER ')) return;
       try {
         const value = JSON.parse(line.slice('O5_BROWSER '.length));
-        if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(value.url) || !['degraded', 'healthy'].includes(value.state)) { protocolFailed = true; return; }
+        if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(value.url) || !['degraded', 'healthy'].includes(value.state) || !/^job-[a-f0-9]{32}$/.test(value.job_ref)) { protocolFailed = true; return; }
         origins.push(value);
       } catch { protocolFailed = true; }
     });
@@ -103,9 +103,10 @@ test('actual failed job survives durable reload and recovers without observation
       expect(Buffer.byteLength(JSON.stringify(copy), 'utf8')).toBeLessThanOrEqual(16 * 1024);
       expect(await page.locator('body').innerText()).not.toContain('synthetic-private');
       expect(JSON.stringify(copy)).not.toContain('synthetic-private');
-      // Select only the retained terminal event for the incident's exact
-      // opaque job, not an arbitrary sibling or the later recovery job.
-      await page.goto(origin.url + '/?view=Service&obs_code=job_terminal&obs_job_ref=' + incident.job_ref);
+      // The recovery phase must select its actual new job, not fall back to
+      // the older succeeded sibling or the original failed incident job.
+      expect(origin.job_ref === incident.job_ref).toBe(phase < 2);
+      await page.goto(origin.url + '/?view=Service&obs_code=job_terminal&obs_job_ref=' + origin.job_ref);
       const terminal = page.getByRole('list', { name: 'Retained catalog events' }).getByRole('button', { name: 'Job Terminal', exact: true });
       await readyContext(page);
       await expect(terminal).toHaveCount(1);
@@ -114,13 +115,14 @@ test('actual failed job survives durable reload and recovers without observation
       await readyContext(page);
       await copyButton.click();
       const eventCopy = JSON.parse(await page.evaluate(() => (window as any).__copiedO5));
-      expect(eventCopy.event.job_ref).toBe(incident.job_ref);
+      expect(eventCopy.event.job_ref).toBe(origin.job_ref);
+      expect(eventCopy.event.boot_id).toBe(summary.collector.boot_id);
       expect(eventCopy.event.repo_ref).toBe(incident.repo_ref);
       expect(eventCopy.event.cache_ref).toBe(incident.cache_ref);
       expect(eventCopy.event.code).toBe('job_terminal');
       expect(eventCopy.event.phase).toBe('completion');
-      expect(eventCopy.event.outcome).toBe('failed');
-      expect(eventCopy.event.failure_class).toBe('operation_failed'); // #191; not provider-specific qualification.
+      expect(eventCopy.event.outcome).toBe(phase < 2 ? 'failed' : 'succeeded');
+      expect(eventCopy.event.failure_class).toBe(phase < 2 ? 'operation_failed' : undefined); // #191; not provider-specific qualification.
       expect(eventCopy.event.correlation_ref).toBeTruthy();
       expect(Buffer.byteLength(JSON.stringify(eventCopy), 'utf8')).toBeLessThanOrEqual(16 * 1024);
       expect(JSON.stringify(eventCopy)).not.toContain('synthetic-private');
