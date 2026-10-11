@@ -1,7 +1,9 @@
 package diagnostics
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -35,6 +37,8 @@ const (
 	CodeWriteAmbiguousRemote       Code = "write_ambiguous_remote"
 	CodeWriteAmbiguousReadback     Code = "write_ambiguous_readback_failed"
 	CodeWriteConflict              Code = "write_conflict"
+	CodeOperationCancelled         Code = "operation_cancelled"
+	CodeOperationTimeout           Code = "operation_timeout"
 )
 
 type Diagnostic struct {
@@ -95,8 +99,15 @@ func (c Classifier) Classify(err error, ctx CommandContext) Diagnostic {
 	if len(ctx.SensitiveTerms) > 0 {
 		filter.SensitiveTerms = append(filter.SensitiveTerms, ctx.SensitiveTerms...)
 	}
+	attempted, known := HTTPAttemptEvidence(err)
+	if known {
+		ctx.HTTPAttempted = attempted
+	}
 	code := classifyCode(err, ctx)
 	d := Diagnostic{Code: code, Message: messageFor(code, err), ExitClass: exitClassFor(code), HTTPAttempted: httpAttemptedFor(code, ctx), Retryable: retryableFor(code) || ctx.RetryableProviderFailure}
+	if known {
+		d.HTTPAttempted = attempted
+	}
 	d.Message = filter.RedactText(d.Message)
 	d.Context = redactedContext(filter, ctx)
 	return d
@@ -156,6 +167,11 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if ctx.InvalidSelectedAPIBaseURL || hasCode(err, "invalid_api_base_url") {
 		return CodeConfigCredential
 	}
+	if attempted, known := HTTPAttemptEvidence(err); known && !attempted {
+		if code := operationInterruptionCode(err); code != "" {
+			return code
+		}
+	}
 	if hasCode(err, "push_mirror_sync_in_progress") && ctx.HTTPAttempted {
 		return CodePushMirrorSyncInProgress
 	}
@@ -189,11 +205,26 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if hasCode(err, "schema_decode") || hasCode(err, "malformed_response") || hasCode(err, "unexpected_content_type") {
 		return CodeSchemaDecode
 	}
+	// Earlier successful HTTP must not turn a later pre-dispatch interruption
+	// into a transport failure. Preserve confirmed provider/schema failures
+	// above, and any actually entered failed request in a mixed aggregate.
+	if attempted, known := HTTPTransportFailureEvidence(err); known && !attempted {
+		if code := operationInterruptionCode(err); code != "" {
+			return code
+		}
+	}
 	if (ctx.TransportFailure || hasCode(err, "live_transport_failure") || hasCode(err, "network_unavailable") || hasCode(err, "write_network_unavailable")) && ctx.HTTPAttempted {
 		return CodeLiveTransportFailure
 	}
 	if ctx.HTTPStatus >= 500 && ctx.HTTPAttempted {
 		return CodeLiveTransportFailure
+	}
+	// Preserve confirmed provider/schema failures in mixed partial results.
+	// A later local interruption is not itself an HTTP transport failure.
+	if attempted, known := HTTPAttemptEvidence(err); known && attempted {
+		if code := operationInterruptionCode(err); code != "" {
+			return code
+		}
 	}
 	if ctx.FixtureFallbackSentinel || hasCode(err, "fixture_fallback_detected") || hasCode(err, "write_fixture_fallback_detected") || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
 		return CodeFixtureFallbackDetected
@@ -205,6 +236,21 @@ func classifyCode(err error, ctx CommandContext) Code {
 		return CodeCacheBusy
 	}
 	return CodeConfigurationError
+}
+
+func operationInterruptionCode(err error) Code {
+	var interrupted interface{ OperationInterruption() string }
+	interruption := ""
+	if errors.As(err, &interrupted) {
+		interruption = interrupted.OperationInterruption()
+	}
+	if errors.Is(err, context.Canceled) || interruption == "cancelled" {
+		return CodeOperationCancelled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || interruption == "timeout" {
+		return CodeOperationTimeout
+	}
+	return ""
 }
 
 func codeFromError(err error) Code {
@@ -330,6 +376,8 @@ func exitClassFor(code Code) string {
 		return "configuration"
 	case CodeLiveTransportFailure:
 		return "transport"
+	case CodeOperationCancelled, CodeOperationTimeout:
+		return "operation"
 	case CodeLiveAPIFailure, CodeAPIFailure, CodePushMirrorSyncInProgress:
 		return "provider"
 	case CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing, CodeWriteAmbiguousRemote, CodeWriteAmbiguousReadback, CodeWriteConflict:
@@ -366,6 +414,10 @@ func messageFor(code Code, err error) string {
 		base += ": live provider rejected credentials"
 	case CodeLiveTransportFailure:
 		base += ": live provider request failed before a valid API response"
+	case CodeOperationCancelled:
+		base += ": operation cancelled"
+	case CodeOperationTimeout:
+		base += ": operation deadline expired"
 	case CodeLiveAPIFailure:
 		base += ": live provider returned an API failure"
 	case CodeAPIFailure:

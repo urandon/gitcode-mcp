@@ -1,0 +1,130 @@
+package diagnostics
+
+import (
+	"context"
+	"sync/atomic"
+)
+
+type httpAttemptKey struct{}
+
+// HTTPAttemptWitness is one bounded operation-local bit, independent of
+// telemetry. Nested service calls share the enclosing operation's witness.
+// It retains no request, URL, identity, payload, or error text.
+type HTTPAttemptWitness struct{ attempted atomic.Bool }
+
+func WithHTTPAttemptWitness(ctx context.Context) (context.Context, *HTTPAttemptWitness) {
+	if witness, ok := ctx.Value(httpAttemptKey{}).(*HTTPAttemptWitness); ok {
+		return ctx, witness
+	}
+	witness := &HTTPAttemptWitness{}
+	return context.WithValue(ctx, httpAttemptKey{}, witness), witness
+}
+
+func RecordHTTPAttempt(ctx context.Context) {
+	if witness, ok := ctx.Value(httpAttemptKey{}).(*HTTPAttemptWitness); ok {
+		witness.attempted.Store(true)
+	}
+}
+
+func (w *HTTPAttemptWitness) Attempted() bool { return w != nil && w.attempted.Load() }
+
+type httpAttemptError struct {
+	cause     error
+	attempted bool
+}
+
+func (e httpAttemptError) Error() string                     { return e.cause.Error() }
+func (e httpAttemptError) Unwrap() error                     { return e.cause }
+func (e httpAttemptError) HTTPAttemptEvidence() (bool, bool) { return e.attempted, true }
+
+func (e httpAttemptError) DiagnosticCode() string {
+	if codes := diagnosticCodes(e.cause); len(codes) != 0 {
+		return codes[0]
+	}
+	return ""
+}
+
+// RetainHTTPAttempt freezes the bit at return, preserving the underlying error.
+func RetainHTTPAttempt(err error, attempted bool) error {
+	if err == nil {
+		return nil
+	}
+	return httpAttemptError{cause: err, attempted: attempted}
+}
+
+type preDispatchInterruption struct{ cause error }
+
+func (e preDispatchInterruption) Error() string                              { return e.cause.Error() }
+func (e preDispatchInterruption) Unwrap() error                              { return e.cause }
+func (e preDispatchInterruption) HTTPAttemptEvidence() (bool, bool)          { return false, true }
+func (e preDispatchInterruption) HTTPTransportFailureEvidence() (bool, bool) { return false, true }
+
+// RetainPreDispatchInterruption is used only by an owner's context guard that
+// skips dispatch. It must not be applied to errors returned by a provider.
+// Unknown/wrapped causes are left unchanged rather than inferred as local.
+func RetainPreDispatchInterruption(err error) error {
+	if err != context.Canceled && err != context.DeadlineExceeded {
+		return err
+	}
+	return preDispatchInterruption{cause: err}
+}
+
+// HTTPAttemptEvidence returns known evidence, not an inference from error text.
+// An aggregate is definitely attempted if any child is; definitely not only
+// when every child has known negative evidence. Outer operation receipts win.
+func HTTPAttemptEvidence(err error) (attempted, known bool) {
+	if err == nil {
+		return false, false
+	}
+	if evidence, ok := err.(interface{ HTTPAttemptEvidence() (bool, bool) }); ok {
+		if attempted, known = evidence.HTTPAttemptEvidence(); known {
+			return attempted, true
+		}
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		allKnown := len(children) != 0
+		for _, child := range children {
+			attempted, known := HTTPAttemptEvidence(child)
+			if attempted && known {
+				return true, true
+			}
+			allKnown = allKnown && known
+		}
+		return false, allKnown
+	case interface{ Unwrap() error }:
+		return HTTPAttemptEvidence(e.Unwrap())
+	}
+	return false, false
+}
+
+// HTTPTransportFailureEvidence describes failed requests, not the enclosing
+// operation's HTTP receipt. A positive failed-request receipt in any branch
+// wins; a negative is authoritative only when every branch is known negative.
+func HTTPTransportFailureEvidence(err error) (attempted, known bool) {
+	if err == nil {
+		return false, false
+	}
+	if evidence, ok := err.(interface{ HTTPTransportFailureEvidence() (bool, bool) }); ok {
+		if attempted, known = evidence.HTTPTransportFailureEvidence(); known {
+			return attempted, true
+		}
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		allKnown := len(children) != 0
+		for _, child := range children {
+			attempted, known := HTTPTransportFailureEvidence(child)
+			if attempted && known {
+				return true, true
+			}
+			allKnown = allKnown && known
+		}
+		return false, allKnown
+	case interface{ Unwrap() error }:
+		return HTTPTransportFailureEvidence(e.Unwrap())
+	}
+	return false, false
+}

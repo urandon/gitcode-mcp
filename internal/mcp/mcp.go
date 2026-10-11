@@ -296,6 +296,7 @@ type errorData struct {
 	Code                 string                    `json:"code"`
 	Message              string                    `json:"message"`
 	FailureClass         string                    `json:"failure_class,omitempty"`
+	HTTPAttempted        *bool                     `json:"http_attempted,omitempty"`
 	Operation            string                    `json:"operation,omitempty"`
 	RepoID               string                    `json:"repo_id,omitempty"`
 	StartedAt            string                    `json:"started_at,omitempty"`
@@ -2521,6 +2522,7 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		return diagnostics.Classify(err, ctx), true
 	}
 	if errors.As(err, &syncErr) {
+		ctx.TransportFailure = syncErr.Mode == "network_timeout"
 		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "remote_identity_mismatch" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.FailureSource = syncErr.PayloadSource
 		ctx.LocalPayloadTooLarge = syncErr.Mode == "payload_too_large" && syncErr.PayloadSource == "local_body_limit"
@@ -2599,6 +2601,25 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		ctx.HTTPStatus = forbiddenErr.Status
 		return diagnostics.Classify(err, ctx), true
 	}
+	var partialSync *service.PartialSyncError
+	if errors.As(err, &partialSync) {
+		_, attemptKnown := diagnostics.HTTPAttemptEvidence(err)
+		ctx.TransportFailure = !attemptKnown && (partialSync.Diagnostic == service.SyncDiagnosticCancelled || partialSync.Diagnostic == service.SyncDiagnosticTimeout)
+		ctx.HTTPAttempted = ctx.TransportFailure
+		for _, failure := range partialSync.Errors {
+			switch failure.FailureClass {
+			case "network_timeout":
+				ctx.HTTPAttempted, ctx.TransportFailure = true, true
+			case "schema_decode", "partial_response", "malformed_response", "unexpected_content_type":
+				ctx.HTTPAttempted, ctx.SchemaDecodeFailure = true, true
+				ctx.FailureSource = failure.FailureClass
+			}
+		}
+		return diagnostics.Classify(err, ctx), true
+	}
+	if _, known := diagnostics.HTTPAttemptEvidence(err); known {
+		return diagnostics.Classify(err, ctx), true
+	}
 	return diagnostics.Diagnostic{}, false
 }
 
@@ -2623,6 +2644,7 @@ func (s *Server) writeOperationalError(id *json.RawMessage, err error, ctx domai
 	diagnostic, hasDiagnostic := mcpDiagnostic(err)
 	if hasDiagnostic {
 		data.FailureClass = string(diagnostic.Code)
+		data.HTTPAttempted = &diagnostic.HTTPAttempted
 		if data.Code == "internal_error" {
 			data.Code = string(diagnostic.Code)
 			data.Message = diagnostic.Message

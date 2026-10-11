@@ -1264,7 +1264,11 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{metricAttempt: observation})
 	if err != nil {
 		observation.finish(0, err)
-		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: 1, Cause: err}
+		attempts := 0
+		if observation.httpEntered.Load() {
+			attempts = 1
+		}
+		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts, Cause: err}
 	}
 
 	body, readErr := c.readBounded(resp, endpoint)
@@ -2284,12 +2288,13 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 	}
 	var lastRetryAfter time.Duration
 	var rawRetryAfter string
+	httpAttempts := 0
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts, Cause: err}
 		}
 		if err := c.waitForRateLimit(ctx, method, endpoint, attempt); err != nil {
-			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts, Cause: err}
 		}
 		observation := newProviderMetricAttempt(ctx)
 		if attempt <= observability.MaxExecutionAttempt {
@@ -2297,16 +2302,19 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		}
 		opts.metricAttempt = observation
 		resp, err := c.do(ctx, method, endpoint, values, bytes.NewReader(requestBody), opts)
+		if observation.httpEntered.Load() {
+			httpAttempts++
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				observation.finish(0, ctx.Err())
-				return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: ctx.Err()}
+				return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts, Cause: ctx.Err()}
 			}
 			observation.finish(0, err)
 			if isRetryableTransport(err) && attempt < attempts {
 				continue
 			}
-			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: err}
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts, Cause: err}
 		}
 		if resp.StatusCode == http.StatusRequestEntityTooLarge {
 			resp.Body.Close()
@@ -2340,7 +2348,7 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 				resumeAt := time.Now().Add(lastRetryAfter)
 				emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventRetryAfterWaitStarted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: resumeAt, RawRetryAfter: rawRetryAfter})
 				if err := sleepContext(ctx, lastRetryAfter); err != nil {
-					return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: err}
+					return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts, Cause: err}
 				}
 				emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventRetryAfterWaitCompleted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: resumeAt, RawRetryAfter: rawRetryAfter})
 				continue
@@ -2352,7 +2360,7 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			if attempt < attempts {
 				continue
 			}
-			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: httpAttempts}
 		case strings.Contains(endpoint, ".wiki/") && isWikiEmptyResponse(resp.StatusCode, body):
 			owner, repo := parseWikiEndpointOwnerRepo(endpoint)
 			return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
@@ -2365,7 +2373,7 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
 		}
 	}
-	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}
+	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: httpAttempts}
 }
 
 func effectiveRateLimitRetryAfter(raw string, now time.Time, attempt int) time.Duration {
@@ -2457,7 +2465,40 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 		opts.beforeAttempt()
 	}
 	opts.metricAttempt.start()
-	return c.client.Do(req)
+	// Copy only the client configuration; reuse the original transport, jar,
+	// redirect policy and timeout. Never mutate the shared client's transport.
+	client := *c.client
+	client.Transport = httpAttemptTransport{inner: c.client.Transport, attempt: opts.metricAttempt}
+	return client.Do(req)
+}
+
+type httpAttemptTransport struct {
+	inner   http.RoundTripper
+	attempt *providerMetricAttempt
+}
+
+// Preserve http.Client's legacy timeout cancellation hook for transports that
+// implement it. Modern transports continue to use the request context.
+func (t httpAttemptTransport) CancelRequest(req *http.Request) {
+	inner := t.inner
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
+	if canceller, ok := inner.(interface{ CancelRequest(*http.Request) }); ok {
+		canceller.CancelRequest(req)
+	}
+}
+
+func (t httpAttemptTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	inner := t.inner
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
+	if t.attempt != nil {
+		t.attempt.httpEntered.Store(true)
+	}
+	diagnostics.RecordHTTPAttempt(req.Context())
+	return inner.RoundTrip(req)
 }
 
 func (c *HTTPClient) v4BaseURL() *url.URL {

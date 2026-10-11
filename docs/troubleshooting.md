@@ -141,6 +141,31 @@ adapter_unavailable
 
 **Fix:** Reads work offline from cache. Writes require network and token.
 
+### Sync cancellation and HTTP attempt evidence
+
+CLI error diagnostics and MCP `sync_live` diagnostics distinguish
+`operation_cancelled` / `operation_timeout` from `live_transport_failure`.
+`http_attempted` reports entry into the configured HTTP transport, not selection
+of live mode, request construction, time spent waiting for a rate limit, or
+successful delivery to GitCode. It is not a packet count or write confirmation.
+
+A cancelled or expired context before transport entry reports
+`http_attempted: false`. A timeout/cancellation returned by an entered transport
+reports `live_transport_failure` with `http_attempted: true`. Cancellation later
+in a multi-collection sync can report an operation interruption with
+`http_attempted: true`: even an empty successful list already contacted the
+provider. Partial results and retries retain that fact independently of metrics.
+This also applies when a later request is cancelled in its local rate-limit
+wait: an earlier successful request is not evidence that the failing request
+entered transport. Confirmed provider/schema failures or an actually entered
+failed request still retain their failure classification in mixed results.
+CLI compact partial summaries expose the known bit; MCP lifecycle diagnostics
+keep their existing `code` and add canonical `error_class` and `http_attempted`.
+Startup configuration-read cancellation remains a configuration failure.
+
+Retry only after inspecting partial progress and the operation's idempotency
+state. An HTTP attempt alone never proves that a remote write succeeded.
+
 ### Alias collision
 
 ```text

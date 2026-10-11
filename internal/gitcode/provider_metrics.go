@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/observability"
@@ -14,11 +15,12 @@ import (
 // bounded response transfer. It is not a TCP packet count or durable receipt.
 // No endpoint, header, coordinate, body, or error string crosses this boundary.
 type providerMetricAttempt struct {
-	ctx      context.Context
-	ordinal  uint32
-	metrics  *observability.Metrics
-	started  time.Time
-	finished bool
+	ctx         context.Context
+	ordinal     uint32
+	metrics     *observability.Metrics
+	started     time.Time
+	finished    bool
+	httpEntered atomic.Bool
 }
 
 func newProviderMetricAttempt(ctx context.Context) *providerMetricAttempt {

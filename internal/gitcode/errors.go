@@ -22,6 +22,16 @@ func (e ErrNetworkUnavailable) Error() string {
 
 func (e ErrNetworkUnavailable) Unwrap() error { return e.Cause }
 
+func (e ErrNetworkUnavailable) HTTPAttemptEvidence() (bool, bool) {
+	return e.Attempts > 0, true
+}
+
+// The failing request has its own transport evidence. An enclosing operation
+// may already have made successful requests before this request was cancelled.
+func (e ErrNetworkUnavailable) HTTPTransportFailureEvidence() (bool, bool) {
+	return e.Attempts > 0, true
+}
+
 func (e ErrNetworkUnavailable) DiagnosticCode() string { return "network_unavailable" }
 
 type ErrRateLimited struct {
