@@ -77,6 +77,34 @@ test('first-page discontinuity requires explicit restart before continuation', a
   await page.getByRole('button', { name: 'Restart retained timeline' }).click(); await expect(next).toBeEnabled();
 });
 
+for (const change of ['loss before leaving', 'loss while away', 'boot while away', 'generation while away', 'unchanged'] as const) {
+  test(`page-session restart barrier across Diagnostics and Back: ${change}`, async ({ page }) => {
+    const mock = await mockObservation(page); mock.fixture.page.has_more = true; mock.fixture.page.cursor = 'e30';
+    await page.goto('/?view=Service');
+    const next = page.getByRole('button', { name: 'Continue retained scan' }); await expect(next).toBeEnabled();
+    if (change === 'loss before leaving') {
+      mock.fixture.summary.observation_health.loss_epoch = 1; await emit(page); await expect(next).toBeDisabled();
+    }
+    await page.getByRole('button', { name: 'Diagnostics', exact: true }).click(); await expect(page).toHaveURL(/view=Diagnostics/);
+    if (change === 'loss while away') mock.fixture.summary.observation_health.loss_epoch = 1;
+    if (change === 'boot while away') mock.fixture.summary.collector.boot_id = id('b');
+    if (change === 'generation while away') mock.fixture.summary.collector.generation = id('c');
+    await page.goBack(); await expect(page).toHaveURL(/view=Service/);
+    await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeEnabled();
+    if (change === 'unchanged') {
+      await expect(next).toBeEnabled(); await expect(page.getByRole('button', { name: 'Copy safe context' })).toBeEnabled();
+    } else {
+      await expect(next).toBeDisabled(); await expect(page.getByRole('button', { name: 'Copy safe context' })).toBeDisabled();
+      await expect(page.getByText('Continuation stopped at a discontinuity. Restart explicitly; no automatic skip was made.')).toBeVisible();
+      await page.getByRole('button', { name: 'Restart retained timeline' }).click(); await expect(next).toBeEnabled();
+      await page.getByRole('button', { name: 'Diagnostics', exact: true }).click(); await page.goBack();
+      await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeEnabled(); await expect(next).toBeEnabled();
+    }
+    expect(mock.requests.filter(r => r.includes('/observability/events')).every(r => !r.includes('cursor='))).toBe(true);
+    expect(mock.requests.some(r => r.startsWith('POST '))).toBe(false);
+  });
+}
+
 test('unknown regex-valid URL enums are removed only after delivered catalog and never sent', async ({ page }) => {
   const mock = await mockObservation(page);
   await page.goto(`/?view=Service&obs_code=not_a_catalog_code&obs_phase=not_a_catalog_phase&obs_job_ref=${ref('job', '5')}&obs_cursor=e30`);

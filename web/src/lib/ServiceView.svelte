@@ -3,12 +3,13 @@
   import { Activity, AlertTriangle, Clipboard, RefreshCw } from '@lucide/svelte';
   import { humanize, type ObservationSnapshot } from './admin';
   import StatusChip from './StatusChip.svelte';
-  import { boundedObservationRead, catalogServiceQuery, eventDetailKeys, eventProjection, eventRequest, filterKeys, incidentProjection, isID, isTime, metricValue, observationFreshness, observationProtocol, observationTarget, ObservationError, publicEnum, readStateText, refProjection, resetPage, safeObservationContext, type EventPage, type EventRecord, type Incident, type MetricSnapshot, type ObservationTarget, type ReadState, type ServiceQuery, type ServiceSummary } from './observation';
+  import { boundedObservationRead, catalogServiceQuery, eventDetailKeys, eventProjection, eventRequest, filterKeys, incidentProjection, isID, isTime, metricValue, observationFreshness, observationProtocol, observationTarget, ObservationError, publicEnum, readStateText, refProjection, resetPage, safeObservationContext, type EventPage, type EventRecord, type Incident, type MetricSnapshot, type ObservationBoundary, type ObservationTarget, type ReadState, type ServiceQuery, type ServiceSummary } from './observation';
 
   export let ready = false;
   export let bootstrapFailed = false;
   export let snapshot: ObservationSnapshot;
   export let query: ServiceQuery = {};
+  export let boundary: ObservationBoundary = { frozen: false };
   export let invalidQuery = false;
   export let invalidation = 0;
   export let connection: 'connecting' | 'connected' | 'disconnected' = 'connecting';
@@ -32,7 +33,7 @@
   let pendingInvalidation = false;
   let queryKey = '';
   let seenInvalidation = 0;
-  let frozen = false;
+  $: frozen = boundary.frozen;
   let discontinuity = '';
   let copyState = '';
   let seriesIndex = 0;
@@ -80,11 +81,11 @@
     const summaryRead = boundedObservationRead<ServiceSummary>('/api/admin/v1/observability', 128 << 10, signal).then(s => {
       if (!retain()) return;
       if (!shapeSummary(s)) throw new ObservationError(s?.protocol === observationProtocol ? 'unsupported' : 'unavailable');
-      const old = summary;
-      if (old && (s.collector.boot_id !== old.collector.boot_id || s.collector.generation !== old.collector.generation || s.observation_health.loss_epoch !== old.observation_health.loss_epoch)) {
+      const changed = boundary.boot_id !== undefined && (s.collector.boot_id !== boundary.boot_id || s.collector.generation !== boundary.generation || s.observation_health.loss_epoch !== boundary.loss_epoch);
+      if (changed) {
         discontinuity = 'Observation boundary changed: boot, retention generation or event loss. This is not continuous history.';
-        frozen = true;
       }
+      boundary = { boot_id: s.collector.boot_id, generation: s.collector.generation, loss_epoch: s.observation_health.loss_epoch, frozen: boundary.frozen || changed };
       summary = s; received = Date.now(); summaryError = undefined;
     }).catch(e => { if (retain()) { summaryError = state(e); } });
     const eventsRead = async () => {
@@ -111,7 +112,7 @@
         metrics = m; metricsReceived = Date.now(); metricsError = undefined;
         if (seriesIndex >= m.series.length) seriesIndex = 0;
       }).catch(e => { if (retain()) metricsError = state(e); }),
-      eventsRead().catch(e => { if (retain()) { eventsError = state(e); if (eventsError === 'cursor_expired' || eventsError === 'invalid_cursor') { frozen = true; page = undefined; } } })
+      eventsRead().catch(e => { if (retain()) { eventsError = state(e); if (eventsError === 'cursor_expired' || eventsError === 'invalid_cursor') { boundary = { ...boundary, frozen: true }; page = undefined; } } })
     ]);
     if (!retain()) return;
     reading = false;
@@ -123,7 +124,7 @@
   function selectEvent(id: string): void { const next = { ...query, event_id: id }; delete next.incident_ref; onquery(next); }
   function selectIncident(id: string): void { const next = { ...query, incident_ref: id }; delete next.event_id; onquery(next); }
   function nextPage(): void { if (!page?.has_more || !page.cursor || frozen) return; onquery({ ...resetPage(query), cursor: page.cursor }); }
-  function restart(): void { frozen = false; discontinuity = 'Retained timeline restarted explicitly; earlier history may no longer be retained.'; const next = resetPage(query); if (JSON.stringify(next) === JSON.stringify(query)) void load(true); else onquery(next); }
+  function restart(): void { boundary = { ...boundary, frozen: false }; discontinuity = 'Retained timeline restarted explicitly; earlier history may no longer be retained.'; const next = resetPage(query); if (JSON.stringify(next) === JSON.stringify(query)) void load(true); else onquery(next); }
   function applyTime(): void {
     timeError = !isTime(since) || !isTime(until) || Date.parse(until) < Date.parse(since) || Date.parse(until) - Date.parse(since) > 7 * 86400000;
     if (!timeError) onquery({ ...resetPage(query), since, until });

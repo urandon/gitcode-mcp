@@ -127,6 +127,8 @@
   let requestedDocsSourceRef = '';
   let serviceReady = false;
   let serviceQuery: ServiceQuery = {};
+  // Retain the restart barrier across cohort navigation, not event pages.
+  let serviceBoundary = { frozen: false };
   let serviceQueryInvalid = false;
   let observationInvalidation = 0;
   let repositoryDocsSources: NonNullable<Repository['documentation']['sources']> = [];
@@ -777,7 +779,7 @@
     <header class="topbar"><div class="crumb"><span>Admin</span><ChevronRight size={14} /><strong>{active}</strong></div><div class="version">v{snapshot.service.version || 'dev'}</div></header>
     <section class="content" aria-busy={active !== 'Service' && loading}>
       {#if active === 'Service'}
-        <ServiceView ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
+        <ServiceView bind:boundary={serviceBoundary} ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
       {:else if snapshot.api_version !== adminApiVersion}
         <section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>UI/API version mismatch</strong><p>This UI expects API v{adminApiVersion}, but the daemon returned v{snapshot.api_version || 'unknown'}. Update browser assets and daemon together.</p></div></section>
       {:else}

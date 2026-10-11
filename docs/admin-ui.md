@@ -98,6 +98,9 @@ the separately returned metrics history. Any observed boot, generation or loss
 boundary stops continuation, including on the first page, until explicit restart.
 Changing selection, filters or browser history does not acknowledge that boundary
 and cannot bypass the restart requirement.
+The boundary and restart barrier live for the Admin page session, including
+leaving Service and returning through navigation or history. Event pages are
+still discarded when leaving Service; no browser storage is used.
 
 Execution health and observation health are separate. Incident cards retain
 active/recovered state, first/last authority timestamps, last success and

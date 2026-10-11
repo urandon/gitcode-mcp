@@ -6,6 +6,9 @@ export const eventDetailKeys = ['phase', 'collection', 'outcome', 'failure_class
 export const refKinds = { job_ref: 'job', registration_ref: 'registration', cache_ref: 'cache', repo_ref: 'repo', source_ref: 'source', correlation_ref: 'correlation', stage_ref: 'stage', previous_registration_ref: 'registration' } as const;
 export type RefKey = keyof typeof refKinds;
 export type ServiceQuery = Partial<Record<typeof filterKeys[number] | RefKey | 'since' | 'until' | 'cursor' | 'event_id' | 'incident_ref', string>>;
+// Page-session state only: no retained event bytes or browser storage. Keep the
+// last observed boundary when the Service component is unmounted by navigation.
+export type ObservationBoundary = { frozen: boolean; boot_id?: string; generation?: string; loss_epoch?: number };
 export type EventTemplate = { stream: string; severity: string; component: string; message: string };
 export type EventRecord = { schema: number; event_id: string; occurred_at: string; boot_id: string; sequence: number; code: string; stream: string; severity: string; component: string; message: string; legacy?: boolean; observed_bytes?: number } & ServiceQuery & Record<string, unknown>;
 export type Incident = ObservationRefs & { incident_ref: string; origin: string; collection: string; phase?: string; state: string; reason: string; coverage: string; first_observed_at: string; last_observed_at: string; last_success_at?: string; retry_after?: string };
