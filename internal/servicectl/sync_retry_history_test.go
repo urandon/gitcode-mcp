@@ -68,11 +68,19 @@ func TestSyncRetryHistoryLegacyAndMalformedAuthority(t *testing.T) {
 		{name: "before_job", first: stamp(-time.Second), last: stamp(time.Second)},
 		{name: "after_view", first: stamp(time.Second), last: stamp(4 * time.Second)},
 		{name: "future", first: stamp(time.Second), last: stamp(2 * time.Second)},
+		{name: "after_finished", first: stamp(time.Second), last: stamp(2 * time.Second)},
+		{name: "zero_finished", first: stamp(time.Second), last: stamp(2 * time.Second)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			jobs := NewJobManager("")
 			success := at.Add(3 * time.Second)
 			jobs.jobs["job"] = &Job{ID: "job", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: at, UpdatedAt: success, CacheUUID: "cache", RepoID: "fixture/repository", SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, UpdatedAt: success, LastSuccessAt: &success, FirstRetryAt: tc.first, LastRetryAt: tc.last}}}
+			if tc.name == "after_finished" {
+				jobs.jobs["job"].FinishedAt = stamp(time.Second)
+			}
+			if tc.name == "zero_finished" {
+				jobs.jobs["job"].FinishedAt = &time.Time{}
+			}
 			observed := success
 			if tc.name == "future" {
 				observed = at.Add(time.Second)
@@ -87,6 +95,37 @@ func TestSyncRetryHistoryLegacyAndMalformedAuthority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSyncRetryHistoryRetainsInterruptedCollectionAfterRealReload(t *testing.T) {
+	at := time.Now().UTC().Add(-5 * time.Second)
+	scheduled := at.Add(time.Second)
+	due := scheduled.Add(time.Minute)
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	jobs := NewJobManager(path)
+	job := &Job{ID: "job-000001", Type: SyncJobType, Status: JobStatusRunning, CreatedAt: at, CacheUUID: "cache", RepoID: "fixture/repository"}
+	jobs.jobs[job.ID], jobs.nextID = job, 1
+	applySyncCollectionObservation(job, SyncCollectionView{Collection: "issues", Outcome: SyncCollectionRetryScheduled, RetryAfter: &due, UpdatedAt: scheduled}, scheduled)
+	if jobs.saveLocked() != nil {
+		t.Fatal("scheduled authority persistence failed")
+	}
+	reloaded := NewJobManager(path)
+	if reloaded.LoadAndMarkInterrupted() != nil {
+		t.Fatal("actual interrupted owner reload failed")
+	}
+	got := NewMaintenanceManager(Manager{}, reloaded, "").ExecutionHealth(time.Now().UTC())
+	if got.State != "degraded" || got.Coverage != "retained" {
+		t.Fatal("interrupted owner lost retained authority")
+	}
+	for _, incident := range got.Incidents {
+		if incident.Collection == "issues" {
+			if incident.State != "interrupted" || incident.Reason != "interrupted" || incident.RetryAfter != nil || !incident.FirstObservedAt.Equal(scheduled) {
+				t.Fatal("retry history overrode actual interrupted state in same-time tie")
+			}
+			return
+		}
+	}
+	t.Fatal("interrupted collection incident missing")
 }
 
 func TestSyncRetryHistoryCannotBeInjectedByAnAttempt(t *testing.T) {

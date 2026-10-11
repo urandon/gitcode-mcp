@@ -156,7 +156,7 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 					break
 				}
 				r := base
-				if !validSyncRetryHistory(collection, job.CreatedAt, at) {
+				if !validSyncRetryHistory(collection, job.CreatedAt, job.FinishedAt, at) {
 					invalidRetryHistory = true
 					continue
 				}
@@ -193,8 +193,8 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 					history.signal, history.reason, history.retry = "failed", "retry_wait", time.Time{}
 					// Current scheduling wins the same-time tie and retains its
 					// exact deadline. A later outcome still supersedes this fault.
-					if r.signal == "retrying" {
-						history.signal, history.retry = r.signal, r.retry
+					if r.signal == "retrying" || r.signal == "interrupted" {
+						history.signal, history.reason, history.retry = r.signal, r.reason, r.retry
 					}
 					history.at = *collection.FirstRetryAt
 					add(history)
@@ -439,12 +439,12 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 
 // Old records have no retry history. Incomplete, inverted, future or
 // out-of-lifetime timestamps must not manufacture recovered incidents.
-func validSyncRetryHistory(view SyncCollectionView, createdAt, at time.Time) bool {
+func validSyncRetryHistory(view SyncCollectionView, createdAt time.Time, finishedAt *time.Time, at time.Time) bool {
 	if view.FirstRetryAt == nil && view.LastRetryAt == nil {
 		return true
 	}
 	if view.FirstRetryAt == nil || view.LastRetryAt == nil || view.FirstRetryAt.IsZero() || view.LastRetryAt.IsZero() {
 		return false
 	}
-	return !view.LastRetryAt.Before(*view.FirstRetryAt) && !view.LastRetryAt.After(view.UpdatedAt) && !view.LastRetryAt.After(at) && (createdAt.IsZero() || !view.FirstRetryAt.Before(createdAt))
+	return !view.LastRetryAt.Before(*view.FirstRetryAt) && !view.LastRetryAt.After(view.UpdatedAt) && !view.LastRetryAt.After(at) && (createdAt.IsZero() || !view.FirstRetryAt.Before(createdAt)) && (finishedAt == nil || !finishedAt.IsZero() && !view.LastRetryAt.After(*finishedAt))
 }
