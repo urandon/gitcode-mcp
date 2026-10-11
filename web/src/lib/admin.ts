@@ -1,5 +1,7 @@
 export const adminApiVersion = '1';
 
+export type ObservationRefs = Partial<Record<'job_ref' | 'registration_ref' | 'cache_ref' | 'repo_ref' | 'source_ref', string>>;
+
 export type CoverageLane = {
   state: string;
   status: string;
@@ -22,6 +24,7 @@ export type Execution = {
 };
 
 export type Repository = {
+  observation_refs?: ObservationRefs;
   repo_id: string;
   display_name?: string;
   aliases?: string[];
@@ -42,6 +45,7 @@ export type Repository = {
 };
 
 export type RepositoryDocumentation = {
+  observation_refs?: ObservationRefs;
   state: string;
   registered: boolean;
   registration_id?: string;
@@ -78,7 +82,7 @@ export type RepositoryDocumentation = {
   semantic_available?: boolean;
   search_handoff?: string;
   index_handoff?: string;
-  sources?: Array<{ source_registration_id: string; source_registration_generation: number; state: string; git_store_ref?: string; worktree_ref?: string; commit_oid?: string; policy_hash?: string }>;
+  sources?: Array<{ observation_refs?: ObservationRefs; source_registration_id: string; source_registration_generation: number; state: string; git_store_ref?: string; worktree_ref?: string; commit_oid?: string; policy_hash?: string }>;
   retention: { committed_sets_per_identity: number; overlay_max_age_hours: number; terminal_max_age_hours: number; vector_byte_ceiling: number };
 };
 
@@ -100,6 +104,7 @@ export type RepositoryDocsPlan = {
 };
 
 export type CacheObservation = {
+  observation_refs?: ObservationRefs;
   cache_ref: string;
   path_fingerprint?: string;
   storage_mode?: string;
@@ -134,6 +139,7 @@ export type CacheObservation = {
 };
 
 export type Job = {
+  observation_refs?: ObservationRefs;
   id: string;
   type: string;
   cache_ref?: string;
@@ -241,6 +247,7 @@ export type Capability = {
 };
 
 export type Maintenance = {
+  observation_refs?: ObservationRefs;
   registration_id: string;
   cache_ref: string;
   repo_id: string;
@@ -592,7 +599,7 @@ export type ObservationSnapshot = {
   feedback: FeedbackObservation;
 };
 
-export type AdminView = 'Overview' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics';
+export type AdminView = 'Overview' | 'Service' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics';
 export type RepositoryTab = 'coverage' | 'collections' | 'documentation' | 'search' | 'activity';
 
 export const emptySnapshot: ObservationSnapshot = {

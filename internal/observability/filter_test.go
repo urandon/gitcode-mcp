@@ -57,6 +57,41 @@ func TestEventFilterClosedCatalogAndCompatibility(t *testing.T) {
 	}
 }
 
+func TestEventDetailValuesFollowExecutionDomainsAndAreIsolated(t *testing.T) {
+	values := EventDetailValues()
+	for key, expected := range map[string][]string{
+		"maintenance_scope":      {"registration", "repository_docs", "identity_resolution"},
+		"previous_state":         {"absent", "unknown", "enrolled", "ready", "registered", "not_indexed", "identity_conflict", "cache_clone_conflict", "identity_unresolved"},
+		"previous_failure_class": {"identity", "cache", "embedding", "repository_docs", "operation_failed"},
+		"work_kind":              workKinds, "admin_route": adminRoutes,
+	} {
+		for _, want := range expected {
+			found := false
+			for _, got := range values[key] {
+				found = found || got == want
+			}
+			if !found {
+				t.Fatal("admitted execution detail omitted")
+			}
+		}
+	}
+	for _, value := range values["previous_state"] {
+		if !maintenanceState(value) && !maintenanceSourceState(value) && !maintenanceIdentityPredecessor(value) && value != "absent" && value != "unknown" {
+			t.Fatal("unadmitted predecessor exposed")
+		}
+	}
+	for _, value := range values["previous_failure_class"] {
+		if !maintenanceFailure(value) {
+			t.Fatal("unadmitted previous failure exposed")
+		}
+	}
+	values["work_kind"][0] = "synthetic-private"
+	delete(values, "previous_state")
+	if reflect.DeepEqual(values, EventDetailValues()) || workKinds[0] == "synthetic-private" {
+		t.Fatal("caller mutated the catalog")
+	}
+}
+
 func TestEventCursorBindsEverySelectorBeforeObservation(t *testing.T) {
 	c := New(Config{Directory: testDirectory(t)})
 	ready(t, c)
