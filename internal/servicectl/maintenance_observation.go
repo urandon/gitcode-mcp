@@ -112,7 +112,8 @@ func captureMaintenanceObservation(ctx context.Context, before maintenanceObserv
 }
 
 // Source confirmation requires both the existing save and current originating
-// authority. Retained stale-owner changes are count-only loss, not certification.
+// authority. Failed retained writes are count-only loss, not certification;
+// rejected obsolete callbacks mutate nothing and contribute neither.
 func captureMaintenanceSourceObservation(ctx context.Context, before maintenanceObservationState, entry *MaintenanceEntry, source *repositoryDocsRegisteredSource, confirmed bool) {
 	if source == nil {
 		return

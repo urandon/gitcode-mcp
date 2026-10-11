@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -107,7 +108,9 @@ func TestMaintenanceSourceObservationActualInspectionFailureRecovery(t *testing.
 	at = at.Add(time.Minute)
 	run(Job{})
 	run(Job{}) // repeated successful inspection has no finite pair change
-	run(Job{ID: "fixture-active-source"})
+	run(Job{ID: "fixture-active-source", Type: RepositoryDocsIndexJobType, Status: JobStatusQueued,
+		CacheUUID: m.entries[reg].CacheUUID, RepoID: m.entries[reg].RepoID, RegistrationID: reg,
+		SourceRegistrationID: id, SourceRegistrationGeneration: m.sources[reg][id].State.SourceRegistrationGeneration})
 	run(Job{})
 	if m.sources[reg][id].State.State != "not_indexed" || m.sources[reg][id].State.Inspection.Result != "succeeded" {
 		t.Fatal("actual inspection/indexing owner changed authority")
@@ -312,10 +315,14 @@ func TestMaintenanceSourceObservationStaleSnapshotAndSharedOverflow(t *testing.T
 		t.Fatal("stale completion changed current source authority")
 	}
 	buffer := ctx.Value(maintenanceObservationKey{}).(*maintenanceObservationBuffer)
-	// Parent's actual enrolled->indexing is the only transition above. The stale
-	// source's ready projection was never the current authority owner.
+	if buffer.count != 0 || buffer.lost != 0 {
+		t.Fatal("rejected stale source callback manufactured an event or loss")
+	}
+	// A qualified current finish supplies the real enrolled->indexing parent
+	// transition; obsolete work can no longer mutate even the parent state.
+	m.finishReconcileEntry(ctx, reg, cloneMaintenanceEntryPrivate(m.entries[reg]), 0, 0, "", "", nil, Job{}, Job{}, Job{}, time.Now().UTC())
 	if buffer.count != 1 || buffer.captures[0].scope != "registration" {
-		t.Fatal("stale source completion manufactured an event")
+		t.Fatal("current completion lost parent observation")
 	}
 	entry, source := m.entries[reg], m.sources[reg][id]
 	for i := 0; i < maxMaintenanceObservations+5; i++ {
@@ -366,17 +373,32 @@ func TestMaintenanceSourceObservationActualObsoleteJobAndCurrentControl(t *testi
 			}
 			c := maintenanceEventCollector(t)
 			m.jobs.SetObservation(c)
+			before := cloneMaintenanceEntryPrivate(m.entries[reg])
+			beforeSource := *m.sources[reg][id]
+			writes := 0
+			m.writeFile = func(name string, data []byte, permissions os.FileMode) error {
+				writes++
+				return durableAtomicWriteFile(name, data, permissions)
+			}
 			ctx, flush := beginMaintenanceObservation(context.Background(), m.jobs)
 			defer flush()
 			updated := m.finishReconcileEntry(ctx, reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, active, time.Now().UTC())
-			// Execution semantics predate instrumentation and remain unchanged.
-			if updated.State != "indexing" || m.sources[reg][id].State.State != "indexing" || m.sources[reg][id].State.SourceRegistrationGeneration != 2 {
-				t.Fatal("observation changed retained execution behavior")
+			if stale {
+				if !reflect.DeepEqual(updated, cloneMaintenanceEntry(&before)) {
+					t.Fatal("obsolete completion returned stale state")
+				}
+				assertObsoleteSourceCallbackUnchanged(t, m, reg, id, before, beforeSource, writes)
+			} else if updated.State != "indexing" || m.sources[reg][id].State.State != "indexing" || m.sources[reg][id].State.SourceRegistrationGeneration != 2 || writes == 0 {
+				t.Fatal("current source completion did not apply")
 			}
 			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
 			// Unchanged replay must not retroactively certify or recount the pair.
 			m.finishReconcileEntry(ctx, reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, active, time.Now().UTC())
 			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
+			if stale {
+				assertObsoleteSourceCallbackUnchanged(t, m, reg, id, before, beforeSource, writes)
+			}
+			assertSourceAuthorityRestart(t, m, reg, id, *m.sources[reg][id])
 		})
 	}
 }
@@ -420,19 +442,33 @@ func TestMaintenanceSourceObservationActualLateFailureAndCurrentControl(t *testi
 					t.Fatal("actual source rebind unavailable")
 				}
 			}
+			before := cloneMaintenanceEntryPrivate(m.entries[reg])
+			beforeSource := *m.sources[reg][id]
+			var writes atomic.Int64
+			m.writeFile = func(name string, data []byte, permissions os.FileMode) error {
+				writes.Add(1)
+				return durableAtomicWriteFile(name, data, permissions)
+			}
 			unblock()
 			select {
 			case updated := <-done:
-				if updated.RepositoryDocs == nil || updated.RepositoryDocs.State != "degraded" {
-					t.Fatal("observation changed existing failure return")
+				if stale {
+					if !reflect.DeepEqual(updated, cloneMaintenanceEntry(&before)) {
+						t.Fatal("obsolete failure returned stale state")
+					}
+				} else if updated.RepositoryDocs == nil || updated.RepositoryDocs.State != "degraded" {
+					t.Fatal("current source failure did not apply")
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("actual source scheduling failure did not unwind")
 			}
-			if m.sources[reg][id].State.State != "degraded" || m.sources[reg][id].State.LastErrorClass != "repository_docs_provider_boundary_blocked" {
+			if stale {
+				assertObsoleteSourceCallbackUnchanged(t, m, reg, id, before, beforeSource, int(writes.Load()))
+			} else if m.sources[reg][id].State.State != "degraded" || m.sources[reg][id].State.LastErrorClass != "repository_docs_provider_boundary_blocked" || writes.Load() == 0 {
 				t.Fatal("actual local-only scheduling boundary unavailable")
 			}
 			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
+			assertSourceAuthorityRestart(t, m, reg, id, *m.sources[reg][id])
 		})
 	}
 }
@@ -448,10 +484,54 @@ func assertMaintenanceSourceAuthorityCaptures(t *testing.T, ctx context.Context,
 	}
 	expected, lost := 1, uint64(0)
 	if stale {
-		expected, lost = 0, 1
+		expected = 0
 	}
 	if sourceCaptures != expected || buffer.lost != lost {
-		t.Fatal("current confirmation and obsolete count-only loss not conserved")
+		t.Fatal("source confirmation or unchanged obsolete callback accounting incorrect")
+	}
+}
+
+func assertObsoleteSourceCallbackUnchanged(t *testing.T, m *MaintenanceManager, reg, id string, before MaintenanceEntry, beforeSource repositoryDocsRegisteredSource, writes int) {
+	t.Helper()
+	if writes != 0 || !reflect.DeepEqual(cloneMaintenanceEntryPrivate(m.entries[reg]), before) || *m.sources[reg][id] != beforeSource {
+		t.Fatal("obsolete callback changed replacement authority or persisted state")
+	}
+	list, err := m.List(context.Background())
+	if err != nil || len(list.Entries) != 1 || !reflect.DeepEqual(list.Entries[0], cloneMaintenanceEntry(&before)) {
+		t.Fatal("public maintenance projection changed after obsolete callback")
+	}
+}
+
+func assertSourceAuthorityRestart(t *testing.T, m *MaintenanceManager, reg, id string, want repositoryDocsRegisteredSource) {
+	t.Helper()
+	reloaded := NewMaintenanceManager(m.manager, NewJobManager(""), m.path)
+	if reloaded.Load() != nil {
+		t.Fatal("durable source authority changed across restart")
+	}
+	// Existing registry canonicalization may redirect a rebound source's
+	// original id to the id of its replacement Git/worktree/profile authority.
+	// Require that exact redirect, not an arbitrary substitute source.
+	canonicalID := reloaded.resolveSourceRegistrationIDLocked(id)
+	if canonicalID != repositoryDocsSourceRegistrationID(reg, want.State.GitStoreRef, want.State.WorktreeRef, want.Profile) || reloaded.sources[reg][canonicalID] == nil {
+		t.Fatal("durable source redirect does not match replacement authority")
+	}
+	want.State.SourceRegistrationID = canonicalID
+	got := *reloaded.sources[reg][canonicalID]
+	if got != want {
+		changed := []string{}
+		if got.RepositoryPath != want.RepositoryPath {
+			changed = append(changed, "path")
+		}
+		if got.Profile != want.Profile {
+			changed = append(changed, "profile")
+		}
+		a, b := reflect.ValueOf(got.State), reflect.ValueOf(want.State)
+		for i := 0; i < a.NumField(); i++ {
+			if !reflect.DeepEqual(a.Field(i).Interface(), b.Field(i).Interface()) {
+				changed = append(changed, a.Type().Field(i).Name)
+			}
+		}
+		t.Fatalf("durable source authority changed across restart: fields %s", strings.Join(changed, ","))
 	}
 }
 

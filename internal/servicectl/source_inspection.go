@@ -56,14 +56,27 @@ func (m *MaintenanceManager) retainRepositoryDocsInspection(snapshot *Maintenanc
 }
 
 func (m *MaintenanceManager) inspectionAuthorityLocked(snapshot *MaintenanceEntry) (*MaintenanceEntry, *repositoryDocsRegisteredSource, bool) {
-	entry := m.entries[snapshot.RegistrationID]
+	entry, currentEntry := m.reconcileAuthorityLocked(snapshot)
 	state := snapshot.RepositoryDocs
-	if entry == nil || state == nil {
+	if !currentEntry || state == nil {
 		return entry, nil, false
 	}
 	source := m.sources[snapshot.RegistrationID][state.SourceRegistrationID]
-	current := source != nil && entry.Generation == snapshot.Generation && entry.CacheUUID == snapshot.CacheUUID && entry.RepoID == snapshot.RepoID && entry.PathFingerprint == snapshot.PathFingerprint && source.RepositoryPath == snapshot.repositoryPath && source.State.SourceRegistrationGeneration == state.SourceRegistrationGeneration
+	current := source != nil && state.SourceRegistrationID == snapshot.repositorySourceID &&
+		source.State.SourceRegistrationID == state.SourceRegistrationID &&
+		source.RepositoryPath == snapshot.repositoryPath && source.Profile == snapshot.repositoryProfile &&
+		source.State.SourceRegistrationGeneration == state.SourceRegistrationGeneration
 	return entry, source, current
+}
+
+// Completion authority belongs to the snapshot that started the work, not a
+// replacement registration found later under the same map key. Call under mu
+// before mutating either scheduling state or source state.
+func (m *MaintenanceManager) reconcileAuthorityLocked(snapshot *MaintenanceEntry) (*MaintenanceEntry, bool) {
+	entry := m.entries[snapshot.RegistrationID]
+	return entry, entry != nil && entry.RegistrationID == snapshot.RegistrationID &&
+		entry.Generation == snapshot.Generation && entry.CacheUUID == snapshot.CacheUUID &&
+		entry.RepoID == snapshot.RepoID && entry.PathFingerprint == snapshot.PathFingerprint
 }
 
 func inspectionHealthReason(class string) string {
