@@ -99,6 +99,15 @@ gitcode-mcp repo-docs rebind --repo owner/repo --registration-id REG \
   --source-registration-generation 1 --repository-path /new/worktree
 ```
 
+Rebind fences the previous source generation. A late reconcile completion or
+scheduling failure from that old registration/source/path cannot change the
+replacement's state, inspection history, retry/error state, active-job links or
+polling timestamps. It returns the current sanitized authority without writing
+the registry. Only a matching active job intent can mark the current source
+`indexing`; current-generation failures still apply normally. Registry restart
+preserves that authority through the existing exact source-id redirects. This
+is shared by CLI, MCP and Admin status, not an observation-side repair.
+
 Public status exposes only opaque Git
 store/worktree refs. The coordinator then polls committed `HEAD` and policy
 identity every minute and coalesces a new immutable-set job when either

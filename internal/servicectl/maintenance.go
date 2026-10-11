@@ -2826,16 +2826,27 @@ func repositoryDocsRetryReady(state *RepositoryDocsMaintenanceState, now time.Ti
 
 func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG, activeRepositoryDocs Job, now time.Time) MaintenanceEntry {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	entry := m.entries[registrationID]
+	if entry == nil {
+		return MaintenanceEntry{}
+	}
+	_, currentEntry := m.reconcileAuthorityLocked(&snapshot)
+	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&snapshot)
+	if registrationID != snapshot.RegistrationID || !currentEntry || snapshot.RepositoryDocs != nil && !currentSourceAuthority {
+		return cloneMaintenanceEntry(entry)
+	}
+	if activeRepositoryDocs.ID != "" && !repositoryDocsJobMatchesSnapshot(activeRepositoryDocs, snapshot) {
+		activeRepositoryDocs = Job{}
+	}
 	beforeObservation := maintenanceObservedState(entry)
-	observedSource := m.sources[registrationID][snapshot.repositorySourceID]
+	observedSource := authoritySource
 	beforeSourceObservation := maintenanceObservedSourceState(observedSource)
 	entry.ContentGeneration = contentGeneration
 	entry.CoveredGeneration = covered
 	entry.RAGStatus = ragStatus
 	entry.SyncStage = snapshot.SyncStage
 	entry.RAGStage = snapshot.RAGStage
-	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&snapshot)
 	if currentSourceAuthority {
 		// Inspection is separately confirmed at its actual completion. A later
 		// stale finish must not overwrite that transaction or bypass its failure.
@@ -2875,13 +2886,16 @@ func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrat
 	entry.NextReconcileAt = now.Add(time.Minute)
 	persisted := m.saveLocked() == nil
 	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
-	// An obsolete callback may retain an existing execution-state mutation. Do
-	// not certify it as a current source observation: conserve the changed pair
-	// as unconfirmed loss without altering execution or persistence behavior.
-	captureMaintenanceSourceObservation(ctx, beforeSourceObservation, entry, observedSource, persisted && currentSourceAuthority && observedSource == authoritySource)
-	updated := cloneMaintenanceEntry(entry)
-	m.mu.Unlock()
-	return updated
+	captureMaintenanceSourceObservation(ctx, beforeSourceObservation, entry, observedSource, persisted && currentSourceAuthority)
+	return cloneMaintenanceEntry(entry)
+}
+
+func repositoryDocsJobMatchesSnapshot(job Job, snapshot MaintenanceEntry) bool {
+	state := snapshot.RepositoryDocs
+	return state != nil && job.Type == RepositoryDocsIndexJobType && jobActiveStatus(job.Status) &&
+		job.CacheUUID == snapshot.CacheUUID && job.RepoID == snapshot.RepoID &&
+		job.RegistrationID == snapshot.RegistrationID && job.SourceRegistrationID == state.SourceRegistrationID &&
+		job.SourceRegistrationGeneration == state.SourceRegistrationGeneration
 }
 
 func (m *MaintenanceManager) reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore, entry *MaintenanceEntry, now time.Time) bool {
@@ -2962,11 +2976,11 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id
 		return MaintenanceEntry{}
 	}
 	source := m.sources[id][strings.TrimSpace(sourceID)]
-	if source == nil {
+	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&expected)
+	if id != expected.RegistrationID || !currentSourceAuthority || source == nil || source != authoritySource {
 		return cloneMaintenanceEntry(entry)
 	}
 	beforeObservation := maintenanceObservedSourceState(source)
-	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&expected)
 	source.State.State = "degraded"
 	source.State.LastErrorClass = class
 	source.State.LastError = message
@@ -2976,7 +2990,7 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
 	persisted := m.saveLocked() == nil
-	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, persisted && currentSourceAuthority && source == authoritySource)
+	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, persisted)
 	return cloneMaintenanceEntry(entry)
 }
 
