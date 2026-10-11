@@ -279,8 +279,11 @@ CLI, normal/minimal MCP and authenticated Admin identify the same retrying
 incident and recovered job. The browser retains its selected incident and
 updates from native SSE without navigation or manual refresh after the active
 snapshot. Only actual admitted retries increment the counter; observation adds
-no provider request. The stream must deliver the confirmed terminal revision,
-not merely an intermediate attempt-start invalidation.
+no provider request. Qualification awaits the actual retained succeeded terminal
+event, then requires a native invalidation matching the current revision with
+that terminal sequence and recovered authority. This permits legitimate poller
+coalescing without accepting an intermediate attempt-start invalidation or
+requiring publication of every transient fingerprint.
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
 deadline but preserves this same-job recovery evidence across owner reload.

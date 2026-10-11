@@ -336,16 +336,43 @@ func TestO5ActualActiveRetryAndSSERecovery(t *testing.T) {
 	if admissions != 1 {
 		t.Fatal("scheduled timer fabricated or lost retry admission")
 	}
-	finalRevision, err := retryObservationRead(ctx, func() (string, error) { return reader.Revision(ctx) })
-	if err != nil || finalRevision == initialRevision {
-		t.Fatal("actual recovery revision unavailable or unchanged")
-	}
+	// Job authority is persisted before its terminal event is asynchronously
+	// retained. Establish that causal boundary before accepting an invalidation;
+	// the poller may legitimately skip any earlier transient fingerprint.
+	var terminalSequence uint64
+	eventually(t, func() bool {
+		page, err := retryObservationRead(ctx, func() (observability.Page, error) {
+			return reader.Events(ctx, observability.EventsRequest{Limit: 50})
+		})
+		if err != nil {
+			return false
+		}
+		for _, event := range page.Events {
+			if event.Code == observability.JobTerminal && event.JobRef == refs.Job && event.Outcome == "succeeded" {
+				if event.BootID != collector.BootID() || event.CacheRef != refs.Cache || event.RepoRef != refs.Repo || event.CorrelationRef == "" {
+					t.Fatal("actual terminal event lost causal job identity")
+				}
+				terminalSequence = event.Sequence
+				return terminalSequence > 0
+			}
+		}
+		return false
+	})
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {
 		case revision := <-signals:
-			if revision == finalRevision {
+			current, err := retryObservationRead(ctx, func() (string, error) { return reader.Revision(ctx) })
+			if err != nil {
+				t.Fatal("actual recovery revision unavailable")
+			}
+			if revision != initialRevision && revision == current {
+				summary := mustActiveSummary(t, ctx, reader)
+				if summary.Collector.BootID != collector.BootID() || summary.Collector.LatestSequence < terminalSequence {
+					t.Fatal("actual SSE invalidation preceded retained terminal authority")
+				}
+				assertActiveIncident(t, summary, "recovered", refs.Job, nil, finished.SyncCollections[0].LastSuccessAt)
 				goto invalidated
 			}
 		case <-deadline.C:
