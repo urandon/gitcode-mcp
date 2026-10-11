@@ -29,6 +29,28 @@ async function mockObservation(page: Page, fixture = observationFixture(), snaps
 }
 const emit = (page: Page, kind = 'observability_changed') => page.evaluate(k => (window as any).__emitObservation(k), kind);
 
+test('one typed busy timeline read after invalidation recovers selected safe-copy without Refresh', async ({ page }) => {
+  const mock = await mockObservation(page);
+  await page.goto('/?view=Service');
+  await page.getByRole('button', { name: 'Job Admitted', exact: true }).click();
+  const copy = page.getByRole('button', { name: 'Copy safe context', exact: true });
+  await expect(copy).toBeEnabled();
+  let reads = 0;
+  await page.route('**/api/admin/v1/observability/events?**', route => {
+    reads++;
+    return reads === 1
+      ? route.fulfill({ status: 503, json: { error: { code: 'observation_busy', reason: 'ledger_busy' } } })
+      : route.fulfill({ json: mock.fixture.page });
+  });
+  await emit(page);
+  await expect.poll(() => reads).toBe(2);
+  await expect(copy).toBeEnabled();
+  await copy.click();
+  const context = JSON.parse(await page.evaluate(() => (window as any).__copiedObservation));
+  expect(context.event.event_id).toBe(id('e'));
+  expect(mock.requests.every(request => request.startsWith('GET '))).toBe(true);
+});
+
 test('typed event rows distinguish neutral-info failures and preserve maintenance predecessor copy', async ({ page }) => {
   const fixture = observationFixture();
   fixture.summary.event_templates!.job_terminal = { stream: 'stdout', severity: 'info', component: 'jobs', message: 'A job reached a confirmed terminal state.' };

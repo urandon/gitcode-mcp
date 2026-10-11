@@ -225,6 +225,14 @@ retries only typed `observation_busy` reads, at most five attempts separated by
 test-only handling never retries sync or relaxes DTO/privacy/provider-count
 assertions. Transport controls reject raw-text and mixed success/error envelopes.
 
+The Admin read helper likewise retries only a structured HTTP 503
+`observation_busy`, at most five GET attempts with 10 ms spacing inside one
+four-second deadline. It keeps the exact URL/selectors/cursor and joins backoff
+timers on cancellation or navigation. Exhausted busy reads remain visible;
+auth, unknown errors and cursor discontinuities are never automatically retried.
+This lets a selected incident's safe-copy recover from transient local read
+contention after native SSE without a new execution action or manual Refresh.
+
 `web/tests/observation-integrated.spec.ts` compiles that test-only fixture and
 drives the embedded Admin bundle against its real authenticated API. It does
 not replace HTTP responses or EventSource with mocks. It checks the selected
@@ -252,7 +260,7 @@ retain the following distinctions until exact-SHA qualification is complete:
 | Bounded managed diagnostic data | Collector/output-writer tests and sanitized DTO contracts; native legacy-upgrade qualification is distinct from simulated platform responses. |
 | Units, reset and history semantics | Fixed metric catalog/history tests; actual-owner transport suite must not infer samples from counters or replay. |
 | Stable cross-surface correlation | Same actual-owner Reader across IPC/CLI/MCP/Admin; source joins and browser entity navigation have separate explicit gates. |
-| Retention, cursors and restart | Actual stopped-worker retry recovery and admission-drop reload/cursor parity plus ledger unit controls; joined whole-footprint/rotation diagnosis remains O5 work. |
+| Retention, cursors and restart | Actual stopped-worker retry recovery, admission-drop reload/cursor parity and joined whole-footprint rotation diagnosis; native legacy-upgrade qualification remains separate. |
 | Observation is read-only | Isolated configuration, nil cache service in MCP, fixed Admin GETs and provider-call accounting; no install, sync or hidden repair. |
 | Go/frontend/browser contracts | Full repository, race, asset, type/unit and semantic gates plus independent exact-SHA review and head/main CI are required; individual focused runs are insufficient. |
 | Ownership and operations documentation | This playbook, architecture and contracts; final pass/skipped/blocked disposition belongs in issue comments, not an inferred release claim. |
@@ -323,6 +331,26 @@ generation and retention still match. The new boot's admission-drop metric
 starts at zero rather than replaying old loss. This proves real admission loss,
 not ignored post-close emissions, and does not certify native upgrade, browser
 navigation or complete disk bounds.
+
+`TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation` first confirms an actual
+HTTP sync success and then a provider-forbidden failure. Separately identified
+synthetic catalog pressure rotates all four ledger segments and both segments
+of each managed output stream; it is not job throughput or fabricated recovery
+evidence. The complete private inventory must have fixed names, regular `0600`
+files, 1 MiB segment caps and at most 4 MiB ledger + 4 MiB streams + 8 KiB
+metadata. Source text, provider bodies and private coordinates must be absent.
+The evicted actual job's filtered timeline is exhaustively scanned with bounded
+sparse continuation and must be empty. Its old cursor reports typed retention
+discontinuity (or generation/loss change when concurrent admission loss occurs);
+any such loss is conserved exactly, not silently ignored.
+Durable job authority, the incident's cause and prior success survive rotation
+and clean reload across CLI, normal/minimal MCP, IPC and authenticated Admin
+without provider traffic. Reload may canonicalize failed progress prose to its
+fixed safe message; every other persisted job/progress field remains exact.
+A new confirmed sync recovers that same incident, updates last-success, and has
+mandatory correlated admission/provider/commit/terminal events in the new boot.
+These checks qualify isolated managed-file bounds and retained diagnosis, not a
+native installed-service upgrade or browser entity/source navigation.
 
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
