@@ -9,9 +9,9 @@ and both MCP transports expose its DTOs rather than reconstructing health.
 
 | Data | Admin session GET | Private IPC | CLI | MCP |
 |---|---|---|---|---|
-| Summary | `/api/v1/observability` | `Observability.Summary` | `service observe` | `service_observability` |
-| Metrics | `/api/v1/observability/metrics` | `Observability.Metrics` | `service metrics` | `service_metrics` |
-| Events | `/api/v1/observability/events` | `Observability.Events` | `service events` | `service_events` |
+| Summary | `/api/admin/v1/observability` | `Observability.Summary` | `service observe` | `service_observability` |
+| Metrics | `/api/admin/v1/observability/metrics` | `Observability.Metrics` | `service metrics` | `service_metrics` |
+| Events | `/api/admin/v1/observability/events` | `Observability.Events` | `service events` | `service_events` |
 
 `Observability.Capabilities` advertises `observability.v1`, these three methods,
 and the exact read limits. CLI/MCP negotiate it before querying. An older daemon

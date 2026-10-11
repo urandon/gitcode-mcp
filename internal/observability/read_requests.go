@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
+	"strings"
 )
 
 const MaxReadRequestBytes = 8 << 10
@@ -29,6 +31,10 @@ func DecodeReadRequest(raw []byte, dst any) error {
 	if len(raw) > MaxReadRequestBytes {
 		return invalid
 	}
+	keys, ok := readRequestKeys(dst)
+	if !ok {
+		return invalid
+	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	start, err := d.Token()
 	if err != nil || start != json.Delim('{') {
@@ -38,7 +44,7 @@ func DecodeReadRequest(raw []byte, dst any) error {
 	for d.More() {
 		token, err := d.Token()
 		key, ok := token.(string)
-		if err != nil || !ok || seen[key] {
+		if err != nil || !ok || seen[key] || !keys[key] {
 			return invalid
 		}
 		seen[key] = true
@@ -61,6 +67,43 @@ func DecodeReadRequest(raw []byte, dst any) error {
 		return invalid
 	}
 	return nil
+}
+
+// encoding/json also matches names case-insensitively. These read contracts
+// permit exact JSON-tag names only, so aliases (including Unicode case folds)
+// cannot bypass unknown-field or duplicate-key checks. Types are trusted local
+// DTOs, never caller-provided schema or lookup authority.
+func readRequestKeys(dst any) (map[string]bool, bool) {
+	typ := reflect.TypeOf(dst)
+	if typ == nil || typ.Kind() != reflect.Pointer || typ.Elem().Kind() != reflect.Struct || reflect.ValueOf(dst).IsNil() {
+		return nil, false
+	}
+	keys := map[string]bool{}
+	var add func(reflect.Type) bool
+	add = func(typ reflect.Type) bool {
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.PkgPath != "" {
+				continue
+			}
+			name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+			if name == "-" {
+				continue
+			}
+			if f.Anonymous && name == "" && f.Type.Kind() == reflect.Struct {
+				if !add(f.Type) {
+					return false
+				}
+				continue
+			}
+			if name == "" || keys[name] {
+				return false
+			}
+			keys[name] = true
+		}
+		return true
+	}
+	return keys, add(typ.Elem())
 }
 
 func DecodeEventsRequest(raw []byte) (EventsRequest, error) {

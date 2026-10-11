@@ -21,6 +21,8 @@ func TestEventFilterClosedCatalogAndCompatibility(t *testing.T) {
 		{Since: "2026-01-01T00:00:00.000Z", Until: "2026-01-08T00:00:00Z"},
 		// Legacy lifecycle evidence can retain either stream.
 		{Code: RecoveryFailed, Stream: "stdout"},
+		{Code: RecoveryFinished, Stream: "stderr"},
+		{Code: JobTerminal, Stream: "stdout"}, {Code: WriterContended, Stream: "stderr"},
 	}
 	for _, f := range valid {
 		if _, err := ValidateFilter(f); err != nil {
@@ -28,6 +30,7 @@ func TestEventFilterClosedCatalogAndCompatibility(t *testing.T) {
 		}
 	}
 	invalid := []Filter{
+		{Code: JobTerminal, Stream: "stderr"}, {Code: JobAdmitted, Stream: "stderr"}, {Code: WriterContended, Stream: "stdout"},
 		{Code: ProviderAttempt, Outcome: "succeeded", FailureClass: "timeout"}, {Code: ProviderAttempt, Phase: "embedding", Collection: "wiki"},
 		{Code: JobTerminal, Outcome: "timeout"}, {Code: Boot, Outcome: "succeeded"}, {Code: JobTerminal, SourceRef: KnownRef("source", "a").value},
 		{SourceRef: KnownRef("source", "a").value, StageRef: KnownRef("stage", "a").value},
@@ -47,7 +50,7 @@ func TestEventFilterClosedCatalogAndCompatibility(t *testing.T) {
 		}
 	}
 	for _, e := range filterCatalogShapes {
-		f := Filter{Code: e.Code, Component: e.Component, Severity: e.Severity, Phase: e.Phase, Collection: e.Collection, Outcome: e.Outcome, FailureClass: e.FailureClass, SourceRef: e.SourceRef, StageRef: e.StageRef, PreviousRegistrationRef: e.PreviousRegistrationRef}
+		f := Filter{Stream: e.Stream, Code: e.Code, Component: e.Component, Severity: e.Severity, Phase: e.Phase, Collection: e.Collection, Outcome: e.Outcome, FailureClass: e.FailureClass, SourceRef: e.SourceRef, StageRef: e.StageRef, PreviousRegistrationRef: e.PreviousRegistrationRef}
 		if _, err := ValidateFilter(f); err != nil {
 			t.Fatal("admission shape and filter catalog drifted")
 		}

@@ -45,7 +45,7 @@ func validateFilter(f Filter) (Filter, error) {
 	// Compatibility comes from representative catalog-valid shapes. Optional
 	// entity references are checked by kind, not by arbitrary label lookup.
 	for _, e := range filterCatalogShapes {
-		if f.Code != "" && f.Code != e.Code || f.Component != "" && f.Component != e.Component || f.Severity != "" && f.Severity != e.Severity ||
+		if f.Stream != "" && f.Stream != e.Stream || f.Code != "" && f.Code != e.Code || f.Component != "" && f.Component != e.Component || f.Severity != "" && f.Severity != e.Severity ||
 			f.Phase != "" && f.Phase != e.Phase || f.Collection != "" && f.Collection != e.Collection || f.Outcome != "" && f.Outcome != e.Outcome || f.FailureClass != "" && f.FailureClass != e.FailureClass ||
 			f.SourceRef != "" && e.SourceRef == "" || f.StageRef != "" && e.StageRef == "" || f.PreviousRegistrationRef != "" && e.PreviousRegistrationRef == "" ||
 			f.JobRef != "" && (e.Code == MaintenanceStateChanged || e.Code == AdminRequestCompleted) ||
@@ -102,6 +102,11 @@ func buildFilterCatalogShapes() []Event {
 	for code, t := range catalog {
 		base := Event{Code: code, Component: t.component, Severity: t.severity, Stream: t.stream}
 		if !executionCode(code) {
+			// Only legacy lifecycle evidence can retain either stream. Actual
+			// execution codes cannot be legacy and keep their admitted stream.
+			base.Stream = "stdout"
+			shapes = append(shapes, base)
+			base.Stream = "stderr"
 			shapes = append(shapes, base)
 			continue
 		}

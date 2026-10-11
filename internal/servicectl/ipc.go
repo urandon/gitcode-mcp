@@ -181,7 +181,9 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 		if observationMethod(req.Method) {
 			_ = conn.SetWriteDeadline(readDeadline)
 			if len(raw) > observability.MaxReadRequestBytes+observationEnvelopeBytes || strictObservationEnvelope(raw) != nil {
-				resp = RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID, Error: &RPCError{Code: -32602, Message: "invalid observation request", DiagnosticCode: "invalid_query"}}
+				// The invalid envelope's ID is untrusted: structured or duplicate
+				// IDs may carry a raw private body. Reflect none of it in an error.
+				resp = RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32602, Message: "invalid observation request", DiagnosticCode: "invalid_query"}}
 			} else {
 				readCtx, cancel := context.WithDeadline(ctx, readDeadline)
 				resp = s.handleRequest(readCtx, req)

@@ -13,6 +13,22 @@ import (
 )
 
 func TestReadRequestStrictBeforeAnyObservation(t *testing.T) {
+	for _, raw := range []string{`{"LIMIT":1}`, `{"Limit":1}`, `{"limit":0,"LIMIT":1}`, `{"stream":"stderr","code":"job_terminal"}`, `{"limit":1,"Limit":2}`} {
+		if _, err := DecodeEventsRequest([]byte(raw)); err == nil {
+			t.Fatal("case alias or incompatible execution stream accepted")
+		}
+	}
+	for _, raw := range []string{`{"NAME":"runtime_heap"}`, `{"HISTORY_MINUTES":1}`} {
+		if _, err := DecodeMetricsRequest([]byte(raw)); err == nil {
+			t.Fatal("case-aliased metric field accepted")
+		}
+	}
+	var c cursor
+	for _, raw := range []string{`{"S":1}`, `{"ſ":1}`, `{"s":0,"S":1}`} {
+		if DecodeReadRequest([]byte(raw), &c) == nil {
+			t.Fatal("cursor JSON-tag case fold alias accepted")
+		}
+	}
 	for _, raw := range []string{`null`, `[]`, `1`, `"x"`, `{"unknown":1}`, `{"limit":50,"limit":20}`, `{"limit":0}`, `{"limit":201}`, `{"limit":1.5}`, `{"limit":"50"}`, `{"limit":null}`, `{"limit":[]}`, `{"filter":{}}`, `{"stream":true}`, `{"cursor":null}`, `{} {}`, `{"source_ref":"synthetic-private-coordinate"}`} {
 		_, err := DecodeEventsRequest([]byte(raw))
 		var q QueryError

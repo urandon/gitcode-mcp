@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -19,9 +20,6 @@ const maxRPCRequestBytes = 1 << 20
 // Existing JSON-stream RPC framing is retained; each decoded value is capped.
 // Observation envelopes additionally use the smaller published request budget.
 func strictObservationEnvelope(raw []byte) error {
-	if err := uniqueObservationJSON(raw); err != nil {
-		return err
-	}
 	var req RPCRequest
 	if err := strictObservationResponse(raw, &req); err != nil {
 		return err
@@ -260,7 +258,7 @@ func (c *RPCClient) observationRoundTrip(ctx context.Context, method string, par
 }
 
 func strictObservationResponse(data []byte, dst any) error {
-	if err := uniqueObservationJSON(data); err != nil {
+	if err := uniqueObservationJSON(data, reflect.TypeOf(dst)); err != nil {
 		return err
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -287,14 +285,52 @@ func validObservationQueryError(q observability.QueryError) bool {
 	return false
 }
 
-func uniqueObservationJSON(data []byte) error {
+func uniqueObservationJSON(data []byte, schema reflect.Type) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
-	var value func(int) error
+	var value func(int, reflect.Type) error
 	invalid := errors.New("invalid observation JSON")
-	value = func(depth int) error {
+	fieldsByType := map[reflect.Type]map[string]reflect.Type{}
+	var fields func(reflect.Type) map[string]reflect.Type
+	fields = func(typ reflect.Type) map[string]reflect.Type {
+		if known, ok := fieldsByType[typ]; ok {
+			return known
+		}
+		out := map[string]reflect.Type{}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.PkgPath != "" {
+				continue
+			}
+			name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+			if name == "-" {
+				continue
+			}
+			if f.Anonymous && name == "" && f.Type.Kind() == reflect.Struct {
+				for key, child := range fields(f.Type) {
+					out[key] = child
+				}
+				continue
+			}
+			if name == "" {
+				name = f.Name
+			}
+			out[name] = f.Type
+		}
+		fieldsByType[typ] = out
+		return out
+	}
+	value = func(depth int, typ reflect.Type) error {
 		if depth > 16 {
 			return invalid
+		}
+		for typ != nil && typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+		// Raw JSON envelopes are checked for duplicate keys/depth here, then
+		// validated against their actual DTO in the next decode boundary.
+		if typ == reflect.TypeOf(json.RawMessage{}) {
+			typ = nil
 		}
 		t, err := d.Token()
 		if err != nil {
@@ -306,6 +342,10 @@ func uniqueObservationJSON(data []byte) error {
 		}
 		switch delim {
 		case '{':
+			var allowed map[string]reflect.Type
+			if typ != nil && typ.Kind() == reflect.Struct {
+				allowed = fields(typ)
+			}
 			seen := map[string]bool{}
 			for d.More() {
 				token, err := d.Token()
@@ -314,7 +354,17 @@ func uniqueObservationJSON(data []byte) error {
 					return invalid
 				}
 				seen[key] = true
-				if err := value(depth + 1); err != nil {
+				var child reflect.Type
+				if allowed != nil {
+					var ok bool
+					child, ok = allowed[key]
+					if !ok {
+						return invalid
+					}
+				} else if typ != nil && typ.Kind() == reflect.Map {
+					child = typ.Elem()
+				}
+				if err := value(depth+1, child); err != nil {
 					return err
 				}
 			}
@@ -322,8 +372,12 @@ func uniqueObservationJSON(data []byte) error {
 				return invalid
 			}
 		case '[':
+			var child reflect.Type
+			if typ != nil && (typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array) {
+				child = typ.Elem()
+			}
 			for d.More() {
-				if err := value(depth + 1); err != nil {
+				if err := value(depth+1, child); err != nil {
 					return err
 				}
 			}
@@ -335,7 +389,7 @@ func uniqueObservationJSON(data []byte) error {
 		}
 		return nil
 	}
-	if err := value(0); err != nil {
+	if err := value(0, schema); err != nil {
 		return err
 	}
 	if _, err := d.Token(); err != io.EOF {

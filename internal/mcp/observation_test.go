@@ -98,6 +98,10 @@ func TestMCPObservationStrictBeforeClientOrBootstrap(t *testing.T) {
 		{"service_events", `{"limit":50,"limit":10}`},
 		{"service_events", `{"write_mode":"live"}`},
 		{"service_events", `{"cursor":null}`},
+		{"service_events", `{"stream":"stderr","code":"job_terminal"}`},
+		{"service_events", `{"LIMIT":1}`},
+		{"service_events", `{"limit":0,"LIMIT":1}`},
+		{"service_metrics", `{"NAME":"runtime_heap"}`},
 	} {
 		resp := mcpObservationCall(t, h, test.name, test.args)
 		if resp.Error == nil || resp.Error.Code != -32602 || resp.Error.Data.Code != "invalid_query" {

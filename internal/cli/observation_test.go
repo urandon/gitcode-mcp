@@ -35,6 +35,7 @@ func TestObservationCLIRejectsBeforeConfigOrBootstrap(t *testing.T) {
 		{"service", "events", "--limit", "0"}, {"service", "events", "--limit", "201"}, {"service", "events", "--limit", "50", "--limit", "20"},
 		{"service", "events", "--source-ref", "synthetic-private-path"}, {"service", "events", "--outcome", "succeeded", "--failure-class", "timeout"},
 		{"service", "events", "--since", "2026-01-01T00:00:00Z"},
+		{"service", "events", "--stream", "stderr", "--code", "job_terminal"},
 	} {
 		var out, errOut bytes.Buffer
 		code := executeWithFactoryAndDepsContext(context.Background(), args, &out, &errOut, func(context.Context, string) (queryService, func() error, error) {

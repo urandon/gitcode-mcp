@@ -82,7 +82,7 @@ func TestObservationIPCStrictRequestsBeforeConnectAndReader(t *testing.T) {
 		calls.Add(1)
 		writeObservationResponse(conn, req, observationFixtureCapabilities())
 	})
-	for _, params := range []any{map[string]any{"unknown": "synthetic-private"}, map[string]any{"limit": 0}, map[string]any{"source_ref": "synthetic-private"}, map[string]any{"outcome": "succeeded", "failure_class": "timeout"}} {
+	for _, params := range []any{map[string]any{"unknown": "synthetic-private"}, map[string]any{"limit": 0}, map[string]any{"source_ref": "synthetic-private"}, map[string]any{"outcome": "succeeded", "failure_class": "timeout"}, map[string]any{"LIMIT": 1}, map[string]any{"limit": 0, "LIMIT": 1}, map[string]any{"stream": "stderr", "code": "job_terminal"}} {
 		if err := client.Call(context.Background(), "Observability.Events", params, &observability.Page{}); err == nil {
 			t.Fatal("invalid query connected to daemon")
 		}
@@ -238,6 +238,11 @@ func TestObservationIPCServerStrictEnvelopeBeforeReader(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"method":"Observability.Summary","method":"Observability.Summary","params":{}}`,
 		`{"jsonrpc":"2.0","id":1,"method":"Observability.Summary","unknown":"synthetic-private","params":{}}`,
 		`{"jsonrpc":"2.0","id":{},"method":"Observability.Summary","params":{}}`,
+		`{"jsonrpc":"2.0","id":{"private":"synthetic-private-id"},"method":"Observability.Summary","params":{}}`,
+		`{"jsonrpc":"2.0","id":["synthetic-private-id"],"method":"Observability.Summary","params":{}}`,
+		`{"JSONRPC":"2.0","id":1,"method":"Observability.Summary","params":{}}`,
+		`{"jsonrpc":"2.0","ID":1,"method":"Observability.Summary","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"METHOD":"Observability.Summary","params":{}}`,
 		`{"jsonrpc":"2.0","id":1,"method":"Observability.Summary","params":{"unknown":"` + strings.Repeat("x", observability.MaxReadRequestBytes) + `"}}`,
 	} {
 		client, server := net.Pipe()
@@ -252,6 +257,12 @@ func TestObservationIPCServerStrictEnvelopeBeforeReader(t *testing.T) {
 		if json.NewDecoder(client).Decode(&response) != nil || response.Error == nil || response.Error.DiagnosticCode != "invalid_query" {
 			t.Error("invalid wire envelope reached the reader or lost its fixed error")
 		}
+		encoded, _ := json.Marshal(response)
+		_, structuredID := response.ID.(map[string]any)
+		_, arrayID := response.ID.([]any)
+		if structuredID || arrayID || strings.Contains(string(encoded), "synthetic-private") {
+			t.Error("invalid envelope reflected unvalidated id/body")
+		}
 		cancel()
 		_ = client.Close()
 		select {
@@ -262,6 +273,36 @@ func TestObservationIPCServerStrictEnvelopeBeforeReader(t *testing.T) {
 		if reads.Load() != 0 {
 			t.Fatal("invalid wire request reached retained health reader")
 		}
+	}
+}
+
+func TestObservationIPCExactResponseKeysIncludingNestedDTO(t *testing.T) {
+	for _, raw := range []string{
+		`{"JSONRPC":"2.0","id":1,"result":{}}`,
+		`{"jsonrpc":"2.0","ID":1,"result":{}}`,
+		`{"jsonrpc":"2.0","id":1,"Error":{"Code":-32000}}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"Observation":{"code":"invalid_query","reason":"unsupported_request"}}}`,
+	} {
+		var response observationRPCResponse
+		if strictObservationResponse([]byte(raw), &response) == nil {
+			t.Fatal("case-folded response envelope/nested error accepted")
+		}
+	}
+	for _, raw := range []string{
+		`{"Protocol":"observability.v1"}`, `{"protocol":"observability.v1","limits":{"Events":200}}`,
+	} {
+		var capabilities ObservationCapabilities
+		if strictObservationResponse([]byte(raw), &capabilities) == nil {
+			t.Fatal("case-folded capability DTO accepted")
+		}
+	}
+	var summary observability.Summary
+	if strictObservationResponse([]byte(`{"collector":{"Boot_ID":"0123456789abcdef0123456789abcdef"}}`), &summary) == nil {
+		t.Fatal("case-folded nested summary accepted")
+	}
+	var metrics observability.MetricsSnapshot
+	if strictObservationResponse([]byte(`{"series":[{"Name":"runtime_heap"}]}`), &metrics) == nil {
+		t.Fatal("case-folded embedded metric point accepted")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,10 @@ func TestObservabilityAdminGuardsBeforeAnyRead(t *testing.T) {
 		{"/api/admin/v1/observability/events?source_ref=synthetic-private", "GET", "", "", "", "", true, 400},
 		{"/api/admin/v1/observability/events?outcome=succeeded&failure_class=timeout", "GET", "", "", "", "", true, 400},
 		{"/api/admin/v1/observability/metrics?history_minutes=61", "GET", "", "", "", "", true, 400},
+		{"/api/admin/v1/observability/events?LIMIT=1", "GET", "", "", "", "", true, 400},
+		{"/api/admin/v1/observability/events?limit=0&LIMIT=1", "GET", "", "", "", "", true, 400},
+		{"/api/admin/v1/observability/metrics?NAME=runtime_heap", "GET", "", "", "", "", true, 400},
+		{"/api/admin/v1/observability/events?stream=stderr&code=job_terminal", "GET", "", "", "", "", true, 400},
 	} {
 		r := httptest.NewRequest(test.method, "http://127.0.0.1:8080"+test.path, bytes.NewBufferString(test.body))
 		if test.authorized {
@@ -178,5 +183,70 @@ func TestObservabilityRevisionExcludesPollAndLiveRequestCounters(t *testing.T) {
 		if strings.Contains(string(data), private) {
 			t.Fatal("SSE invalidation carried observation body")
 		}
+	}
+}
+
+func TestObservabilityInvalidationRateAfterDelayedPublication(t *testing.T) {
+	collector := adminEventCollector(t)
+	closeAdminCollector(t, collector)
+	at := time.Unix(1700000000, 0).UTC()
+	metrics := observability.NewMetrics(collector.BootID(), at)
+	c := New(Config{Observability: &observability.Reader{Collector: collector, Metrics: metrics}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.events.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			c.events.mu.Unlock()
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("observation poller did not join")
+		}
+	}()
+	go func() { defer close(done); c.pollObservability(ctx) }()
+	// Wait for the real publication boundary, rather than assuming a goroutine
+	// has been scheduled. Stack data is inspected locally and never reported.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		blocked := false
+		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(stack, ".pollObservability(") && strings.Contains(stack, "(*eventLog).append(") {
+				blocked = true
+			}
+		}
+		if blocked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("initial invalidation did not reach the held publication boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Let a fixed-period tick accumulate while the first revision is waiting.
+	time.Sleep(1100 * time.Millisecond)
+	if !metrics.SampleAt(at, map[string]observability.ProbeValue{"runtime_heap": observability.Available(42)}) {
+		t.Fatal("changed revision fixture unavailable")
+	}
+	c.events.mu.Unlock()
+	locked = false
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		events, _, _, _ := c.events.replay(0)
+		if len(events) >= 2 {
+			if events[1].OccurredAt.Sub(events[0].OccurredAt) < time.Second {
+				t.Fatal("observation invalidations exceeded the actual one-per-second emission bound")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("changed revision was not eventually published")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

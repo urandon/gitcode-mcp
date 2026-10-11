@@ -145,18 +145,23 @@ func writeObservationError(w http.ResponseWriter, err error) {
 // Compact invalidation only, from an owned poller joined at daemon shutdown.
 // This intentionally bypasses the broad Admin/cache/feedback snapshot provider.
 func (c *Controller) pollObservability(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
 	previous := ""
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if revision, err := c.cfg.Observability.Revision(ctx); err == nil && revision != previous {
 			c.events.append(Event{Kind: "observability_changed", EntityType: "observability", EntityID: "daemon", Revision: revision})
 			previous = revision
 		}
+		// Measure from completion of the actual publication. A fixed ticker can
+		// retain a tick while append is delayed and burst on the next iteration.
+		timer := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
