@@ -114,8 +114,18 @@ func waitJob(t *testing.T, jobs *servicectl.JobManager, id, cacheID string) serv
 }
 
 func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
-	for _, mode := range []string{"retained", "disabled", "storage_unavailable", "sealed"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		status     int
+	}{
+		{"retained", "retained", http.StatusForbidden},
+		{"unauthorized", "retained", http.StatusUnauthorized},
+		{"disabled", "disabled", http.StatusForbidden},
+		{"storage_unavailable", "storage_unavailable", http.StatusForbidden},
+		{"sealed", "sealed", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mode := tc.mode
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			root := t.TempDir()
@@ -130,7 +140,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				if forbidden.Load() {
-					w.WriteHeader(403)
+					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, `{"message":"synthetic-private-provider-body"}`)
 					return
 				}
@@ -206,12 +216,12 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			}
 			found := false
 			for _, incident := range health.Incidents {
-				if incident.Collection == "issues" && incident.Reason == "operation_failed" && incident.LastSuccessAt != nil {
+				if incident.Collection == "issues" && incident.Reason == "provider_forbidden" && incident.LastSuccessAt != nil {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatal("failure diagnosis lost prior confirmed collection success")
+				t.Fatal("failure diagnosis lost provider auth cause or prior confirmed collection success")
 			}
 			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, root, provider.URL, identity.UUID, binding.RepoID)
 			// New job owner reloads the durable snapshot, not event-derived state.
@@ -277,6 +287,15 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			health = maintenance.ExecutionHealth(at)
 			if health.State != "healthy" || health.Active != 0 || health.Recovered == 0 {
 				t.Fatal("confirmed recovery did not recover retained incident")
+			}
+			found = false
+			for _, incident := range health.Incidents {
+				if incident.Collection == "issues" && incident.State == "recovered" && incident.Reason == "provider_forbidden" && incident.LastSuccessAt != nil && incident.LastSuccessAt.After(*failed.FinishedAt) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("confirmed recovery erased the prior provider auth cause")
 			}
 			if mode == "storage_unavailable" && collector.Coverage().State != "partial" {
 				t.Fatal("storage failure disappeared into execution success")
@@ -423,6 +442,9 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 					t.Fatal("actual job event lost causal identity")
 				}
 				admitted = admitted || event.Code == observability.JobAdmitted
+				if event.Code == observability.JobTerminal && outcome == servicectl.JobStatusFailed && event.FailureClass != "forbidden" {
+					t.Fatal("actual auth terminal lost its finite provider failure class")
+				}
 				terminal = terminal || event.Code == observability.JobTerminal && event.Outcome == outcome
 				provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch"
 				committed = committed || event.Code == observability.SyncCommitted && event.Collection == "issues" && event.Outcome == "succeeded"

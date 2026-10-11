@@ -86,6 +86,7 @@ test('actual failed job survives durable reload and recovers without observation
       await expect(page.getByRole('heading', { name: 'Event timeline' })).toBeVisible();
       const incident = summary.execution_health.incidents.find((value: any) => value.collection === 'issues');
       expect(incident).toBeDefined();
+      expect(incident.reason).toBe('provider_forbidden');
       expect(incident.last_success_at).toBeTruthy();
       const incidentSection = page.getByRole('region', { name: 'Active and recovered incidents', exact: true });
       const incidentButton = incidentSection.getByRole('button', { name: 'Sync · Issues', exact: true });
@@ -122,7 +123,7 @@ test('actual failed job survives durable reload and recovers without observation
       expect(eventCopy.event.code).toBe('job_terminal');
       expect(eventCopy.event.phase).toBe('completion');
       expect(eventCopy.event.outcome).toBe(phase < 2 ? 'failed' : 'succeeded');
-      expect(eventCopy.event.failure_class).toBe(phase < 2 ? 'operation_failed' : undefined); // #191; not provider-specific qualification.
+      expect(eventCopy.event.failure_class).toBe(phase < 2 ? 'forbidden' : undefined);
       expect(eventCopy.event.correlation_ref).toBeTruthy();
       expect(Buffer.byteLength(JSON.stringify(eventCopy), 'utf8')).toBeLessThanOrEqual(16 * 1024);
       expect(JSON.stringify(eventCopy)).not.toContain('synthetic-private');

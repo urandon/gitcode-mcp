@@ -21,6 +21,19 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
+func TestJobObservationAuthFailureIsClosed(t *testing.T) {
+	for _, class := range []string{"live_auth_failure", "forbidden", "provider_forbidden", "provider_unauthorized"} {
+		if jobObservationFailure(class) != "forbidden" {
+			t.Fatal("finite authentication class lost terminal diagnosis")
+		}
+	}
+	for _, class := range []string{"", "synthetic-private-class", "LIVE_AUTH_FAILURE", "live_auth_failure synthetic-private"} {
+		if jobObservationFailure(class) != "operation_failed" {
+			t.Fatal("unknown class crossed the closed event boundary")
+		}
+	}
+}
+
 func jobObservationFixture(t *testing.T) *observability.Collector {
 	t.Helper()
 	c := observability.New(observability.Config{Directory: filepath.Join(t.TempDir(), "observation"), ManagedOutput: true})
