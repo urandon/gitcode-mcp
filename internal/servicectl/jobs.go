@@ -1564,6 +1564,10 @@ func cloneJob(job *Job) Job {
 	}
 	out.Progress = append([]service.ProgressEvent(nil), job.Progress...)
 	out.SyncCollections = append([]SyncCollectionView(nil), job.SyncCollections...)
+	for i := range out.SyncCollections {
+		out.SyncCollections[i].FirstRetryAt = cloneOptionalTime(out.SyncCollections[i].FirstRetryAt)
+		out.SyncCollections[i].LastRetryAt = cloneOptionalTime(out.SyncCollections[i].LastRetryAt)
+	}
 	out.ActionIntentRefs = append([]string(nil), job.ActionIntentRefs...)
 	out.ActionIntentOutcomes = cloneStringMap(job.ActionIntentOutcomes)
 	return out

@@ -534,15 +534,22 @@ func (m *JobManager) observeSyncCollectionPersisted(jobID string, view SyncColle
 }
 
 func applySyncCollectionObservation(job *Job, view SyncCollectionView, now time.Time) {
+	// Callers supply an attempt outcome, not historical authority. History is
+	// inherited exclusively from the retained view and real scheduled outcomes.
+	view.FirstRetryAt, view.LastRetryAt = nil, nil
 	replaced := false
 	for i := range job.SyncCollections {
 		if job.SyncCollections[i].Collection == view.Collection {
+			view.FirstRetryAt = cloneOptionalTime(job.SyncCollections[i].FirstRetryAt)
+			view.LastRetryAt = cloneOptionalTime(job.SyncCollections[i].LastRetryAt)
+			retainSyncRetryHistory(&view, now)
 			job.SyncCollections[i] = view
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
+		retainSyncRetryHistory(&view, now)
 		job.SyncCollections = append(job.SyncCollections, view)
 	}
 	job.SyncHealth = aggregateSyncCollectionOutcome(job.SyncCollections)
@@ -554,6 +561,31 @@ func applySyncCollectionObservation(job *Job, view SyncCollectionView, now time.
 			RetryAfter: formatOptionalTimePointer(view.RetryAfter), Attempt: view.Attempt,
 			Message: "collection retry scheduled",
 		})
+	}
+}
+
+func cloneOptionalTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func retainSyncRetryHistory(view *SyncCollectionView, now time.Time) {
+	if view.Outcome != SyncCollectionRetryScheduled {
+		return
+	}
+	at := view.UpdatedAt.UTC()
+	if at.IsZero() {
+		at = now.UTC()
+		view.UpdatedAt = at
+	}
+	if view.FirstRetryAt == nil {
+		view.FirstRetryAt = cloneOptionalTime(&at)
+	}
+	if view.LastRetryAt == nil || at.After(*view.LastRetryAt) {
+		view.LastRetryAt = cloneOptionalTime(&at)
 	}
 }
 
