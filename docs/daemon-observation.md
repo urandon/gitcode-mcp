@@ -402,6 +402,10 @@ is retried, at most five attempts with 10 ms spacing inside the same three-secon
 call deadline. Execution RPCs, platform writes, cancellation, timeouts and unknown
 failures are never retried. Default deterministic controls hold the actual RPC
 collector read lock, then prove bounded read recovery and joined ownership.
+Generic fixture job/status exchanges use the existing socket-deadline transport
+with a 1 MiB response cap; cancellation closes the established stream. Silent-peer
+deadline/cancel tests prove return, one request and joined socket ownership before
+native teardown. This fixture boundary does not change generic production IPC.
 
 Default tests skip this native operation. On a suitable macOS GUI session,
 explicitly run:

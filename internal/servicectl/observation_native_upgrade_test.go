@@ -276,6 +276,23 @@ func TestNativeObservationOutputBound(t *testing.T) {
 	}
 }
 
+// Keep native fixture calls bounded without broadening generic production IPC.
+func nativeFixtureRPC(ctx context.Context, client *RPCClient, method string, params, out any) error {
+	if observationMethod(method) {
+		return client.Call(ctx, method, params, out)
+	}
+	switch method {
+	case "Jobs.StartFake", "Jobs.List", "Service.Status":
+		// The generic client currently bounds dialing but not an established
+		// stream. Use the existing socket-owning bounded transport for these
+		// fixture calls so timeout always returns through native teardown.
+		// This sends exactly one request; it does not retry a job write.
+		return client.observationRoundTrip(ctx, method, params, out, maxRPCRequestBytes)
+	default:
+		return errors.New("native fixture refused unexpected RPC method")
+	}
+}
+
 // Retry only the observation read's typed admission contention. No execution
 // RPC, platform effect, cancellation or unknown error may be replayed here.
 func nativeObservationCall(ctx context.Context, method string, call func() error) error {
@@ -304,6 +321,97 @@ func nativeObservationCall(ctx context.Context, method string, call func() error
 		}
 	}
 	panic("unreachable native observation read budget")
+}
+
+func TestNativeFixtureRPCClosedMethodsAndResponseLimit(t *testing.T) {
+	var calls atomic.Int32
+	client := observationTestPeer(t, func(conn net.Conn, request RPCRequest) {
+		calls.Add(1)
+		if request.Method == "Jobs.List" {
+			_ = json.NewEncoder(conn).Encode(RPCResponse{JSONRPC: jsonrpcVersion, ID: request.ID, Result: JobListResult{Jobs: []Job{}}})
+			return
+		}
+		// An oversized complete response must not bypass bounded decoding.
+		_ = json.NewEncoder(conn).Encode(RPCResponse{JSONRPC: jsonrpcVersion, ID: request.ID, Result: strings.Repeat("x", maxRPCRequestBytes+1)})
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var jobs JobListResult
+	if nativeFixtureRPC(ctx, client, "Jobs.List", nil, &jobs) != nil || calls.Load() != 1 {
+		t.Fatal("native bounded RPC healthy control failed")
+	}
+	if nativeFixtureRPC(ctx, client, "unknown", nil, nil) == nil || calls.Load() != 1 {
+		t.Fatal("native unexpected RPC reached socket")
+	}
+	var status Status
+	err := nativeFixtureRPC(ctx, client, "Service.Status", nil, &status)
+	var domain RPCDomainError
+	if !errors.As(err, &domain) || domain.Code != "response_limit" || calls.Load() != 2 {
+		t.Fatal("native fixture response byte limit failed")
+	}
+}
+
+func TestNativeFixtureRPCEstablishedSocketCancellation(t *testing.T) {
+	for _, method := range []string{"Jobs.StartFake", "Jobs.List", "Service.Status"} {
+		for _, deadline := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deadline=%t", method, deadline), func(t *testing.T) {
+				entered, peerDone := make(chan struct{}), make(chan struct{})
+				var calls atomic.Int32
+				client := observationTestPeer(t, func(conn net.Conn, request RPCRequest) {
+					calls.Add(1)
+					close(entered)
+					// The actual client must close the established silent stream.
+					_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+					var b [1]byte
+					_, _ = conn.Read(b[:])
+					close(peerDone)
+				})
+				ctx, cancel := context.WithCancel(context.Background())
+				if deadline {
+					cancel()
+					ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+				}
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					done <- nativeObservationCall(ctx, method, func() error { return nativeFixtureRPC(ctx, client, method, nil, nil) })
+				}()
+				joined := false
+				defer func() {
+					cancel()
+					if !joined {
+						select {
+						case <-done:
+						case <-time.After(time.Second):
+							t.Error("native fixture RPC caller did not join")
+						}
+					}
+				}()
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("native fixture RPC did not reach established peer")
+				}
+				if !deadline {
+					cancel()
+				}
+				select {
+				case err := <-done:
+					joined = true
+					if err == nil || calls.Load() != 1 {
+						t.Fatal("native fixture cancelled exchange succeeded or retried")
+					}
+				case <-time.After(time.Second):
+					t.Fatal("native fixture established exchange exceeded context")
+				}
+				select {
+				case <-peerDone:
+				case <-time.After(time.Second):
+					t.Fatal("native fixture cancelled socket peer did not join")
+				}
+			})
+		}
+	}
 }
 
 func TestNativeObservationReadRetryFence(t *testing.T) {
@@ -619,7 +727,7 @@ func TestNativeObservationUpgradeRecovery(t *testing.T) {
 		t.Helper()
 		callCtx, done := context.WithTimeout(ctx, 3*time.Second)
 		defer done()
-		if nativeObservationCall(callCtx, method, func() error { return client.Call(callCtx, method, params, out) }) != nil {
+		if nativeObservationCall(callCtx, method, func() error { return nativeFixtureRPC(callCtx, client, method, params, out) }) != nil {
 			t.Fatal("native fixture RPC failed: " + method)
 		}
 	}
