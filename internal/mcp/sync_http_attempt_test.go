@@ -22,16 +22,18 @@ func (f syncAttemptRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 func TestMCPSyncLiveHTTPAttemptParity(t *testing.T) {
 	for _, tc := range []struct {
-		name                   string
-		before, expired, empty bool
-		wantClass              string
-		wantCalls              int
+		name                                           string
+		before, expired, empty, parentCancel, wikiOnly bool
+		wantClass                                      string
+		wantCalls                                      int
 	}{
-		{"before_cancel", true, false, false, "operation_cancelled", 0},
-		{"before_deadline", true, true, false, "operation_timeout", 0},
-		{"inside_cancel", false, false, false, "live_transport_failure", 1},
-		{"inside_deadline", false, true, false, "live_transport_failure", 1},
-		{"after_empty_list", false, false, true, "operation_cancelled", 1},
+		{name: "before_cancel", before: true, wantClass: "operation_cancelled"},
+		{name: "before_deadline", before: true, expired: true, wantClass: "operation_timeout"},
+		{name: "inside_cancel", wantClass: "live_transport_failure", wantCalls: 1},
+		{name: "inside_deadline", expired: true, wantClass: "live_transport_failure", wantCalls: 1},
+		{name: "after_empty_list", empty: true, wantClass: "operation_cancelled", wantCalls: 1},
+		{name: "issues_parent_cancel", parentCancel: true, wantClass: "live_transport_failure", wantCalls: 1},
+		{name: "wiki_parent_cancel", parentCancel: true, wikiOnly: true, wantClass: "live_transport_failure", wantCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, err := cache.NewInMemorySQLiteStore(context.Background())
@@ -60,6 +62,9 @@ func TestMCPSyncLiveHTTPAttemptParity(t *testing.T) {
 			t.Cleanup(func() { http.DefaultTransport = previous })
 			http.DefaultTransport = syncAttemptRoundTripper(func(req *http.Request) (*http.Response, error) {
 				calls++
+				if tc.parentCancel {
+					cancel()
+				}
 				if tc.empty {
 					cancel()
 					return &http.Response{StatusCode: 200, Header: http.Header{}, ContentLength: -1, Body: io.NopCloser(strings.NewReader(`[]`)), Request: req}, nil
@@ -72,7 +77,7 @@ func TestMCPSyncLiveHTTPAttemptParity(t *testing.T) {
 			var out bytes.Buffer
 			srv := NewWithToolAccess(nil, &out, io.Discard, svc, nil, ToolAccessWrite)
 			id := json.RawMessage(`"attempt-parity"`)
-			args, _ := json.Marshal(map[string]any{"repo_id": "fixture-a", "issues": true, "wiki": tc.empty, "max_pages": 1})
+			args, _ := json.Marshal(map[string]any{"repo_id": "fixture-a", "issues": !tc.wikiOnly, "wiki": tc.empty || tc.wikiOnly, "max_pages": 1})
 			srv.callSyncLive(ctx, &id, args)
 			var envelope struct {
 				Result struct {

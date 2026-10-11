@@ -1794,6 +1794,9 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (_ *S
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill"); summaryErr != nil {
+			if result.FailureCount > 0 {
+				return result, partialSyncWithLocalCause(result, summaryErr)
+			}
 			return result, summaryErr
 		}
 		if result.FailureCount > 0 {
@@ -1877,7 +1880,7 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			result.Failures = append(result.Failures, re)
 			result.FailureCount = len(result.Failures)
 			if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, req.RepoID, "parent_backfill"); summaryErr != nil {
-				return result, summaryErr
+				return result, partialSyncWithLocalCause(result, summaryErr)
 			}
 			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
@@ -3522,9 +3525,9 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
 			if result.SuccessCount == 0 && result.FailureCount == 0 {
-				return nil, &PartialSyncError{Errors: nil, SuccessCount: 0, FailureCount: 0, Diagnostic: diag, TotalRequested: totalRequested}
+				return nil, &PartialSyncError{Errors: nil, SuccessCount: 0, FailureCount: 0, Diagnostic: diag, TotalRequested: totalRequested, retainedCause: err}
 			}
-			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested, retainedCause: err}
 		}
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)

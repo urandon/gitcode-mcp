@@ -670,6 +670,7 @@ func resourceStatusCode(err error) int {
 type PartialSyncError struct {
 	httpAttempted    bool
 	httpAttemptKnown bool
+	retainedCause    error
 	Errors           []ResourceError `json:"errors"`
 	SuccessCount     int             `json:"success_count"`
 	FailureCount     int             `json:"failure_count"`
@@ -687,6 +688,9 @@ func (e PartialSyncError) Unwrap() []error {
 		if resourceErr.Err != nil {
 			out = append(out, resourceErr.Err)
 		}
+	}
+	if e.retainedCause != nil {
+		out = append(out, e.retainedCause)
 	}
 	return out
 }

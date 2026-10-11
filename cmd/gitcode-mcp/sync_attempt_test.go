@@ -105,3 +105,37 @@ func TestCLISyncKeepsEmptyListHTTPBeforeLaterCancellation(t *testing.T) {
 		t.Fatal("late cancellation lost actual HTTP evidence or invented a transport failure")
 	}
 }
+
+func TestCLISyncParentCancellationKeepsEnteredFailure(t *testing.T) {
+	for _, collection := range []string{"--issues", "--wiki"} {
+		t.Run(collection, func(t *testing.T) {
+			src := newTestSource(t)
+			src.env[config.EnvToken] = "fixture-credential"
+			cfg := filepath.Join(t.TempDir(), "config.json")
+			src.env[config.EnvConfigPath] = cfg
+			src.files[cfg] = []byte(`{"max_retries":0}`)
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			addRepoForStartupTest(t, cachePath, "https://provider.invalid")
+			previousRoute := cliRoute
+			t.Cleanup(func() { cliRoute = previousRoute })
+			var cancel context.CancelFunc
+			cliRoute = func(ctx context.Context, args []string, stdout, stderr io.Writer, deps StartupDeps) int {
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				return previousRoute(ctx, args, stdout, stderr, deps)
+			}
+			calls := 0
+			withStartupTransport(t, startupRoundTripper(func(*http.Request) (*http.Response, error) {
+				calls++
+				cancel()
+				return nil, context.Canceled
+			}))
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"sync", "--live", collection, "--max-pages", "1", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+			out := stdout.String() + stderr.String()
+			if code != 1 || calls != 1 || !strings.Contains(out, "http_attempted: true") || !strings.Contains(out, "failure_class: live_transport_failure") {
+				t.Fatal("parent cancellation discarded entered transport failure")
+			}
+		})
+	}
+}

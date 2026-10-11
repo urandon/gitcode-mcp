@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -97,6 +99,31 @@ func TestSyncPartialAggregatePreservesAttemptAndDiagnostic(t *testing.T) {
 	}
 	if _, ok := positive.(*PartialSyncError); !ok {
 		t.Fatal("partial error pointer contract changed")
+	}
+}
+
+func TestSyncPartialAggregateRetainsPrivateCauseWithoutInventedCounts(t *testing.T) {
+	cause := gitcode.ErrNetworkUnavailable{Attempts: 1, Cause: context.Canceled}
+	child := &PartialSyncError{Diagnostic: SyncDiagnosticCancelled, retainedCause: cause}
+	child.httpAttempted, child.httpAttemptKnown = true, true
+	merged := &PartialSyncError{}
+	merged.PreserveHTTPAttemptEvidence(child)
+	outer := &PartialSyncError{}
+	outer.PreserveHTTPAttemptEvidence(merged)
+	for _, partial := range []*PartialSyncError{child, merged, outer} {
+		d := diagnostics.Classify(partial, diagnostics.CommandContext{ProviderMode: "live-http"})
+		if d.Code != diagnostics.CodeLiveTransportFailure || !d.HTTPAttempted || !errors.Is(partial, context.Canceled) {
+			t.Fatal("private typed cause was lost through aggregation")
+		}
+		data, err := json.Marshal(partial)
+		if err != nil || string(data) != `{"errors":null,"success_count":0,"failure_count":0,"diagnostic":"sync_cancelled"}` {
+			t.Fatal("private evidence changed public partial counts or JSON")
+		}
+	}
+	// Self references must not create an error-tree cycle, even through wrappers.
+	outer.PreserveHTTPAttemptEvidence(outer, fmt.Errorf("wrapped: %w", outer), child)
+	if !errors.Is(outer, context.Canceled) || len(outer.Unwrap()) != 1 {
+		t.Fatal("aggregate retained itself or lost the independent child")
 	}
 }
 
@@ -210,5 +237,66 @@ func testSyncResourcesCancelledTail(t *testing.T, priorCollection bool) {
 	d := diagnostics.Classify(err, diagnostics.CommandContext{ProviderMode: "live-http", TransportFailure: true})
 	if d.Code != diagnostics.CodeOperationCancelled || !d.HTTPAttempted {
 		t.Fatalf("skipped-target evidence mismatch: class=%s attempted=%t", d.Code, d.HTTPAttempted)
+	}
+}
+
+func TestBoundedSyncParentCancellationRetainsActualFailure(t *testing.T) {
+	for _, collection := range []string{"issues", "wiki", "pulls"} {
+		for _, failed := range []bool{false, true} {
+			name := collection + "/successful_then_local"
+			if failed {
+				name = collection + "/entered_failure"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				ctx, _ = diagnostics.WithHTTPAttemptWitness(ctx)
+				store, err := cache.NewInMemorySQLiteStore(ctx)
+				if err != nil {
+					t.Fatal("cache setup failed")
+				}
+				defer store.Close()
+				if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://provider.invalid", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+					t.Fatal("binding setup failed")
+				}
+				svc, err := NewWithMode(store, gitcode.ProviderModeLive, "fixture-credential", ServiceConfig{BaseURL: "https://provider.invalid"})
+				if err != nil {
+					t.Fatal("provider setup failed")
+				}
+				calls := 0
+				previous := http.DefaultTransport
+				defer func() { http.DefaultTransport = previous }()
+				http.DefaultTransport = syncAttemptTransport(func(req *http.Request) (*http.Response, error) {
+					calls++
+					cancel()
+					if failed {
+						return nil, context.Canceled
+					}
+					return &http.Response{StatusCode: 200, Header: http.Header{}, ContentLength: -1, Body: io.NopCloser(strings.NewReader(`[]`)), Request: req}, nil
+				})
+				fn := svc.BulkSyncIssues
+				switch collection {
+				case "wiki":
+					fn = svc.BulkSyncWiki
+				case "pulls":
+					fn = svc.BulkSyncPullRequests
+				}
+				_, err = fn(ctx, BulkSyncRequest{RepoID: "fixture-a", Bounds: &SyncBounds{MaxPages: 1}})
+				if !failed && err == nil {
+					_, err = svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "fixture-a", Bounds: &SyncBounds{MaxPages: 1}})
+				}
+				if err == nil || calls != 1 {
+					t.Fatal("control must reach exactly one actual HTTP request")
+				}
+				d := diagnostics.Classify(err, diagnostics.CommandContext{ProviderMode: "live-http"})
+				want := diagnostics.CodeOperationCancelled
+				if failed {
+					want = diagnostics.CodeLiveTransportFailure
+				}
+				if d.Code != want || !d.HTTPAttempted {
+					t.Fatalf("parent cancellation evidence mismatch: class=%s attempted=%t", d.Code, d.HTTPAttempted)
+				}
+			})
+		}
 	}
 }

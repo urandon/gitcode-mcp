@@ -39,7 +39,13 @@ func (e PartialSyncError) OperationInterruption() string {
 // transport surfaces combine independent collection errors.
 func (e *PartialSyncError) PreserveHTTPAttemptEvidence(errs ...error) {
 	e.httpAttempted, e.httpAttemptKnown = diagnostics.HTTPAttemptEvidence(errors.Join(errs...))
+	// Keep typed causes that are not represented in public failure counts.
+	// Never retain this aggregate itself, directly or through a wrapper.
+	var causes []error
 	for _, err := range errs {
+		if err != nil && !errors.Is(err, e) {
+			causes = append(causes, err)
+		}
 		var partial *PartialSyncError
 		if e.Diagnostic == "" && errors.As(err, &partial) {
 			e.Diagnostic = partial.Diagnostic
@@ -53,4 +59,15 @@ func (e *PartialSyncError) PreserveHTTPAttemptEvidence(errs ...error) {
 			}
 		}
 	}
+	e.retainedCause = errors.Join(causes...)
+}
+
+func partialSyncWithLocalCause(result *SyncResourcesResult, cause error) *PartialSyncError {
+	partial := &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	// A duplicate context cause is already retained by the provider failure.
+	// Do not turn that known request boundary into an unknown extra branch.
+	if cause != nil && !errors.Is(partial, cause) {
+		partial.retainedCause = cause
+	}
+	return partial
 }
