@@ -77,15 +77,17 @@ all sources under the parent repository registration.
 timestamps spanning at most seven days. Omit both to read retained evidence only.
 The default result limit is 50; explicit limits must be 1 through 200.
 
-The opaque cursor binds the whole normalized filter, boot/generation, and loss
-epoch. Keep every selector identical on later pages. Sparse pages still advance
+The opaque cursor binds the whole normalized filter, durable ledger generation,
+and loss epoch. Keep every selector identical on later pages. Sparse pages still advance
 the bounded scan; an empty page with `has_more` is not the end of retained data.
 Do not combine a cursor with a changed source or time range.
 
 `invalid_cursor` reports an invalid encoding or changed filter. A
 `snapshot_required` response means the retained snapshot is no longer usable:
 restart without the cursor and show the discontinuity. Do not silently claim
-continuous coverage after boot, rotation, loss, or eviction.
+continuous coverage after an unclean restart, rotation, loss, or eviction. A
+clean same-ledger restart does not itself invalidate a cursor when its generation,
+loss epoch and retained position still match.
 
 ## Limits, contention, and cancellation
 
@@ -250,7 +252,7 @@ retain the following distinctions until exact-SHA qualification is complete:
 | Bounded managed diagnostic data | Collector/output-writer tests and sanitized DTO contracts; native legacy-upgrade qualification is distinct from simulated platform responses. |
 | Units, reset and history semantics | Fixed metric catalog/history tests; actual-owner transport suite must not infer samples from counters or replay. |
 | Stable cross-surface correlation | Same actual-owner Reader across IPC/CLI/MCP/Admin; source joins and browser entity navigation have separate explicit gates. |
-| Retention, cursors and restart | Durable owner reload plus ledger/rotation/cursor tests; joined active-restart/rotation diagnosis remains O5 work. |
+| Retention, cursors and restart | Actual stopped-worker retry recovery and admission-drop reload/cursor parity plus ledger unit controls; joined whole-footprint/rotation diagnosis remains O5 work. |
 | Observation is read-only | Isolated configuration, nil cache service in MCP, fixed Admin GETs and provider-call accounting; no install, sync or hidden repair. |
 | Go/frontend/browser contracts | Full repository, race, asset, type/unit and semantic gates plus independent exact-SHA review and head/main CI are required; individual focused runs are insufficient. |
 | Ownership and operations documentation | This playbook, architecture and contracts; final pass/skipped/blocked disposition belongs in issue comments, not an inferred release claim. |
@@ -306,6 +308,22 @@ replace the mandatory job, checkpoint, provider-call and causal event evidence.
 The successful sibling is not fetched again; terminal recovery replay is inert.
 This is an isolated worker-crash qualification, not an installed daemon upgrade
 or a browser reconnect qualification.
+
+`TestO5ActualAdmissionDropPreservesExecutionTruth` holds a concrete ledger
+reader's admitted lock while an actual HTTP sync worker completes and publishes
+its SQLite data. Summary/events return typed `observation_busy` during the hold;
+validated event rejection increments the concrete atomic `event_drops` origin,
+while rejected untrusted input adds nothing. After release, dropped coverage and
+the loss epoch conserve that count and invalidate the pre-loss cursor. The
+confirmed job/cache result remains healthy and identical across CLI, normal and
+minimal MCP, private IPC and authenticated Admin, without another provider call.
+Clean ledger reload retains historical loss: the pre-loss cursor remains
+invalid, while an already-known post-loss partial cursor can continue when
+generation and retention still match. The new boot's admission-drop metric
+starts at zero rather than replaying old loss. This proves real admission loss,
+not ignored post-close emissions, and does not certify native upgrade, browser
+navigation or complete disk bounds.
+
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
 deadline but preserves this same-job recovery evidence across owner reload.
