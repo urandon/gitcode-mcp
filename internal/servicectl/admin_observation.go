@@ -380,7 +380,9 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 		}}
 	}
 	defer store.Close()
+	liveCacheUUID := ""
 	if identity, identityErr := store.CacheIdentity(ctx); identityErr == nil && identity.UUID != "" {
+		liveCacheUUID = identity.UUID
 		group.uuid = identity.UUID
 		view.CacheRef = publicCacheRef(identity.UUID, group.path)
 		view.ObservationRefs = observability.ProjectEntityRefs(observability.Context{Cache: observability.KnownRef("cache", identity.UUID)})
@@ -414,14 +416,14 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 		})
 	}
 	for _, repository := range repositories {
-		entry := findAdminEntry(entries, group.path, repository.RepoID)
+		entry := findAdminEntry(entries, group.path, repository.RepoID, liveCacheUUID)
 		repoView := buildAdminRepository(ctx, store, repository, entry, jobs, vectorByteCeiling)
 		view.Repositories = append(view.Repositories, repoView)
 		view.RecordCount += repoView.Counts.Records
 		view.ChunkCount += repoView.Counts.Chunks
 	}
 	for _, item := range entries {
-		if item.path != group.path || hasAdminRepository(repositories, item.entry.RepoID) {
+		if liveCacheUUID == "" || item.entry.CacheUUID != liveCacheUUID || item.path != group.path || hasAdminRepository(repositories, item.entry.RepoID) {
 			continue
 		}
 		view.Repositories = append(view.Repositories, adminhttp.RepositoryObservation{
@@ -971,9 +973,14 @@ func adminCapabilityObservation(cap capability.Capability) adminhttp.CapabilityO
 	}
 }
 
-func findAdminEntry(entries []adminMaintenanceEntry, path, repoID string) *MaintenanceEntry {
+func findAdminEntry(entries []adminMaintenanceEntry, path, repoID, cacheUUID string) *MaintenanceEntry {
+	// Paths can be reused by a different physical cache. Historical entries
+	// remain in maintenance history, not in the replacement cache's authority.
+	if cacheUUID == "" {
+		return nil
+	}
 	for _, item := range entries {
-		if canonicalAdminCachePath(item.path) == canonicalAdminCachePath(path) && item.entry.RepoID == repoID {
+		if item.entry.CacheUUID == cacheUUID && canonicalAdminCachePath(item.path) == canonicalAdminCachePath(path) && item.entry.RepoID == repoID {
 			copy := item.entry
 			return &copy
 		}

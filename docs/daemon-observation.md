@@ -375,6 +375,15 @@ path-free snapshots and bounded safe-copy. Browser API requests after session
 establishment are GET-only; no index, setup or execution action is invoked.
 This qualifies local navigation, not native installed-service upgrade.
 
+Current documentation source authority is also fenced by the UUID read from
+the physical cache, not just its path and repository binding. Replacing a cache
+file at the same path cannot attach historical registrations or source events
+to the replacement container. Those registrations remain in maintenance
+history; restoring the original cache makes its own source bridge available
+again without enrollment or observation-triggered repair. A deterministic
+actual SQLite close/replace/restore fixture covers this boundary, including
+unknown identity and a historical same-path entry preceding the current one.
+
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
 deadline but preserves this same-job recovery evidence across owner reload.
