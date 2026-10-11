@@ -415,6 +415,10 @@ It inherits the job's opaque boot correlation even without a metrics sink.
 Timers, checkpoint writes, cancelled waits and the first attempt emit no retry
 admission. Unknown collections/ordinals cannot become event dimensions; the
 existing counter's fixed `other` bucket remains separate diagnostic evidence.
+An actual retry outside those catalog bounds, including an accepted retained
+ordinal, contributes count-only ledger loss when its inherited worker scope is
+valid. It never clamps the execution ordinal or fabricates an event; malformed
+or absent scopes, non-attempts and cancelled waits contribute no phantom loss.
 Lossy event admission never retries or changes the actual scheduler operation.
 
 `retry_scheduled` samples durable pending collection/commit waits and enabled

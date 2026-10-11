@@ -95,18 +95,19 @@ func TestCollectionRetryObservationActualScheduler(t *testing.T) {
 	}
 }
 
-func TestCollectionRetryObservationRejectsUnknownAndNonAttempts(t *testing.T) {
+func TestCollectionRetryObservationRejectsNonAttempts(t *testing.T) {
 	collector := jobObservationFixture(t)
 	jobs := NewJobManager("")
 	jobs.SetObservation(collector)
 	ctx := jobs.withJobObservation(context.Background(), Job{ID: "fixture-job"})
-	observeCollectionRetry(ctx, "synthetic-private-collection", 2)
-	for _, attempt := range []int{-1, 0, 1, observability.MaxExecutionAttempt + 1} {
+	for _, attempt := range []int{-1, 0, 1} {
 		observeCollectionRetry(ctx, "wiki", attempt)
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	observeCollectionRetry(cancelled, "wiki", 2)
+	observeCollectionRetry(cancelled, "wiki", observability.MaxExecutionAttempt+1)
+	observeCollectionRetry(cancelled, "synthetic-private-collection", 2)
 	observeCollectionRetry(context.Background(), "wiki", 2)
 	sealJobObservation(t, collector)
 	page, err := collector.Query(observability.Filter{}, "", 100)
@@ -116,6 +117,105 @@ func TestCollectionRetryObservationRejectsUnknownAndNonAttempts(t *testing.T) {
 	for _, event := range page.Events {
 		if event.Code == observability.Code("retry_admitted") {
 			t.Fatal("non-attempt or private dimension entered the retry catalog")
+		}
+	}
+}
+
+func TestCollectionRetryObservationRetainedOrdinalCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		collection string
+		prior      int
+		omitted    bool
+	}{
+		{"ordinary", "wiki", 1, false},
+		{"last_representable", "wiki", observability.MaxExecutionAttempt - 1, false},
+		{"over_catalog", "wiki", observability.MaxExecutionAttempt, true},
+		{"unknown_collection", "synthetic-private-collection", 1, true},
+	} {
+		for _, sinks := range []string{"both", "observation_only", "metrics_only", "none"} {
+			t.Run(tc.name+"/"+sinks, func(t *testing.T) {
+				collector := jobObservationFixture(t)
+				jobs := NewJobManager("")
+				jobs.SetObservation(collector)
+				job := Job{ID: "fixture-job", CacheUUID: "synthetic-private-cache", RegistrationID: "fixture-registration", RepoID: "fixture/repository"}
+				ctx := context.Background()
+				if sinks == "both" || sinks == "observation_only" {
+					ctx = jobs.withJobObservation(ctx, job)
+				}
+				metrics := observability.NewMetrics(collector.BootID(), time.Now().UTC())
+				if !metrics.AttachCollector(collector) {
+					t.Fatal("fixture collector metric attachment failed")
+				}
+				if sinks == "both" || sinks == "metrics_only" {
+					ctx = observability.WithMetrics(ctx, metrics)
+				}
+				clock := time.Unix(1700000000, 0).UTC()
+				runtimeDir := t.TempDir()
+				checkpoint := syncCollectionRetryCheckpoint{JobID: job.ID, Collection: tc.collection, RemoteType: "wiki", Attempt: tc.prior, RetryAt: clock,
+					Request: syncCollectionRetryRequest{CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, RepoID: job.RepoID, CachePath: "synthetic-private-cache-path", Wiki: true}}
+				if err := newSyncCollectionRetryJournal(runtimeDir).Upsert(checkpoint); err != nil {
+					t.Fatal("fixture checkpoint persistence failed")
+				}
+				loaded, err := newSyncCollectionRetryJournal(runtimeDir).List()
+				if err != nil || len(loaded) != 1 || loaded[0].Attempt != tc.prior {
+					t.Fatal("durable reload changed accepted retry authority")
+				}
+				// Recovery supplies the retained ordinal to the actual scheduler;
+				// the observer must not sanitize execution authority to fit itself.
+				calls, actual := 0, 0
+				expectedResult := &service.SyncResourcesResult{}
+				task := syncCollectionTask{Collection: loaded[0].Collection, RemoteType: loaded[0].RemoteType, AttemptStart: loaded[0].Attempt, DueAt: loaded[0].RetryAt,
+					Attempt: func(attempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+						calls++
+						actual = attempt
+						if sinks == "both" || sinks == "metrics_only" {
+							collection := "wiki"
+							if tc.collection != "wiki" {
+								collection = "other"
+							}
+							requireJobCounter(t, metrics, "retry_admissions", map[string]string{"collection": collection}, 1)
+						}
+						return expectedResult, syncCollectionResult{RemoteType: "wiki", Result: expectedResult}, nil
+					}}
+				results := runSyncCollectionSchedule(ctx, job.CacheUUID, job.RepoID, []syncCollectionTask{task}, 4, nil, nil, func() time.Time { return clock }, nil)
+				if calls != 1 || actual != tc.prior+1 || len(results) != 1 || results[0].Err != nil || results[0].Result != expectedResult {
+					t.Fatal("observation changed retained retry execution or result")
+				}
+				sealJobObservation(t, collector)
+				page, err := collector.Query(observability.Filter{}, "", 100)
+				if err != nil || page.HasMore {
+					t.Fatal("retry evidence query failed")
+				}
+				retained := 0
+				for _, event := range page.Events {
+					if event.Code == observability.RetryAdmitted {
+						retained++
+						if tc.omitted || event.Attempt != uint32(actual) || event.Collection != "wiki" {
+							t.Fatal("catalog fabricated or clamped the retained ordinal")
+						}
+					}
+				}
+				want := uint64(1)
+				if sinks == "metrics_only" || sinks == "none" {
+					want = 0
+				}
+				if uint64(retained)+page.Coverage.Dropped != want || (tc.omitted && retained != 0) {
+					t.Fatal("actual retry admission lost, duplicated or invented evidence")
+				}
+				if tc.omitted && want != 0 && (page.Coverage.Dropped != 1 || page.Coverage.State != "partial") {
+					t.Fatal("unrepresentable actual retry appeared fully covered")
+				}
+				if tc.omitted || sinks == "metrics_only" || sinks == "none" {
+					requireJobCounter(t, metrics, "event_drops", nil, 0)
+				}
+				data, _ := json.Marshal(page)
+				for _, private := range []string{job.RepoID, job.CacheUUID, job.RegistrationID, checkpoint.Request.CachePath, "synthetic-private-collection", runtimeDir} {
+					if strings.Contains(string(data), private) {
+						t.Fatal("retry omission leaked retained input")
+					}
+				}
+			})
 		}
 	}
 }

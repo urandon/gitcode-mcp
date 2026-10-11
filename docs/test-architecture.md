@@ -110,6 +110,13 @@ generation/path replacement cannot publish a stale observation. Retry event
 fixtures exercise the actual scheduler with resume, cancelled waits, failed
 checkpoint writes and no metric sink; neither waiting nor replay alone counts
 as an actual retry admission.
+Durable journal reload followed by actual scheduler execution also covers the
+last representable ordinal, an accepted over-catalog ordinal and an unknown
+collection. The counter and execution result remain unchanged; qualified
+omissions conserve ledger loss, including observation-only execution, without
+inventing event rejection or poisoning metrics-only coverage. Context controls
+check malformed scopes, nonblocking loss under a held collector lock, sealed
+collectors and persisted loss after restart.
 Writer-event fixtures exercise actual pre-admission, direct and retained resume
 denials, a staged commit's typed lease failure and cancellation of its retry
 wait. They assert opaque worker correlation versus fixed pre-job scopes,

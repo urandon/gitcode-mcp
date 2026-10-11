@@ -107,6 +107,8 @@ func observeCollectionRetry(ctx context.Context, collection string, attempt int)
 	// Its diagnostic event is independent of optional metric attachment.
 	if knownCollection && attempt <= observability.MaxExecutionAttempt {
 		observability.EmitFromContext(ctx, observability.RetryAdmitted, observability.ExecutionDetails{Phase: "retry", Collection: collection, Outcome: "admitted", Attempt: uint32(attempt)})
+	} else {
+		observability.OmitRetryFromContext(ctx)
 	}
 }
 

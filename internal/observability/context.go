@@ -42,6 +42,36 @@ func HasObservation(ctx context.Context) bool {
 	return ok
 }
 
+// OmitRetryFromContext accounts for an actual scheduler admission that cannot
+// fit the closed retry catalog. Only an already qualified worker scope may
+// affect coverage; no ordinal or unknown collection text is retained. This
+// neither admits a fabricated event nor changes the executing retry.
+func OmitRetryFromContext(ctx context.Context) {
+	binding, ok := ctx.Value(observationContextKey{}).(observationBinding)
+	if !ok {
+		return
+	}
+	refs := binding.refs
+	// Use fixed catalog details only to validate the inherited scope, never to
+	// emit or clamp the actual retry. Malformed references remain unobserved.
+	e := Event{Code: RetryAdmitted, JobRef: refs.Job.value, CacheRef: refs.Cache.value,
+		RegistrationRef: refs.Registration.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value,
+		StageRef: refs.Stage.value, SourceRef: refs.Source.value, PreviousRegistrationRef: refs.PreviousRegistration.value,
+		ExecutionDetails: ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 2}}
+	if !e.validExecution() {
+		return
+	}
+	for _, ref := range [...]struct{ value, kind string }{
+		{e.JobRef, "job"}, {e.CacheRef, "cache"}, {e.RegistrationRef, "registration"},
+		{e.RepoRef, "repo"}, {e.CorrelationRef, "correlation"},
+	} {
+		if !validRef(ref.value, ref.kind) {
+			return
+		}
+	}
+	binding.collector.UnconfirmedExecution()
+}
+
 // WithMetrics carries a trusted concrete sink through daemon-owned execution.
 // It does not install an arbitrary callback or alter cancellation/deadlines.
 // Foreground callers without this private process-local value are unobserved.
