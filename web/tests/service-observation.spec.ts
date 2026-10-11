@@ -67,6 +67,13 @@ test('first-page discontinuity requires explicit restart before continuation', a
   mock.fixture.summary.observation_health.loss_epoch = 1; await emit(page);
   await expect(page.getByText('Continuation stopped at a discontinuity. Restart explicitly; no automatic skip was made.')).toBeVisible(); await expect(next).toBeDisabled();
   expect(mock.requests.filter(r => r.includes('/observability/events')).every(r => !r.includes('cursor='))).toBe(true);
+  await page.getByRole('button', { name: 'Job Admitted', exact: true }).click(); await expect(page).toHaveURL(/obs_event_id=/);
+  await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeEnabled(); await expect(next).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Copy safe context' })).toBeDisabled();
+  await page.getByRole('combobox', { name: 'Code', exact: true }).selectOption('job_admitted'); await expect(page).toHaveURL(/obs_code=job_admitted/);
+  await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeEnabled(); await expect(next).toBeDisabled();
+  await page.goBack(); await expect(page).toHaveURL(/obs_event_id=/);
+  await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeEnabled(); await expect(next).toBeDisabled();
   await page.getByRole('button', { name: 'Restart retained timeline' }).click(); await expect(next).toBeEnabled();
 });
 

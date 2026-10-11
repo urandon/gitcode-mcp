@@ -55,7 +55,9 @@
   $: resourceFreshness = observationFreshness(summary?.metrics_sampled_at || '', received, now);
   $: if (ready && JSON.stringify(query) !== queryKey) {
     queryKey = JSON.stringify(query); since = query.since || ''; until = query.until || '';
-    frozen = false; copyState = ''; timeError = false;
+    // Selection, filters and browser history are not acknowledgement of a
+    // retention/loss boundary. Only explicit Restart clears that freeze.
+    copyState = ''; timeError = false;
     void load(true);
   }
   $: if (ready && invalidation !== seenInvalidation) {

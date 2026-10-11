@@ -96,6 +96,8 @@ copy preserves these closed dimensions, including previous failure class.
 Resource-gauge freshness uses the summary's own metric sample and receipt, not
 the separately returned metrics history. Any observed boot, generation or loss
 boundary stops continuation, including on the first page, until explicit restart.
+Changing selection, filters or browser history does not acknowledge that boundary
+and cannot bypass the restart requirement.
 
 Execution health and observation health are separate. Incident cards retain
 active/recovered state, first/last authority timestamps, last success and
