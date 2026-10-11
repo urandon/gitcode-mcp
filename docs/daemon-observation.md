@@ -284,6 +284,26 @@ event, then requires a native invalidation matching the current revision with
 that terminal sequence and recovered authority. This permits legitimate poller
 coalescing without accepting an intermediate attempt-start invalidation or
 requiring publication of every transient fingerprint.
+`TestO5ActualStoppedWorkerRetryRecovery` terminates an owned test subprocess
+only after a real delayed retry and a successful-empty sibling have reached
+the ordinary durable job/checkpoint boundary. A fresh owner uses
+`LoadAndMarkInterrupted` and `RecoverSyncStages`, preserves the same job,
+retry timestamps and prior job's confirmed success, waits until the original
+provider deadline, and admits only the pending collection's second attempt.
+CLI, normal/minimal MCP and authenticated Admin compare interrupted, retrying
+and recovered authority without provider requests. A new metrics boot does not
+invent an attached origin from saved state; a real unclean ledger restart
+invalidates the old cursor explicitly and retains causal recovery events.
+Origin attachment and metric recording remain best effort: the crash suite
+labels observed counts separately from explicit origin/recording loss. Missing
+or undercounted metrics require reported loss; duplicate or fabricated counts
+still fail. Separate deterministic scheduler and held-metrics-lock controls
+verify strict `0` to `1` admission counting and null `origin_unavailable` with
+exact loss respectively. Neither incomplete metrics nor observation failure
+replace the mandatory job, checkpoint, provider-call and causal event evidence.
+The successful sibling is not fetched again; terminal recovery replay is inert.
+This is an isolated worker-crash qualification, not an installed daemon upgrade
+or a browser reconnect qualification.
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
 deadline but preserves this same-job recovery evidence across owner reload.

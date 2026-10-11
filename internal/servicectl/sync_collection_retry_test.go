@@ -13,8 +13,53 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
+
+func TestRetrySchedulerOriginCountsOnlyActualAdmission(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), clock)
+	ctx := observability.WithMetrics(context.Background(), metrics)
+	count := func(want float64) {
+		t.Helper()
+		snapshot := metrics.Snapshot()
+		if snapshot.Dropped != 0 {
+			t.Fatal("isolated scheduler lost metric evidence")
+		}
+		for _, series := range snapshot.Series {
+			if series.Name == "retry_admissions" && series.Labels["collection"] == "issues" {
+				if series.Value == nil || *series.Value != want {
+					t.Fatal("scheduler metric differs from actual retry admission")
+				}
+				return
+			}
+		}
+		t.Fatal("scheduler retry counter missing")
+	}
+	attempts, waits := 0, 0
+	executions := runSyncCollectionSchedule(ctx, "cache-a", "fixture/repository", []syncCollectionTask{{
+		Collection: "issues", RemoteType: "issue", Attempt: func(attempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+			attempts++
+			count(float64(attempt - 1))
+			if attempt == 1 {
+				err := gitcode.ErrNetworkUnavailable{Status: 503}
+				return nil, syncCollectionResult{Err: err}, err
+			}
+			return nil, syncCollectionResult{}, nil
+		},
+	}}, 4, nil, func(_ context.Context, delay time.Duration) error {
+		// Scheduler has attached its origin, but has not admitted attempt two.
+		waits++
+		count(0)
+		clock = clock.Add(delay)
+		return nil
+	}, func() time.Time { return clock }, nil)
+	count(1)
+	if attempts != 2 || waits != 1 || len(executions) != 1 || executions[0].Err != nil {
+		t.Fatal("scheduler control changed actual execution")
+	}
+}
 
 func TestSyncCollectionFailurePolicyIsAllowListBased(t *testing.T) {
 	tests := []struct {

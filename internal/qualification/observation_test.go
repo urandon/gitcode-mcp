@@ -47,6 +47,7 @@ func (s isolatedSource) WorkingDir() (string, error)     { return s.root, nil }
 func (s isolatedSource) ReadFile(string) ([]byte, error) { return nil, os.ErrNotExist }
 
 func eventually(t *testing.T, predicate func() bool) {
+	t.Helper()
 	eventuallyWithin(t, 5*time.Second, predicate)
 }
 
@@ -372,8 +373,9 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 
 func assertTransportParity(t *testing.T, reader *observability.Reader, src isolatedSource, calls *atomic.Int64, requireEvents bool, expectedJob servicectl.Job, failureClass string, private ...string) {
 	t.Helper()
-	// The collector is sealed and the actual worker joined, so the same Reader
-	// can be compared exactly without racing dynamic diagnostic snapshots.
+	// The caller establishes a stable execution/ledger phase and observation
+	// time (joined terminal owner, or a retained provider-directed wait), so
+	// exact parity does not race an ongoing transition or sampler.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

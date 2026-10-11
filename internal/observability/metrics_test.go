@@ -10,6 +10,27 @@ import (
 )
 
 func metricsTime() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+func TestRetryOriginAttachmentLossDoesNotInventCounter(t *testing.T) {
+	m := NewMetrics(strings.Repeat("a", 32), metricsTime())
+	m.mu.Lock()
+	attached := m.AttachOrigin("maintenance")
+	m.mu.Unlock()
+	if attached {
+		t.Fatal("contended origin attachment was admitted")
+	}
+	labels := map[string]string{"collection": "issues"}
+	for wantLoss := uint64(1); wantLoss <= 2; wantLoss++ {
+		snapshot := m.Snapshot()
+		series := metricSeries(t, snapshot, "retry_admissions", labels)
+		if snapshot.Dropped != wantLoss || snapshot.State != "initializing" || series.Value != nil || series.Reason != "origin_unavailable" {
+			t.Fatal("lost origin fabricated a current counter or erased its loss")
+		}
+		if wantLoss == 1 && m.Add("retry_admissions", labels, 1) {
+			t.Fatal("unattached origin recorded an invented admission")
+		}
+	}
+}
 func metricSeries(t *testing.T, s MetricsSnapshot, name string, labels map[string]string) MetricSeries {
 	t.Helper()
 	for _, series := range s.Series {

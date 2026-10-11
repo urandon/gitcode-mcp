@@ -97,7 +97,18 @@ test('actual scheduled retry recovers the selected incident through native SSE w
     if (!done || failed || exited) throw new Error('Actual scheduled retry did not reach its recovery boundary.');
     await expect.poll(() => page.evaluate(() => (window as any).__activeSignals), { timeout: 5000 }).toBeGreaterThan(signalCount);
     await expect(incidents).toContainText('recovered', { timeout: 5000 });
-    await expect(copy).toBeEnabled({ timeout: 3000 });
+    try { await expect(copy).toBeEnabled({ timeout: 3000 }); }
+    catch {
+      // Finite semantic flags only: never print provider bodies or coordinates.
+      const flags = {
+        reading: await page.getByRole('button', { name: 'Refreshing observation…', exact: true }).count() > 0,
+        busy: await page.getByRole('alert').filter({ hasText: 'busy' }).count() > 0,
+        errors: await page.getByRole('alert').count(),
+        frozen: await page.getByRole('status').filter({ hasText: 'Continuation stopped at a discontinuity' }).count() > 0,
+        selectionMissing: await page.getByRole('status').filter({ hasText: 'Selection not retained' }).count() > 0
+      };
+      throw new Error('Recovered context unavailable: ' + JSON.stringify(flags));
+    }
     await copy.click();
     const recovered = JSON.parse(await page.evaluate(() => (window as any).__activeCopy));
     expect(recovered.execution_state).toBe('healthy');
