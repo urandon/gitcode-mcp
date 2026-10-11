@@ -26,7 +26,7 @@ func healthFailureReason(class string) string {
 		return "provider_timeout"
 	case "network_unavailable", "provider_unavailable":
 		return "provider_unavailable"
-	case "auth_expired", "forbidden":
+	case "auth_expired", "forbidden", "live_auth_failure":
 		return "provider_forbidden"
 	case "rate_limited":
 		return "provider_rate_limited"

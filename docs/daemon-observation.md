@@ -252,6 +252,11 @@ retain the following distinctions until exact-SHA qualification is complete:
 Launchd/systemd fixture tests establish the platform command/state contract;
 they do not certify an upgrade on an installed host. Native installation or
 legacy-output migration requires its own explicit scope and suitable host.
-Likewise, #191 tracks the live authentication class currently projected as
-generic `operation_failed`; provider-specific diagnosis is not yet qualified.
+Actual offline HTTP 401/403 controls preserve durable `live_auth_failure` as
+the finite health reason `provider_forbidden` and terminal event class
+`forbidden`. These names cover authentication and permission failures; they
+do not distinguish an expired credential from insufficient access. Unknown
+classes remain `operation_failed`. The actual-owner transport suite verifies
+prior success, durable reload and confirmed recovery without erasing the cause;
+the real embedded browser verifies selected incident and terminal safe-copy.
 No release or installed-service upgrade is implied by running the O5 suite.

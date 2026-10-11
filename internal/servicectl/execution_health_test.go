@@ -14,6 +14,19 @@ import (
 	"gitcode-mcp/internal/observability"
 )
 
+func TestHealthAuthFailureReasonIsClosed(t *testing.T) {
+	for _, class := range []string{"live_auth_failure", "auth_expired", "forbidden"} {
+		if healthFailureReason(class) != "provider_forbidden" {
+			t.Fatal("finite authentication class lost provider diagnosis")
+		}
+	}
+	for _, class := range []string{"", "synthetic-private-class", "LIVE_AUTH_FAILURE", "live_auth_failure synthetic-private"} {
+		if healthFailureReason(class) != "operation_failed" {
+			t.Fatal("unknown class crossed the closed health boundary")
+		}
+	}
+}
+
 func TestExecutionHealthProjectsDurableFailuresRecoveryAndWriterWait(t *testing.T) {
 	at := time.Unix(1700000000, 0).UTC()
 	jobs := NewJobManager("")

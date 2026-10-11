@@ -100,7 +100,7 @@ func jobObservationFailure(class string) string {
 		return "timeout"
 	case "rate_limited", "provider_rate_limited":
 		return "rate_limited"
-	case "forbidden", "provider_forbidden", "provider_unauthorized":
+	case "forbidden", "provider_forbidden", "provider_unauthorized", "live_auth_failure":
 		return "forbidden"
 	case "invalid", "provider_invalid_response", "provider_unsupported_response":
 		return "invalid"
