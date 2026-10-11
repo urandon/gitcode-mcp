@@ -29,6 +29,65 @@ async function mockObservation(page: Page, fixture = observationFixture(), snaps
 }
 const emit = (page: Page, kind = 'observability_changed') => page.evaluate(k => (window as any).__emitObservation(k), kind);
 
+test('typed event rows distinguish neutral-info failures and preserve maintenance predecessor copy', async ({ page }) => {
+  const fixture = observationFixture();
+  fixture.summary.event_templates!.job_terminal = { stream: 'stdout', severity: 'info', component: 'jobs', message: 'A job reached a confirmed terminal state.' };
+  fixture.summary.event_templates!.maintenance_state_changed = { stream: 'stdout', severity: 'info', component: 'maintenance', message: 'Maintenance reached a confirmed state transition.' };
+  fixture.summary.event_filters!.phase = ['completion', 'maintenance']; fixture.summary.event_filters!.failure_class = ['timeout']; fixture.summary.event_filters!.outcome = ['failed', 'succeeded', 'ready'];
+  const base = { schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: fixture.summary.observed_at, sequence: 1, code: 'job_terminal', stream: 'stdout', severity: 'info', component: 'jobs', message: 'A job reached a confirmed terminal state.', phase: 'completion', job_ref: ref('job', '5'), correlation_ref: ref('correlation', '7') };
+  fixture.page.events = [{ ...base, outcome: 'failed', failure_class: 'timeout' }, { ...base, event_id: id('f'), sequence: 2, outcome: 'succeeded' }, { schema: 1, event_id: id('1'), boot_id: id('a'), occurred_at: fixture.summary.observed_at, sequence: 3, code: 'maintenance_state_changed', stream: 'stdout', severity: 'info', component: 'maintenance', message: 'Maintenance reached a confirmed state transition.', phase: 'maintenance', outcome: 'ready', maintenance_scope: 'identity_resolution', previous_state: 'identity_conflict', previous_failure_class: 'identity', registration_ref: ref('registration', '2'), previous_registration_ref: ref('registration', '6'), cache_ref: ref('cache', '3'), repo_ref: ref('repo', '4'), correlation_ref: ref('correlation', '8'), raw_body: 'synthetic-private-secret' }];
+  await mockObservation(page, fixture); await page.goto('/?view=Service');
+  const rows = page.getByRole('list', { name: 'Retained catalog events' }).getByRole('listitem');
+  await expect(rows.nth(0)).toContainText('Outcome'); await expect(rows.nth(0)).toContainText('Failed'); await expect(rows.nth(0)).toContainText('Failure Class'); await expect(rows.nth(0)).toContainText('Timeout');
+  await expect(rows.nth(1)).toContainText('Succeeded'); await expect(rows.nth(1)).not.toContainText('Timeout');
+  await expect(rows.nth(2)).toContainText('Identity Resolution'); await expect(rows.nth(2)).toContainText('Identity Conflict'); await expect(rows.nth(2)).toContainText('Previous Failure Class');
+  await page.getByRole('button', { name: 'Maintenance State Changed', exact: true }).click(); await page.getByRole('button', { name: 'Copy safe context' }).click();
+  const copy = JSON.parse(await page.evaluate(() => (window as any).__copiedObservation));
+  expect(copy.event.maintenance_scope).toBe('identity_resolution'); expect(copy.event.previous_state).toBe('identity_conflict'); expect(copy.event.previous_failure_class).toBe('identity'); expect(copy.event.previous_registration_ref).toBe(ref('registration', '6'));
+  expect(JSON.stringify(copy)).not.toContain('synthetic-private-secret'); expect(await page.locator('body').innerText()).not.toContain('synthetic-private-secret');
+});
+
+test('resource freshness belongs to summary sample even when metrics are fresh or unavailable', async ({ page }) => {
+  const mock = await mockObservation(page); mock.fixture.summary.metrics_sampled_at = new Date(Date.now() - 120000).toISOString();
+  await page.goto('/?view=Service'); const resources = page.locator('section[aria-labelledby="resources-title"]');
+  await expect(resources.getByText('Samples stale', { exact: true })).toBeVisible();
+  await expect(page.locator('section[aria-labelledby="metrics-title"]').getByText('Samples current', { exact: true })).toBeVisible();
+  mock.fixture.summary.metrics_sampled_at = new Date().toISOString();
+  await page.route('**/api/admin/v1/observability/metrics?**', route => route.fulfill({ status: 503, json: { error: { code: 'observation_busy' } } }));
+  await emit(page); await expect(page.getByText('Metrics · Observation is busy. Retry the bounded read.')).toBeVisible();
+  await expect(resources.getByText('Samples current', { exact: true })).toBeVisible();
+  mock.fixture.summary.metrics_sampled_at = '0001-01-01T00:00:00Z'; await emit(page);
+  await expect(resources.getByText('Samples missing', { exact: true })).toBeVisible();
+});
+
+test('first-page discontinuity requires explicit restart before continuation', async ({ page }) => {
+  const mock = await mockObservation(page); mock.fixture.page.has_more = true; mock.fixture.page.cursor = 'e30';
+  await page.goto('/?view=Service'); const next = page.getByRole('button', { name: 'Continue retained scan' }); await expect(next).toBeEnabled();
+  await emit(page); await expect.poll(() => mock.requests.filter(r => r.includes('/observability/events')).length).toBeGreaterThanOrEqual(2); await expect(next).toBeEnabled();
+  mock.fixture.summary.observation_health.loss_epoch = 1; await emit(page);
+  await expect(page.getByText('Continuation stopped at a discontinuity. Restart explicitly; no automatic skip was made.')).toBeVisible(); await expect(next).toBeDisabled();
+  expect(mock.requests.filter(r => r.includes('/observability/events')).every(r => !r.includes('cursor='))).toBe(true);
+  await page.getByRole('button', { name: 'Restart retained timeline' }).click(); await expect(next).toBeEnabled();
+});
+
+test('unknown regex-valid URL enums are removed only after delivered catalog and never sent', async ({ page }) => {
+  const mock = await mockObservation(page);
+  await page.goto(`/?view=Service&obs_code=not_a_catalog_code&obs_phase=not_a_catalog_phase&obs_job_ref=${ref('job', '5')}&obs_cursor=e30`);
+  await expect(page.getByText('Invalid URL selectors were discarded. No untrusted selector was sent.')).toBeVisible();
+  await expect(page).not.toHaveURL(/not_a_catalog|obs_cursor/); await expect(page).toHaveURL(new RegExp(`obs_job_ref=${ref('job', '5')}`));
+  await expect(page.getByRole('button', { name: 'Job Admitted', exact: true })).toBeVisible();
+  expect(mock.requests.join('\n')).not.toContain('not_a_catalog'); expect(mock.requests.join('\n')).not.toContain('cursor=e30');
+});
+
+test('pre-observation daemon HTML-200 SPA fallback is unsupported and never echoed', async ({ page }) => {
+  await mockObservation(page);
+  await page.route('**/api/admin/v1/observability**', route => route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!doctype html><html>synthetic-private-old-spa</html>' }));
+  await page.goto('/?view=Service');
+  await expect(page.getByText('Summary · Unsupported by this daemon. Update browser assets and daemon together.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy safe context' })).toBeDisabled();
+  expect(await page.locator('body').innerText()).not.toContain('synthetic-private-old-spa');
+});
+
 test('Service opens independently of broad snapshot and distinguishes nullable resources, health, phases and safe copy', async ({ page }) => {
   const mock = await mockObservation(page);
   await page.goto('/?view=Service');
@@ -121,7 +180,8 @@ test('listed job context joins in both directions; missing authority never guess
 test('disconnected and stale sample states remain separate from health across narrow themes and keyboard navigation', async ({ page }) => {
   const at = new Date(Date.now() - 120000).toISOString(); const fixture = observationFixture(at); fixture.summary.execution_health.state = 'healthy';
   await mockObservation(page, fixture); await page.setViewportSize({ width: 390, height: 844 }); await page.goto('/?view=Service');
-  await expect(page.getByText('Samples stale', { exact: true })).toBeVisible();
+  await expect(page.locator('section[aria-labelledby="resources-title"]').getByText('Samples stale', { exact: true })).toBeVisible();
+  await expect(page.locator('section[aria-labelledby="metrics-title"]').getByText('Samples stale', { exact: true })).toBeVisible();
   await emit(page, 'error'); await expect(page.getByText(/Live observation disconnected/)).toBeVisible();
   for (const theme of ['Light', 'Dark', 'System']) { await page.setViewportSize({ width: 1280, height: 844 }); await page.getByRole('radio', { name: theme, exact: true }).click(); await page.setViewportSize({ width: 390, height: 844 }); await expect(page.getByRole('heading', { name: 'Service', exact: true })).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true); }
   await page.getByRole('button', { name: 'Refresh observation', exact: true }).focus(); await expect(page.getByRole('button', { name: 'Refresh observation', exact: true })).toBeFocused(); await page.keyboard.press('Tab'); await expect(page.getByRole('button', { name: 'Copy safe context' })).toBeFocused();

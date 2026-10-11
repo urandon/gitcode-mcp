@@ -2,6 +2,7 @@ import type { ObservationRefs, ObservationSnapshot } from './admin';
 
 export const observationProtocol = 'observability.v1';
 export const filterKeys = ['stream', 'severity', 'component', 'code', 'phase', 'collection', 'outcome', 'failure_class'] as const;
+export const eventDetailKeys = ['phase', 'collection', 'outcome', 'failure_class', 'work_kind', 'admin_route', 'maintenance_scope', 'previous_state', 'previous_failure_class'] as const;
 export const refKinds = { job_ref: 'job', registration_ref: 'registration', cache_ref: 'cache', repo_ref: 'repo', source_ref: 'source', correlation_ref: 'correlation', stage_ref: 'stage', previous_registration_ref: 'registration' } as const;
 export type RefKey = keyof typeof refKinds;
 export type ServiceQuery = Partial<Record<typeof filterKeys[number] | RefKey | 'since' | 'until' | 'cursor' | 'event_id' | 'incident_ref', string>>;
@@ -17,6 +18,7 @@ export type MetricSnapshot = { boot_id: string; reset_at: string; sampled_at: st
 export type ServiceSummary = {
   schema: number; protocol: string; admin_observation_version?: string; observed_at: string;
   event_filters?: Record<string, string[]>; event_templates?: Record<string, EventTemplate>;
+  event_detail_values?: Record<string, string[]>;
   collector: { boot_id: string; generation: string; latest_sequence: number; coverage: Coverage };
   metrics_boot_id: string; metrics_reset_at: string; metrics_sampled_at: string;
   observation_health: { state: string; ledger_state: string; output_state: string; metrics_state: string; dropped_events: number; loss_epoch: number; dropped_metrics: number };
@@ -63,6 +65,11 @@ export function eventRequest(query: ServiceQuery): string {
   return `/api/admin/v1/observability/events?${request}`;
 }
 export function resetPage(query: ServiceQuery): ServiceQuery { const { cursor, event_id, incident_ref, ...rest } = query; return rest; }
+export function catalogServiceQuery(query: ServiceQuery, filters: Record<string, string[]>): { query: ServiceQuery; invalid: boolean } {
+  const clean = { ...query }; let invalid = false;
+  for (const key of filterKeys) if (clean[key] && !filters[key]?.includes(clean[key]!)) { delete clean[key]; invalid = true; }
+  return { query: invalid ? resetPage(clean) : clean, invalid };
+}
 
 export type ObservationTarget = { kind: 'job'; id: string } | { kind: 'maintenance'; id: string } | { kind: 'cache'; cache: string } | { kind: 'repo' | 'source'; cache: string; repo: string; source?: string };
 // Join only to already-listed authority. Source is strict and wins over its
@@ -110,9 +117,7 @@ export function eventProjection(value: unknown, summary: ServiceSummary): EventR
   const template = summary.event_templates?.[String(e.code)];
   if (!validRefs(e) || !template || !isID(e.event_id) || !isID(e.boot_id) || !isTime(e.occurred_at) || !count(e.sequence) || !e.sequence || e.schema !== 1 || e.message !== template.message || e.severity !== template.severity || e.component !== template.component || (e.stream !== template.stream && !(e.legacy === true && member(e.stream, ['stdout', 'stderr'])))) return;
   const out = { schema: 1, event_id: e.event_id, boot_id: e.boot_id, occurred_at: e.occurred_at, sequence: e.sequence, code: String(e.code), stream: String(e.stream), severity: template.severity, component: template.component, message: template.message, ...refProjection(e) } as EventRecord;
-  for (const key of ['phase', 'collection', 'outcome', 'failure_class']) if (typeof e[key] === 'string' && summary.event_filters?.[key]?.includes(e[key] as string)) out[key] = e[key];
-  const enums: Record<string, string[]> = { work_kind: ['sync', 'rag', 'repository_docs', 'other'], admin_route: ['session', 'read', 'control', 'search', 'events', 'assets', 'unknown'], maintenance_scope: ['sync', 'rag', 'repository_docs', 'other'], previous_state: ['active', 'recovered', 'retrying', 'waiting_writer', 'interrupted', 'unknown'] };
-  for (const [key, values] of Object.entries(enums)) if (member(e[key], values)) out[key] = e[key];
+  for (const key of eventDetailKeys) if (member(e[key], summary.event_detail_values?.[key] || summary.event_filters?.[key] || [])) out[key] = e[key];
   if (count(e.attempt) && e.attempt <= 1024) out.attempt = e.attempt;
   if (e.legacy === true) { out.legacy = true; if (count(e.observed_bytes) && e.observed_bytes <= 65536) out.observed_bytes = e.observed_bytes; }
   return out;
@@ -158,6 +163,12 @@ export async function boundedObservationRead<T>(path: string, maxBytes: number, 
     const response = await fetcher(path, { method: 'GET', signal: controller.signal, cache: 'no-store' });
     if (response.status === 404 || response.status === 405 || response.status === 501) throw new ObservationError('unsupported');
     if (response.status === 401 || response.status === 403) throw new ObservationError('session_required');
+    // Older daemons route unknown API paths to the HTML SPA with status 200.
+    // This is a compatibility boundary, not a failed observation payload.
+    if (response.ok && /^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '')) {
+      await response.body?.cancel().catch(() => {});
+      throw new ObservationError('unsupported');
+    }
     const reader = response.body?.getReader(); if (!reader) throw new ObservationError('unavailable');
     let bytes = 0; const chunks: Uint8Array[] = [];
     try { while (true) { const { value, done } = await reader.read(); if (done) break; bytes += value.length; if (bytes > maxBytes) throw new ObservationError('response_limit'); chunks.push(value); } }

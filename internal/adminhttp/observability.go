@@ -110,7 +110,8 @@ func (c *Controller) readObservability(w http.ResponseWriter, r *http.Request, k
 					AdminObservationVersion string                                             `json:"admin_observation_version"`
 					EventFilters            map[string][]string                                `json:"event_filters"`
 					EventTemplates          map[observability.Code]observability.EventTemplate `json:"event_templates"`
-				}{value.(observability.Summary), "1", observability.FilterValues(), observability.EventTemplates()}
+					EventDetailValues       map[string][]string                                `json:"event_detail_values"`
+				}{value.(observability.Summary), "1", observability.FilterValues(), observability.EventTemplates(), observability.EventDetailValues()}
 			}
 		}
 	case "metrics":

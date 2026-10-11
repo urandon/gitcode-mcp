@@ -83,9 +83,19 @@ not request the broad snapshot. Context links use only authority already listed
 by another Admin section; until that authority exists, they remain explicitly
 unavailable. Unsupported daemons show a compatibility state rather than an
 empty healthy dashboard. The browser-only `admin_observation_version: "1"`,
-`event_filters`, and `event_templates` metadata do not change the strict
+`event_filters`, `event_templates`, and `event_detail_values` metadata do not change the strict
 `observability.v1` IPC, CLI or MCP summary contract. The total Admin summary,
 including this catalog, remains capped at 128 KiB.
+Selector-bearing deep links wait for that delivered finite catalog; unknown enum
+values are discarded without being echoed or sent to the events endpoint.
+Older daemons' HTML-200 SPA fallback is an explicit unsupported state.
+
+Timeline rows show typed phase, collection, outcome, failure class, attempt and
+maintenance predecessor details independently of neutral log severity. Safe
+copy preserves these closed dimensions, including previous failure class.
+Resource-gauge freshness uses the summary's own metric sample and receipt, not
+the separately returned metrics history. Any observed boot, generation or loss
+boundary stops continuation, including on the first page, until explicit restart.
 
 Execution health and observation health are separate. Incident cards retain
 active/recovered state, first/last authority timestamps, last success and

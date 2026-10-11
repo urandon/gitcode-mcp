@@ -46,8 +46,9 @@ func TestObservabilityAdminSharedReaderAndPollIsolation(t *testing.T) {
 			Version   string                                             `json:"admin_observation_version"`
 			Filters   map[string][]string                                `json:"event_filters"`
 			Templates map[observability.Code]observability.EventTemplate `json:"event_templates"`
+			Details   map[string][]string                                `json:"event_detail_values"`
 		}
-		if len(response.Body.Bytes()) > observability.MaxSummaryBytes || json.Unmarshal(response.Body.Bytes(), &browser) != nil || browser.Version != "1" || !reflect.DeepEqual(browser.Filters, observability.FilterValues()) || !reflect.DeepEqual(browser.Templates, observability.EventTemplates()) {
+		if len(response.Body.Bytes()) > observability.MaxSummaryBytes || json.Unmarshal(response.Body.Bytes(), &browser) != nil || browser.Version != "1" || !reflect.DeepEqual(browser.Filters, observability.FilterValues()) || !reflect.DeepEqual(browser.Templates, observability.EventTemplates()) || !reflect.DeepEqual(browser.Details, observability.EventDetailValues()) {
 			t.Fatal("bounded browser catalog contract unavailable")
 		}
 	}
@@ -57,7 +58,7 @@ func TestObservabilityAdminSharedReaderAndPollIsolation(t *testing.T) {
 	decoder := json.NewDecoder(bytes.NewReader(shared))
 	decoder.DisallowUnknownFields()
 	var legacy observability.Summary
-	if decoder.Decode(&legacy) != nil || bytes.Contains(shared, []byte("event_filters")) || bytes.Contains(shared, []byte("event_templates")) || bytes.Contains(shared, []byte("admin_observation_version")) {
+	if decoder.Decode(&legacy) != nil || bytes.Contains(shared, []byte("event_filters")) || bytes.Contains(shared, []byte("event_templates")) || bytes.Contains(shared, []byte("event_detail_values")) || bytes.Contains(shared, []byte("admin_observation_version")) {
 		t.Fatal("browser metadata changed the strict shared protocol")
 	}
 	response := authorizedRequest(t, handler, cookie, "/api/admin/v1/observability/metrics?name=runtime_heap&history_minutes=3")

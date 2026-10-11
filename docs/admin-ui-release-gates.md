@@ -31,7 +31,11 @@ snapshot, independent execution/observation health, nullable resources and
 minute buckets, finite URL/history filters, explicit sparse continuation,
 same-selection invalidation coalescing, late-response fencing, expired/reset
 cursor recovery, missing/ambiguous exact source joins, sanitized schema-1 copy,
-older-daemon compatibility and disconnected/stale samples. Tests assert no
+older-daemon compatibility and disconnected/stale samples. Tests assert that no
+unknown catalog enum is sent, typed success/failure and maintenance predecessor
+details remain visible/copyable, summary-owned resource freshness is independent
+of metrics endpoint availability, first-page loss stops continuation, and the
+older HTML-200 SPA fallback is unsupported. They also assert no
 execution/provider/setup request from Service and repeat narrow layouts in
 Light, Dark and System without screenshot, video or trace output.
 

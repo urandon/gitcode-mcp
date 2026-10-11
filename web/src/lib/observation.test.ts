@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { emptySnapshot } from './admin';
-import { boundedObservationRead, eventProjection, eventRequest, incidentProjection, metricValue, observationFreshness, observationTarget, readServiceQuery, safeObservationContext, writeServiceQuery } from './observation';
+import { boundedObservationRead, catalogServiceQuery, eventProjection, eventRequest, incidentProjection, metricValue, observationFreshness, observationTarget, readServiceQuery, safeObservationContext, writeServiceQuery } from './observation';
 import { id, observationFixture, ref } from '../../tests/fixtures/observation';
 
 describe('bounded observation browser contract', () => {
@@ -20,6 +20,28 @@ describe('bounded observation browser contract', () => {
     expect(observationFreshness(at, now, now + 31000)).toBe('stale');
     expect(observationFreshness(at, now + 50000, now + 50000)).toBe('stale');
     expect(observationFreshness(at, now, now + 100)).toBe('current');
+  });
+  it('validates URL enums against the delivered finite catalog before sending them', () => {
+    const { summary } = observationFixture();
+    const parsed = readServiceQuery(new URLSearchParams({ obs_code: 'not_a_catalog_code', obs_job_ref: ref('job', '5'), obs_cursor: 'e30', obs_event_id: id('e') }));
+    expect(parsed.invalid).toBe(false); // syntactic parsing precedes daemon metadata
+    const checked = catalogServiceQuery(parsed.query, summary.event_filters!);
+    expect(checked.invalid).toBe(true); expect(checked.query).toEqual({ job_ref: ref('job', '5') });
+    expect(eventRequest(checked.query)).not.toContain('not_a_catalog_code');
+    expect(catalogServiceQuery({ code: 'job_admitted' }, summary.event_filters!).invalid).toBe(false);
+  });
+  it('preserves admitted maintenance transition details without copying raw extras', () => {
+    const { summary, page } = observationFixture();
+    summary.event_templates!.maintenance_state_changed = { stream: 'stdout', severity: 'info', component: 'maintenance', message: 'Maintenance reached a confirmed state transition.' };
+    summary.event_filters!.phase = ['maintenance']; summary.event_filters!.outcome = ['ready']; summary.event_filters!.failure_class = ['identity'];
+    for (const [scope, previous, failure] of [['registration', 'enrolled', 'cache'], ['repository_docs', 'registered', 'embedding'], ['identity_resolution', 'identity_conflict', 'identity']]) {
+      page.events[0] = { schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: summary.observed_at, sequence: 1, code: 'maintenance_state_changed', stream: 'stdout', severity: 'info', component: 'maintenance', message: 'Maintenance reached a confirmed state transition.', phase: 'maintenance', outcome: 'ready', maintenance_scope: scope, previous_state: previous, previous_failure_class: failure, correlation_ref: ref('correlation', '7'), registration_ref: ref('registration', '2'), cache_ref: ref('cache', '3'), repo_ref: ref('repo', '4'), ...(scope === 'identity_resolution' ? { previous_registration_ref: ref('registration', '6') } : scope === 'repository_docs' ? { source_ref: ref('source', '1') } : {}), raw_body: 'synthetic-private-secret' };
+      const copy = JSON.parse(safeObservationContext(summary, page, { event_id: id('e') }));
+      expect(copy.event.maintenance_scope).toBe(scope); expect(copy.event.previous_state).toBe(previous); expect(copy.event.previous_failure_class).toBe(failure); expect(JSON.stringify(copy)).not.toContain('synthetic-private-secret');
+    }
+    page.events[0].previous_state = 'synthetic-private-secret'; page.events[0].previous_failure_class = 'synthetic-private-secret';
+    const copy = JSON.parse(safeObservationContext(summary, page, { event_id: id('e') }));
+    expect(copy.event.previous_state).toBeUndefined(); expect(copy.event.previous_failure_class).toBeUndefined();
   });
   it('resolves exact sources only and refuses disappearance or ambiguity', () => {
     const s: any = structuredClone(emptySnapshot); const refs = { source_ref: ref('source', '1'), registration_ref: ref('registration', '2'), cache_ref: ref('cache', '3'), repo_ref: ref('repo', '4') };
@@ -51,6 +73,7 @@ describe('bounded observation browser contract', () => {
     await expect(boundedObservationRead('/local', 16, signal, vi.fn().mockResolvedValue(new Response('x'.repeat(17))))).rejects.toThrow('response_limit');
     await expect(boundedObservationRead('/local', 1024, signal, vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'snapshot_required', reason: 'synthetic-private-secret' } }), { status: 409 })))).rejects.toThrow('cursor_expired');
     await expect(boundedObservationRead('/local', 1024, signal, vi.fn().mockResolvedValue(new Response('synthetic-private-secret', { status: 404 })))).rejects.toThrow('unsupported');
+    await expect(boundedObservationRead('/local', 1024, signal, vi.fn().mockResolvedValue(new Response('<html>synthetic-private-secret</html>', { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } })))).rejects.toThrow('unsupported');
   });
   it('cancels bounded reads at a browser deadline and joins timer/listener ownership', async () => {
     vi.useFakeTimers();

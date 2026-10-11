@@ -97,6 +97,32 @@ func FilterValues() map[string][]string {
 	return out
 }
 
+// EventDetailValues exposes finite execution detail domains for browser
+// projection, not additional query selectors. State/failure membership uses
+// the same validators as admission and replay, rather than UI-owned guesses.
+func EventDetailValues() map[string][]string {
+	filters := FilterValues()
+	out := map[string][]string{
+		"work_kind":         append([]string(nil), workKinds...),
+		"admin_route":       append([]string(nil), adminRoutes...),
+		"maintenance_scope": {"registration", "repository_docs", "identity_resolution"},
+	}
+	for _, value := range append(filters["outcome"], "absent", "unknown") {
+		if maintenanceState(value) || maintenanceSourceState(value) || maintenanceIdentityPredecessor(value) || value == "absent" || value == "unknown" {
+			out["previous_state"] = append(out["previous_state"], value)
+		}
+	}
+	for _, value := range filters["failure_class"] {
+		if maintenanceFailure(value) {
+			out["previous_failure_class"] = append(out["previous_failure_class"], value)
+		}
+	}
+	for _, values := range out {
+		sort.Strings(values)
+	}
+	return out
+}
+
 func buildFilterCatalogShapes() []Event {
 	var shapes []Event
 	for code, t := range catalog {
