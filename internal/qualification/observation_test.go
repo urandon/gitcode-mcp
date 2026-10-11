@@ -436,7 +436,7 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 	if expectedRefs == nil || expectedRefs.Job == "" {
 		t.Fatal("actual admitted job has no observation identity")
 	}
-	summary, err := reader.Summary(ctx)
+	summary, err := retryObservationRead(ctx, func() (observability.Summary, error) { return reader.Summary(ctx) })
 	if err != nil {
 		t.Fatal("retained summary unavailable")
 	}
@@ -458,7 +458,9 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 		{[]string{"service", "observe", "--format", "json"}, "service_observability", `{}`, "/api/admin/v1/observability", summary},
 	}
 	if reader.Metrics != nil {
-		metrics, err := reader.MetricSnapshot(ctx, observability.MetricsRequest{HistoryMinutes: 3})
+		metrics, err := retryObservationRead(ctx, func() (observability.MetricsSnapshot, error) {
+			return reader.MetricSnapshot(ctx, observability.MetricsRequest{HistoryMinutes: 3})
+		})
 		if err != nil {
 			t.Fatal("retained metrics unavailable")
 		}
@@ -476,7 +478,9 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 		}{[]string{"service", "metrics", "--history-minutes", "3", "--format", "json"}, "service_metrics", `{"history_minutes":3}`, "/api/admin/v1/observability/metrics?history_minutes=3", metrics})
 	}
 	if reader.Collector != nil {
-		page, err := reader.Events(ctx, observability.EventsRequest{Limit: 50})
+		page, err := retryObservationRead(ctx, func() (observability.Page, error) {
+			return reader.Events(ctx, observability.EventsRequest{Limit: 50})
+		})
 		if err != nil {
 			t.Fatal("retained event page unavailable")
 		}
@@ -522,44 +526,58 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 	}
 	for _, tc := range tests {
 		var out, stderr bytes.Buffer
-		if cli.ExecuteWithSourceContext(ctx, tc.args, &out, &stderr, src) != 0 || stderr.Len() != 0 {
+		data, err := retryObservationRead(ctx, func() ([]byte, error) {
+			out.Reset()
+			stderr.Reset()
+			exit := cli.ExecuteWithSourceContext(ctx, tc.args, &out, &stderr, src)
+			return out.Bytes(), cliObservationError(exit, out.Bytes(), stderr.Bytes())
+		})
+		if err != nil {
 			t.Fatal("actual CLI observation failed")
 		}
-		assertJSON(t, out.Bytes(), tc.want, false, private)
+		assertJSON(t, data, tc.want, false, private)
 		for _, minimal := range []bool{false, true} {
-			out.Reset()
 			wire := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tc.tool + `","arguments":` + tc.params + `}}` + "\n"
-			server := mcp.NewWithToolAccess(strings.NewReader(wire), &out, &stderr, nil, nil, mcp.ToolAccessRead)
-			if minimal {
-				server = mcp.NewMinimal(strings.NewReader(wire), &out, &stderr, mcp.StartupDiagnostic{})
-			}
-			server.SetServiceClient(func() (*servicectl.RPCClient, error) { return ipc, nil })
-			server.SetToolBootstrap(func(context.Context, string, json.RawMessage) (*mcp.RPCHandler, error) {
-				t.Error("observation attempted bootstrap")
-				return nil, errors.New("observation must not bootstrap")
+			data, err := retryObservationRead(ctx, func() (json.RawMessage, error) {
+				out.Reset()
+				stderr.Reset()
+				server := mcp.NewWithToolAccess(strings.NewReader(wire), &out, &stderr, nil, nil, mcp.ToolAccessRead)
+				if minimal {
+					server = mcp.NewMinimal(strings.NewReader(wire), &out, &stderr, mcp.StartupDiagnostic{})
+				}
+				server.SetServiceClient(func() (*servicectl.RPCClient, error) { return ipc, nil })
+				server.SetToolBootstrap(func(context.Context, string, json.RawMessage) (*mcp.RPCHandler, error) {
+					t.Error("observation attempted bootstrap")
+					return nil, errors.New("observation must not bootstrap")
+				})
+				if server.Serve() != nil {
+					return nil, errors.New("actual MCP stdio observation failed")
+				}
+				return mcpObservationResult(out.Bytes(), stderr.Bytes())
 			})
-			if server.Serve() != nil {
-				t.Fatal("actual MCP stdio observation failed")
-			}
-			var response struct {
-				Error  json.RawMessage `json:"error"`
-				Result struct {
-					Structured json.RawMessage `json:"structuredContent"`
-				} `json:"result"`
-			}
-			if json.Unmarshal(out.Bytes(), &response) != nil || len(response.Error) > 0 || stderr.Len() != 0 {
+			if err != nil {
 				t.Fatal("MCP observation returned failure")
 			}
-			assertJSON(t, response.Result.Structured, tc.want, false, private)
+			assertJSON(t, data, tc.want, false, private)
 		}
-		resp, err := httpClient.Get(opened.URL + tc.route)
+		data, err = retryObservationRead(ctx, func() ([]byte, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, opened.URL+tc.route, nil)
+			if err != nil {
+				return nil, errors.New("Admin observation request unavailable")
+			}
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return nil, errors.New("actual authenticated Admin observation failed")
+			}
+			data, readErr := io.ReadAll(io.LimitReader(resp.Body, observability.MaxMetricsBytes+1))
+			_ = resp.Body.Close()
+			if readErr != nil {
+				return nil, errors.New("Admin observation body unavailable")
+			}
+			return data, adminObservationError(resp.StatusCode, resp.Header.Get("Cache-Control"), data)
+		})
 		if err != nil {
 			t.Fatal("actual authenticated Admin observation failed")
-		}
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, observability.MaxMetricsBytes+1))
-		_ = resp.Body.Close()
-		if readErr != nil || resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
-			t.Fatal("Admin observation failed its read contract")
 		}
 		assertJSON(t, data, tc.want, tc.tool == "service_observability", private)
 	}

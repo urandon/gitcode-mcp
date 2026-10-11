@@ -217,6 +217,12 @@ than becoming fabricated zeroes; confirmed execution counters may already exist
 before the first resource sample. A closed collector is not an admission-drop
 test: post-seal emissions are deliberately ignored.
 
+The real Admin revision poller shares nonblocking read locks. Qualification
+retries only typed `observation_busy` reads, at most five attempts separated by
+10 ms; unknown errors, cancellation and budget exhaustion still fail. This
+test-only handling never retries sync or relaxes DTO/privacy/provider-count
+assertions. Transport controls reject raw-text and mixed success/error envelopes.
+
 `web/tests/observation-integrated.spec.ts` compiles that test-only fixture and
 drives the embedded Admin bundle against its real authenticated API. It does
 not replace HTTP responses or EventSource with mocks. It checks the selected
