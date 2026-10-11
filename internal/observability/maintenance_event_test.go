@@ -86,10 +86,51 @@ func TestMaintenanceSourceEventClosedCatalogAndReplay(t *testing.T) {
 
 func TestMaintenanceSourceEventIdentityNeverEntersWorkerContext(t *testing.T) {
 	c := &Collector{}
-	refs := Context{Source: KnownRef("source", "fixture-source"), Stage: KnownRef("stage", "fixture-stage"), Job: KnownRef("job", "fixture-job"), Correlation: KnownRef("correlation", "fixture-job"), ExecutionDetails: ExecutionDetails{MaintenanceScope: "repository_docs", Outcome: "registered"}}
+	refs := Context{Source: KnownRef("source", "fixture-source"), PreviousRegistration: KnownRef("registration", "fixture-predecessor"), Stage: KnownRef("stage", "fixture-stage"), Job: KnownRef("job", "fixture-job"), Correlation: KnownRef("correlation", "fixture-job"), ExecutionDetails: ExecutionDetails{MaintenanceScope: "repository_docs", Outcome: "registered"}}
 	binding := WithObservation(context.Background(), c, refs).Value(observationContextKey{}).(observationBinding)
-	if binding.refs.Source.value != "" || binding.refs.Stage.value != "" || binding.refs.ExecutionDetails != (ExecutionDetails{}) || binding.refs.Job != refs.Job || binding.refs.Correlation != refs.Correlation || refs.Source.value == "" {
+	if binding.refs.Source.value != "" || binding.refs.PreviousRegistration.value != "" || binding.refs.Stage.value != "" || binding.refs.ExecutionDetails != (ExecutionDetails{}) || binding.refs.Job != refs.Job || binding.refs.Correlation != refs.Correlation || refs.Source.value == "" {
 		t.Fatal("event-owned source leaked into inherited worker identity")
+	}
+}
+
+func TestMaintenanceIdentityResolutionEventClosedCatalogAndReplay(t *testing.T) {
+	for _, before := range []string{"identity_conflict", "cache_clone_conflict", "identity_unresolved"} {
+		for _, after := range []string{"enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked", "identity_conflict", "cache_clone_conflict", "identity_unresolved", "config_snapshot_invalid", "cache_inspection_timeout"} {
+			e := executionFixtureEvent(MaintenanceStateChanged, ExecutionDetails{Phase: "maintenance", MaintenanceScope: "identity_resolution", PreviousState: before, PreviousFailureClass: "identity", Outcome: after})
+			e.JobRef = ""
+			e.CacheRef, e.RegistrationRef, e.RepoRef = KnownRef("cache", "fixture").value, KnownRef("registration", "fixture-result").value, KnownRef("repo", "fixture").value
+			e.PreviousRegistrationRef = KnownRef("registration", "fixture-predecessor").value
+			data, err := marshalEvent(e)
+			var replay Event
+			if err != nil || decodeStrict(data, &replay) != nil || replay != e {
+				t.Fatal("identity resolution failed closed replay")
+			}
+			for _, mutate := range []func(*Event){
+				func(e *Event) { e.PreviousRegistrationRef = "" }, func(e *Event) { e.PreviousRegistrationRef = "synthetic-private" },
+				func(e *Event) { e.PreviousRegistrationRef = KnownRef("repo", "fixture").value },
+				func(e *Event) { e.MaintenanceScope = "registration" }, func(e *Event) { e.MaintenanceScope = "repository_docs" },
+				func(e *Event) { e.PreviousState = "absent" }, func(e *Event) { e.PreviousState = "unknown" }, func(e *Event) { e.PreviousState = "enrolled" },
+				func(e *Event) { e.Outcome = "unknown" }, func(e *Event) { e.Outcome = "synthetic-private" },
+				func(e *Event) { e.SourceRef = KnownRef("source", "fixture").value }, func(e *Event) { e.StageRef = KnownRef("stage", "fixture").value }, func(e *Event) { e.JobRef = KnownRef("job", "fixture").value },
+				func(e *Event) { e.PreviousFailureClass = "synthetic-private" }, func(e *Event) { e.FailureClass = "synthetic-private" },
+				func(e *Event) { e.PreviousState, e.PreviousFailureClass = e.Outcome, e.FailureClass },
+			} {
+				invalid := e
+				mutate(&invalid)
+				if invalid.valid() {
+					t.Fatal("resolution admitted invented dimensions")
+				}
+			}
+		}
+	}
+	for code := range catalog {
+		if code != MaintenanceStateChanged && (Event{Code: code, PreviousRegistrationRef: KnownRef("registration", "fixture").value}).validExecution() {
+			t.Fatal("unrelated code admitted predecessor identity")
+		}
+	}
+	// Adding this cohort does not widen ordinary registration states.
+	if maintenanceState("identity_conflict") || maintenanceState("config_snapshot_invalid") {
+		t.Fatal("resolution widened registration catalog")
 	}
 }
 

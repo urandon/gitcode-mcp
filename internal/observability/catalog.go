@@ -90,29 +90,31 @@ func KnownRef(kind, authorityID string) Ref {
 type Context struct {
 	Job, Registration, Cache, Repo, Correlation Ref
 	Stage, Source                               Ref
+	PreviousRegistration                        Ref
 	ExecutionDetails
 }
 type Event struct {
 	ExecutionDetails
-	Legacy          bool      `json:"legacy,omitempty"`
-	ObservedBytes   int       `json:"observed_bytes,omitempty"`
-	Schema          int       `json:"schema"`
-	EventID         string    `json:"event_id"`
-	OccurredAt      time.Time `json:"occurred_at"`
-	BootID          string    `json:"boot_id"`
-	Sequence        uint64    `json:"sequence"`
-	Stream          string    `json:"stream"`
-	Severity        string    `json:"severity"`
-	Component       string    `json:"component"`
-	Code            Code      `json:"code"`
-	Message         string    `json:"message"`
-	JobRef          string    `json:"job_ref,omitempty"`
-	RegistrationRef string    `json:"registration_ref,omitempty"`
-	CacheRef        string    `json:"cache_ref,omitempty"`
-	RepoRef         string    `json:"repo_ref,omitempty"`
-	CorrelationRef  string    `json:"correlation_ref,omitempty"`
-	StageRef        string    `json:"stage_ref,omitempty"`
-	SourceRef       string    `json:"source_ref,omitempty"`
+	Legacy                  bool      `json:"legacy,omitempty"`
+	ObservedBytes           int       `json:"observed_bytes,omitempty"`
+	Schema                  int       `json:"schema"`
+	EventID                 string    `json:"event_id"`
+	OccurredAt              time.Time `json:"occurred_at"`
+	BootID                  string    `json:"boot_id"`
+	Sequence                uint64    `json:"sequence"`
+	Stream                  string    `json:"stream"`
+	Severity                string    `json:"severity"`
+	Component               string    `json:"component"`
+	Code                    Code      `json:"code"`
+	Message                 string    `json:"message"`
+	JobRef                  string    `json:"job_ref,omitempty"`
+	RegistrationRef         string    `json:"registration_ref,omitempty"`
+	CacheRef                string    `json:"cache_ref,omitempty"`
+	RepoRef                 string    `json:"repo_ref,omitempty"`
+	CorrelationRef          string    `json:"correlation_ref,omitempty"`
+	StageRef                string    `json:"stage_ref,omitempty"`
+	SourceRef               string    `json:"source_ref,omitempty"`
+	PreviousRegistrationRef string    `json:"previous_registration_ref,omitempty"`
 }
 
 var hexID = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -128,7 +130,7 @@ func (e Event) valid() bool {
 	}
 	return ok && e.validExecution() && e.ObservedBytes >= 0 && e.ObservedBytes <= MaxPageBytes && (e.Legacy || e.ObservedBytes == 0) && e.Schema == 1 && e.Sequence > 0 && hexID.MatchString(e.BootID) && hexID.MatchString(e.EventID) &&
 		!e.OccurredAt.IsZero() && streamOK && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
-		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage") && validRef(e.SourceRef, "source")
+		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage") && validRef(e.SourceRef, "source") && validRef(e.PreviousRegistrationRef, "registration")
 }
 func marshalEvent(e Event) ([]byte, error) {
 	if !e.valid() {

@@ -287,6 +287,8 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 	if err := validateMaintenanceConflictResolutionRequest(req, true); err != nil {
 		return MaintenanceConflictResolutionResult{}, err
 	}
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation() // follows registry, redirect and cache-fence unwind
 	keyHash := maintenanceIdempotencyKeyHash(req.IdempotencyKey)
 	intentHash := maintenanceHash(struct {
 		RegistrationID string
@@ -356,6 +358,7 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 	snapshot := m.snapshotConflictMutationLocked()
 	oldRegistrationID := plan.RegistrationID
 	entry = m.entries[oldRegistrationID]
+	observation := newMaintenanceResolutionObservation(ctx, entry)
 	candidates := cloneMaintenanceConflictCandidates(m.conflictCandidates[oldRegistrationID])
 	canonicalPath, err := canonicalCachePath(selected.CachePath)
 	if err != nil {
@@ -464,10 +467,12 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 		Generation: merged.Generation, RetiredClonePaths: retired, AppliedAt: m.now(),
 	}
 	m.resolutionReceipts[keyHash] = receipt
+	observation.record(m.entries[merged.RegistrationID])
 	if err := m.saveLocked(); err != nil {
 		m.restoreConflictMutationLocked(snapshot)
 		return MaintenanceConflictResolutionResult{}, err
 	}
+	observation.confirm()
 	result := maintenanceConflictResult(receipt, false)
 	redirects, sourceRedirects, repoIDs := m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 	m.mu.Unlock()
@@ -496,6 +501,7 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 	if conflictEntry == nil || conflictEntry.IdentityConflict == nil || conflictEntry.IdentityConflict.Kind != "cache_clone_conflict" {
 		return MaintenanceConflictResolutionResult{}, MaintenanceConflictResolutionError{code: "conflict_generation_stale"}
 	}
+	observation := newMaintenanceResolutionObservation(ctx, conflictEntry)
 	selectedPath := maintenanceCanonicalPathKey(selected[0].CachePath)
 	for _, candidate := range selected {
 		if maintenanceCanonicalPathKey(candidate.CachePath) != selectedPath {
@@ -575,7 +581,9 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 	}
 	resultGeneration := maxGeneration + 1
 	for _, id := range resultIDs {
-		if entry := m.entries[id]; entry != nil && entry.Generation > resultGeneration {
+		entry := m.entries[id]
+		observation.record(entry)
+		if entry != nil && entry.Generation > resultGeneration {
 			resultGeneration = entry.Generation
 		}
 	}
@@ -590,6 +598,7 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 		m.restoreConflictMutationLocked(snapshot)
 		return MaintenanceConflictResolutionResult{}, err
 	}
+	observation.confirm()
 	return maintenanceConflictResult(receipt, false), nil
 }
 

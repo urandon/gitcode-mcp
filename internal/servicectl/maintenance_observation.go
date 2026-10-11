@@ -11,19 +11,22 @@ const maxMaintenanceObservations = 128
 type maintenanceObservationKey struct{}
 type maintenanceObservationState struct{ state, failure string }
 type maintenanceObservationCapture struct {
-	identity      jobObservationIdentity
-	scope, source string
-	before, after maintenanceObservationState
+	identity             jobObservationIdentity
+	scope, source        string
+	previousRegistration string
+	resolution           int
+	before, after        maintenanceObservationState
 }
 
 // Operation-local bounded capture only. All writers are synchronous owners on
 // the calling goroutine; no spawned job retains this diagnostic context.
 type maintenanceObservationBuffer struct {
-	collector *observability.Collector
-	metrics   *observability.Metrics
-	captures  [maxMaintenanceObservations]maintenanceObservationCapture
-	count     int
-	lost      uint64
+	collector   *observability.Collector
+	metrics     *observability.Metrics
+	captures    [maxMaintenanceObservations]maintenanceObservationCapture
+	count       int
+	lost        uint64
+	resolutions int
 }
 
 // Establish this before acquiring any outer authority lock. Inner owners share
@@ -156,15 +159,27 @@ func (b *maintenanceObservationBuffer) flush() {
 	if b.collector == nil {
 		return
 	}
+	var resolution int
+	var resolutionCorrelation observability.Ref
 	for i := 0; i < b.count; i++ {
 		capture := b.captures[i]
+		var correlation observability.Ref
+		if capture.resolution > 0 {
+			if capture.resolution != resolution {
+				resolution, resolutionCorrelation = capture.resolution, b.collector.MaintenanceTransitionCorrelation()
+			}
+			correlation = resolutionCorrelation
+		} else {
+			correlation = b.collector.MaintenanceTransitionCorrelation()
+		}
 		b.collector.Emit(observability.MaintenanceStateChanged, observability.Context{
-			Cache:            observability.KnownRef("cache", capture.identity.cache),
-			Registration:     observability.KnownRef("registration", capture.identity.registration),
-			Repo:             observability.KnownRef("repo", capture.identity.repo),
-			Correlation:      b.collector.MaintenanceTransitionCorrelation(),
-			Source:           observability.KnownRef("source", capture.source),
-			ExecutionDetails: observability.ExecutionDetails{Phase: "maintenance", MaintenanceScope: capture.scope, PreviousState: capture.before.state, PreviousFailureClass: capture.before.failure, Outcome: capture.after.state, FailureClass: capture.after.failure},
+			Cache:                observability.KnownRef("cache", capture.identity.cache),
+			Registration:         observability.KnownRef("registration", capture.identity.registration),
+			Repo:                 observability.KnownRef("repo", capture.identity.repo),
+			Correlation:          correlation,
+			Source:               observability.KnownRef("source", capture.source),
+			PreviousRegistration: observability.KnownRef("registration", capture.previousRegistration),
+			ExecutionDetails:     observability.ExecutionDetails{Phase: "maintenance", MaintenanceScope: capture.scope, PreviousState: capture.before.state, PreviousFailureClass: capture.before.failure, Outcome: capture.after.state, FailureClass: capture.after.failure},
 		})
 	}
 }

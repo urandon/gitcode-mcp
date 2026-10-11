@@ -166,6 +166,21 @@ obsolete changed pair, one confirmed source capture for a current pair, and no
 extra boundary on unchanged replay. The held generation-fence test waits for an
 accepted FIFO collector marker after registry save/unlock before asserting no
 early maintenance publication; releasing the real fence conserves the transition.
+Identity-resolution fixtures apply real legacy registry conflicts and physical
+SQLite clones through the existing Plan/Apply owners. They cover enabled/disabled
+Admin selection, stale plans, durable replay/restart, rollback/retry, panic before
+confirmation and exact atomic readback without additional writes. Earlier actual
+registration/source evidence survives a failed attempt. Multi-repository results
+are qualified after canonicalization, including residual identity conflicts and
+unresolved, timeout or config-snapshot-blocked results. An actual held job-redirect
+mutex, active cache mutation fence and persisted FIFO marker prove publication
+waits for authority unwind. Mixed-scope fixed capacity conserves qualified loss;
+unchanged pairs add none, unsupported changed pairs fabricate no success, and
+metrics-only mode invents no disabled event-stream loss. Later confirmed conflict
+episodes with the same predecessor receive distinct operation correlations.
+Closed replay enforces scope-specific predecessor/result enums and opaque
+historical predecessor identity, which never leaks into worker context or other
+event codes. Private candidate/plan/key/config/path coordinates stay excluded.
 Admin request fixtures use actual mux/authenticated control and SSE paths, with
 collector-only and combined metric modes. They conserve retained plus lost
 completions, preserve panic/write/short-write/flush/cancellation outcomes and

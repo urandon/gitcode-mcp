@@ -244,7 +244,7 @@ then publishes outside it after the single save. Uncaptured overflow and
 retained failed-save boundaries use count-only atomic loss accounting, never an
 unbounded diagnostic slice, per-job diagnostic save, extra authority lookup or
 retry. These backend hooks remain subject to the O3/O4/O5 rollout gates;
-explicit conflict maintenance event ownership remains separate O2 work.
+conflict maintenance events use their separate persistence owner below.
 
 `maintenance_state_changed` records a confirmed registration state/class pair
 change at enrollment, disable or reconcile persistence owners, not at List,
@@ -275,8 +275,32 @@ unchanged replay does not retroactively confirm or recount the pair. Generation-
 source replay and inspection-health projection are not extra transitions. Flush
 also follows source-generation fences. Source refs are rejected on other events
 and cleared from per-worker context. No source path, Git identity, content or
-revision enters diagnostics. Identity-conflict owner hooks and final O2
-qualification remain pending; these hooks do not complete O2 or its O3-O5 gates.
+revision enters diagnostics. These hooks do not complete O2 or its O3-O5 gates.
+
+Confirmed conflict resolution uses scope `identity_resolution`, not an ordinary
+registration projection. Its event-owned `previous_registration_ref` names the
+immutable opaque predecessor, even when that registration is later redirected.
+Only identity_conflict, cache_clone_conflict and identity_unresolved are valid
+predecessors. Results use the actual final registration state/class, including
+residual identity conflicts, config_snapshot_invalid and cache_inspection_timeout;
+these extra states do not widen the ordinary registration/source catalogs.
+Clone resolution captures each final unique result in the existing result
+generation loop after canonicalization, never a provisional selected candidate
+or a synthetic single repository. Results of one confirmed operation share fresh
+opaque correlation; repeated episodes with the same predecessor remain distinct.
+
+Resolution observations are attempt-local primitive captures sharing the same
+128-item logical capacity with earlier registration/source captures. Only the
+existing successful save or exact ambiguous-write readback promotes pending
+captures and qualified loss to the context carrier. Rollback and panic before
+confirmation discard the attempt without erasing earlier evidence. An unchanged
+finite pair consumes neither capacity nor loss; unsupported changed results and
+over-capacity results report honest count-only loss. Publication follows registry
+unlock, job redirect publication and cache mutation fence release. The direct
+Admin resolution owner does not introduce an extra control-receipt boundary.
+Predecessor refs are forbidden on other events and cleared from worker context;
+no candidate, plan, generation, policy, path or source authority enters diagnostics.
+Final O2 qualification and the O3-O5 rollout gates remain required.
 
 ### Metric evidence foundation
 

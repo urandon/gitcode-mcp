@@ -18,8 +18,9 @@ func WithObservation(ctx context.Context, collector *Collector, refs Context) co
 		return ctx
 	}
 	refs.ExecutionDetails = ExecutionDetails{}
-	refs.Stage = Ref{}  // stage identity belongs to one confirmed event, not a worker
-	refs.Source = Ref{} // source transition identity also belongs to one event
+	refs.Stage = Ref{}                // stage identity belongs to one confirmed event, not a worker
+	refs.Source = Ref{}               // source transition identity also belongs to one event
+	refs.PreviousRegistration = Ref{} // a resolution predecessor is event-owned
 	return context.WithValue(ctx, observationContextKey{}, observationBinding{collector, refs})
 }
 

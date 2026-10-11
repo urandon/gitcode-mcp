@@ -48,6 +48,9 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
+	if e.PreviousRegistrationRef != "" && (e.Code != MaintenanceStateChanged || d.MaintenanceScope != "identity_resolution") {
+		return false
+	}
 	if e.SourceRef != "" && (e.Code != MaintenanceStateChanged || d.MaintenanceScope != "repository_docs") {
 		return false
 	}
@@ -84,6 +87,8 @@ func (e Event) validExecution() bool {
 				return false
 			}
 			state = maintenanceSourceState
+		case "identity_resolution":
+			return e.PreviousRegistrationRef != "" && maintenanceIdentityPredecessor(d.PreviousState) && maintenanceIdentityResult(d.Outcome) && maintenanceFailure(d.FailureClass) && maintenanceFailure(d.PreviousFailureClass) && (d.Outcome != d.PreviousState || d.FailureClass != d.PreviousFailureClass)
 		default:
 			return false
 		}
@@ -186,4 +191,16 @@ func maintenanceSourceState(value string) bool {
 		return true
 	}
 	return false
+}
+
+func maintenanceIdentityPredecessor(value string) bool {
+	switch value {
+	case "identity_conflict", "cache_clone_conflict", "identity_unresolved":
+		return true
+	}
+	return false
+}
+
+func maintenanceIdentityResult(value string) bool {
+	return maintenanceState(value) || maintenanceIdentityPredecessor(value) || value == "config_snapshot_invalid" || value == "cache_inspection_timeout"
 }
