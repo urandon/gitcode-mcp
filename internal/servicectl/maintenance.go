@@ -1950,11 +1950,13 @@ func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) 
 // cache/repository maintenance registration. The path stays only in the 0600
 // daemon registry; public state carries opaque Git identities.
 func (m *MaintenanceManager) RegisterRepositoryDocsSource(ctx context.Context, cacheUUID, repoID, repositoryPath, profile string) (MaintenanceEntry, bool, error) {
+	ctx, flush := beginMaintenanceObservation(ctx, m.jobs)
+	defer flush()
 	resolved, err := resolveRepositoryDocsSource(ctx, repoID, repositoryPath, profile, repositorydocs.PolicyRequest{RepoID: repoID})
 	if err != nil {
 		return MaintenanceEntry{}, false, err
 	}
-	return m.registerResolvedRepositoryDocsSource(cacheUUID, repoID, resolved)
+	return m.registerResolvedRepositoryDocsSource(ctx, cacheUUID, repoID, resolved)
 }
 
 type resolvedRepositoryDocsSource struct {
@@ -1985,7 +1987,7 @@ func resolveRepositoryDocsSource(ctx context.Context, repoID, repositoryPath, pr
 	return resolvedRepositoryDocsSource{repositoryPath: absPath, profile: strings.TrimSpace(profile), repo: repo, policy: policy}, nil
 }
 
-func (m *MaintenanceManager) registerResolvedRepositoryDocsSource(cacheUUID, repoID string, resolved resolvedRepositoryDocsSource) (MaintenanceEntry, bool, error) {
+func (m *MaintenanceManager) registerResolvedRepositoryDocsSource(ctx context.Context, cacheUUID, repoID string, resolved resolvedRepositoryDocsSource) (MaintenanceEntry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.maintenanceEntryForCacheRepoLocked(cacheUUID, repoID)
@@ -2005,6 +2007,7 @@ func (m *MaintenanceManager) registerResolvedRepositoryDocsSource(cacheUUID, rep
 		m.generation = previousManagerGeneration
 		return MaintenanceEntry{}, false, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_persist_failed"}
 	}
+	captureMaintenanceSourceObservation(ctx, maintenanceObservedSourceState(previousSources[source.State.SourceRegistrationID]), entry, source, true)
 	return cloneMaintenanceEntryForSource(entry, source), true, nil
 }
 
@@ -2055,7 +2058,9 @@ func (m *MaintenanceManager) applyResolvedRepositoryDocsSourceLocked(entry *Main
 	return source, true, nil
 }
 
-func (m *MaintenanceManager) registerAndRecordRepositoryDocsAdmission(prepared preparedRepositoryDocsIndex) (MaintenanceEntry, preparedRepositoryDocsIndex, bool, error) {
+func (m *MaintenanceManager) registerAndRecordRepositoryDocsAdmission(ctx context.Context, prepared preparedRepositoryDocsIndex) (MaintenanceEntry, preparedRepositoryDocsIndex, bool, error) {
+	ctx, flush := beginMaintenanceObservation(ctx, m.jobs)
+	defer flush()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	resolved := resolvedRepositoryDocsSource{repositoryPath: prepared.request.RepositoryPath, profile: prepared.request.Profile, repo: prepared.repository, policy: prepared.policy}
@@ -2117,6 +2122,7 @@ func (m *MaintenanceManager) registerAndRecordRepositoryDocsAdmission(prepared p
 		}
 		return MaintenanceEntry{}, preparedRepositoryDocsIndex{}, false, RepositoryDocsSourceUnavailableError{code: code}
 	}
+	captureMaintenanceSourceObservation(ctx, maintenanceObservedSourceState(previousSources[source.State.SourceRegistrationID]), entry, source, true)
 	return cloneMaintenanceEntryForSource(entry, source), prepared, true, nil
 }
 
@@ -2291,6 +2297,8 @@ func (m *MaintenanceManager) repositoryDocsAdmissionForCurrentAuthorityLocked(re
 // authority. Ordinary registration never calls this path: callers must present
 // the current source generation, so concurrent or stale rebinds fail closed.
 func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req RepositoryDocsSourceRebindRequest) (MaintenanceEntry, error) {
+	ctx, flush := beginMaintenanceObservation(ctx, m.jobs)
+	defer flush()
 	registrationID := strings.TrimSpace(req.RegistrationID)
 	if registrationID == "" || req.ExpectedGeneration <= 0 {
 		return MaintenanceEntry{}, RepositoryDocsSourceGenerationConflictError{}
@@ -2338,6 +2346,7 @@ func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req
 	admissionKey, previousAdmission, hadPreviousAdmission := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, selected.SourceRegistrationID)
 	legacyAdmission, hadLegacyAdmission := m.admissions[registrationID]
 	oldGeneration := source.State.SourceRegistrationGeneration
+	beforeObservation := maintenanceObservedSourceState(source)
 	source.RepositoryPath = resolved.repositoryPath
 	source.Profile = resolved.profile
 	source.State = RepositoryDocsMaintenanceState{
@@ -2370,6 +2379,7 @@ func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req
 	}
 	result := cloneMaintenanceEntryForSource(entry, source)
 	fenceGeneration = oldGeneration
+	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, true)
 	return result, nil
 }
 
@@ -2778,7 +2788,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if hasPendingRepositoryDocsAdmission && errors.As(jobErr, &staleAdmission) {
 					_ = m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.AuthorityPathFingerprint)
 					recordJobActionIntentError(ctx, jobErr)
-					return m.updateRepositoryDocsFailure(registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
+					return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
 				}
 				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
@@ -2794,7 +2804,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if class == "repository_docs_provider_boundary_blocked" {
 					message = "repository documentation indexing requires an effective local_process or local_network provider boundary"
 				}
-				return m.updateRepositoryDocsFailure(registrationID, snapshot.repositorySourceID, class, message), started
+				return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, class, message), started
 			}
 			started = append(started, job.ID)
 			activeRepositoryDocs = job
@@ -2818,6 +2828,8 @@ func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrat
 	m.mu.Lock()
 	entry := m.entries[registrationID]
 	beforeObservation := maintenanceObservedState(entry)
+	observedSource := m.sources[registrationID][snapshot.repositorySourceID]
+	beforeSourceObservation := maintenanceObservedSourceState(observedSource)
 	entry.ContentGeneration = contentGeneration
 	entry.CoveredGeneration = covered
 	entry.RAGStatus = ragStatus
@@ -2862,6 +2874,7 @@ func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrat
 	entry.NextReconcileAt = now.Add(time.Minute)
 	persisted := m.saveLocked() == nil
 	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
+	captureMaintenanceSourceObservation(ctx, beforeSourceObservation, entry, observedSource, persisted)
 	updated := cloneMaintenanceEntry(entry)
 	m.mu.Unlock()
 	return updated
@@ -2937,7 +2950,7 @@ func (m *MaintenanceManager) reconcileRepositoryDocsState(ctx context.Context, s
 	return true
 }
 
-func (m *MaintenanceManager) updateRepositoryDocsFailure(id, sourceID, class, message string) MaintenanceEntry {
+func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id, sourceID, class, message string) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
@@ -2948,6 +2961,7 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(id, sourceID, class, me
 	if source == nil {
 		return cloneMaintenanceEntry(entry)
 	}
+	beforeObservation := maintenanceObservedSourceState(source)
 	source.State.State = "degraded"
 	source.State.LastErrorClass = class
 	source.State.LastError = message
@@ -2956,7 +2970,8 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(id, sourceID, class, me
 	m.refreshLegacyRepositoryDocsLocked(entry)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
-	_ = m.saveLocked()
+	persisted := m.saveLocked() == nil
+	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, persisted)
 	return cloneMaintenanceEntry(entry)
 }
 

@@ -79,7 +79,7 @@ func KnownRef(kind, authorityID string) Ref {
 		return Ref{}
 	}
 	switch kind {
-	case "job", "registration", "cache", "repo", "correlation", "stage":
+	case "job", "registration", "cache", "repo", "correlation", "stage", "source":
 	default:
 		return Ref{}
 	}
@@ -89,7 +89,7 @@ func KnownRef(kind, authorityID string) Ref {
 
 type Context struct {
 	Job, Registration, Cache, Repo, Correlation Ref
-	Stage                                       Ref
+	Stage, Source                               Ref
 	ExecutionDetails
 }
 type Event struct {
@@ -112,6 +112,7 @@ type Event struct {
 	RepoRef         string    `json:"repo_ref,omitempty"`
 	CorrelationRef  string    `json:"correlation_ref,omitempty"`
 	StageRef        string    `json:"stage_ref,omitempty"`
+	SourceRef       string    `json:"source_ref,omitempty"`
 }
 
 var hexID = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -127,7 +128,7 @@ func (e Event) valid() bool {
 	}
 	return ok && e.validExecution() && e.ObservedBytes >= 0 && e.ObservedBytes <= MaxPageBytes && (e.Legacy || e.ObservedBytes == 0) && e.Schema == 1 && e.Sequence > 0 && hexID.MatchString(e.BootID) && hexID.MatchString(e.EventID) &&
 		!e.OccurredAt.IsZero() && streamOK && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
-		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage")
+		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage") && validRef(e.SourceRef, "source")
 }
 func marshalEvent(e Event) ([]byte, error) {
 	if !e.valid() {

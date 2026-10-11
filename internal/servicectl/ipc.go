@@ -245,7 +245,7 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		if err != nil {
 			return nil, err
 		}
-		entry, prepared, registered, registerErr := s.Maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+		entry, prepared, registered, registerErr := s.Maintenance.registerAndRecordRepositoryDocsAdmission(ctx, prepared)
 		if registerErr != nil {
 			return nil, registerErr
 		}

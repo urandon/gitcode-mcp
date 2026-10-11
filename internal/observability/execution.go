@@ -48,6 +48,9 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
+	if e.SourceRef != "" && (e.Code != MaintenanceStateChanged || d.MaintenanceScope != "repository_docs") {
+		return false
+	}
 	if e.Code != MaintenanceStateChanged && (d.MaintenanceScope != "" || d.PreviousState != "" || d.PreviousFailureClass != "") {
 		return false
 	}
@@ -70,10 +73,21 @@ func (e Event) validExecution() bool {
 	}
 	switch e.Code {
 	case MaintenanceStateChanged:
-		if e.JobRef != "" || e.RegistrationRef == "" || e.CacheRef == "" || e.RepoRef == "" || d.Phase != "maintenance" || d.Collection != "" || d.Attempt != 0 || d.MaintenanceScope != "registration" {
+		if e.JobRef != "" || e.RegistrationRef == "" || e.CacheRef == "" || e.RepoRef == "" || d.Phase != "maintenance" || d.Collection != "" || d.Attempt != 0 {
 			return false
 		}
-		return maintenanceState(d.Outcome) && (maintenanceState(d.PreviousState) || d.PreviousState == "absent" || d.PreviousState == "unknown") && maintenanceFailure(d.FailureClass) && maintenanceFailure(d.PreviousFailureClass) && (d.Outcome != d.PreviousState || d.FailureClass != d.PreviousFailureClass) && (d.PreviousState != "absent" || d.PreviousFailureClass == "")
+		state := maintenanceState
+		switch d.MaintenanceScope {
+		case "registration":
+		case "repository_docs":
+			if e.SourceRef == "" {
+				return false
+			}
+			state = maintenanceSourceState
+		default:
+			return false
+		}
+		return state(d.Outcome) && (state(d.PreviousState) || d.PreviousState == "absent" || d.PreviousState == "unknown") && maintenanceFailure(d.FailureClass) && maintenanceFailure(d.PreviousFailureClass) && (d.Outcome != d.PreviousState || d.FailureClass != d.PreviousFailureClass) && (d.PreviousState != "absent" || d.PreviousFailureClass == "")
 	case AdminRequestCompleted:
 		if e.JobRef != "" || e.CacheRef != "" || e.RegistrationRef != "" || e.RepoRef != "" || d.Phase != "admin" || d.Collection != "" || d.Attempt != 0 || d.FailureClass != "" {
 			return false
@@ -161,6 +175,14 @@ func maintenanceState(value string) bool {
 func maintenanceFailure(value string) bool {
 	switch value {
 	case "", "cache", "identity", "content", "frontier", "embedding", "retry", "sync_schedule", "rag_schedule", "repository_docs", "cache_schema_blocked", "operation_failed":
+		return true
+	}
+	return false
+}
+
+func maintenanceSourceState(value string) bool {
+	switch value {
+	case "registered", "not_indexed", "indexing", "disabled", "ready", "degraded":
 		return true
 	}
 	return false

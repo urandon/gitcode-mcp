@@ -244,7 +244,7 @@ then publishes outside it after the single save. Uncaptured overflow and
 retained failed-save boundaries use count-only atomic loss accounting, never an
 unbounded diagnostic slice, per-job diagnostic save, extra authority lookup or
 retry. These backend hooks remain subject to the O3/O4/O5 rollout gates;
-source/conflict maintenance event ownership remains separate O2 work.
+explicit conflict maintenance event ownership remains separate O2 work.
 
 `maintenance_state_changed` records a confirmed registration state/class pair
 change at enrollment, disable or reconcile persistence owners, not at List,
@@ -259,9 +259,19 @@ job retains the buffer. Overflow and retained failed saves record count-only
 loss, while rollback and unchanged later replay emit nothing. Existing exact
 payload readback confirms an ambiguous atomic write without extra telemetry
 I/O. Metrics-only operation counts unconfirmed persistence independently but
-does not fabricate overflow for a disabled event sink. Source-specific and
-identity-conflict owner hooks and final O2 qualification remain pending; these
-registration hooks do not complete the observability feature or its O3-O5 gates.
+does not fabricate overflow for a disabled event sink.
+
+Repository-document transitions use scope `repository_docs` and an event-owned
+opaque `source_ref`, distinct for every durably registered source. Their states
+are registered, not_indexed, indexing, disabled, ready and degraded; the same
+closed failure map and shared capture cap apply. Actual registration/admission,
+rebind reset, reconcile completion and retained failure owners observe only a
+changed finite pair at their existing save confirmation. Generation-only rebind,
+source replay and inspection-health projection are not extra transitions. Flush
+also follows source-generation fences. Source refs are rejected on other events
+and cleared from per-worker context. No source path, Git identity, content or
+revision enters diagnostics. Identity-conflict owner hooks and final O2
+qualification remain pending; these hooks do not complete O2 or its O3-O5 gates.
 
 ### Metric evidence foundation
 

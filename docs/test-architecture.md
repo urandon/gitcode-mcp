@@ -150,6 +150,15 @@ limits; metrics-only mode reports unconfirmed persistence without inventing
 disabled event-queue loss. Strict replay rejects raw states/classes and other
 execution dimensions; primitive identity, config/key/error sentinels stay out
 of diagnostics, and registry restart emits no fresh transition.
+Repository-document source fixtures exercise real Git source registration,
+replay, distinct sources and generation-only versus degraded-state rebind reset.
+Actual inspection failure/recovery and indexing state owners preserve separate
+inspection health. Failed registration rolls back without diagnostic loss;
+retained failed source writes report count-only loss, and exact atomic readback
+confirms rename success without extra I/O. Source identity and finite classes
+survive strict replay; paths, source ids, content and raw safe-looking error
+classes remain excluded. Registration and source captures share one bounded
+operation-local buffer and publication boundary.
 Admin request fixtures use actual mux/authenticated control and SSE paths, with
 collector-only and combined metric modes. They conserve retained plus lost
 completions, preserve panic/write/short-write/flush/cancellation outcomes and

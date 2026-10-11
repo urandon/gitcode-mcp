@@ -12,6 +12,7 @@ type maintenanceObservationKey struct{}
 type maintenanceObservationState struct{ state, failure string }
 type maintenanceObservationCapture struct {
 	identity      jobObservationIdentity
+	scope, source string
 	before, after maintenanceObservationState
 }
 
@@ -56,6 +57,19 @@ func maintenanceObservedState(entry *MaintenanceEntry) maintenanceObservationSta
 	return maintenanceObservationState{state: state, failure: maintenanceObservedFailure(entry.LastErrorClass)}
 }
 
+func maintenanceObservedSourceState(source *repositoryDocsRegisteredSource) maintenanceObservationState {
+	if source == nil {
+		return maintenanceObservationState{state: "absent"}
+	}
+	state := source.State.State
+	switch state {
+	case "registered", "not_indexed", "indexing", "disabled", "ready", "degraded":
+	default:
+		state = "unknown"
+	}
+	return maintenanceObservationState{state: state, failure: maintenanceObservedFailure(source.State.LastErrorClass)}
+}
+
 func maintenanceObservedFailure(class string) string {
 	switch class {
 	case "":
@@ -88,11 +102,24 @@ func maintenanceObservedFailure(class string) string {
 // Capture happens under the existing registry lock after the existing save.
 // It hashes nothing, invokes no sink/callback, and never performs telemetry I/O.
 func captureMaintenanceObservation(ctx context.Context, before maintenanceObservationState, entry *MaintenanceEntry, persisted bool) {
+	if entry == nil {
+		return
+	}
+	captureMaintenanceTransition(ctx, before, maintenanceObservedState(entry), entry, "registration", "", persisted)
+}
+
+func captureMaintenanceSourceObservation(ctx context.Context, before maintenanceObservationState, entry *MaintenanceEntry, source *repositoryDocsRegisteredSource, persisted bool) {
+	if source == nil {
+		return
+	}
+	captureMaintenanceTransition(ctx, before, maintenanceObservedSourceState(source), entry, "repository_docs", source.State.SourceRegistrationID, persisted)
+}
+
+func captureMaintenanceTransition(ctx context.Context, before, after maintenanceObservationState, entry *MaintenanceEntry, scope, source string, persisted bool) {
 	buffer, _ := ctx.Value(maintenanceObservationKey{}).(*maintenanceObservationBuffer)
 	if buffer == nil || entry == nil {
 		return
 	}
-	after := maintenanceObservedState(entry)
 	if before == after {
 		return
 	}
@@ -105,12 +132,12 @@ func captureMaintenanceObservation(ctx context.Context, before maintenanceObserv
 	if buffer.collector == nil {
 		return
 	}
-	if after.state == "unknown" || entry.CacheUUID == "" || len(entry.CacheUUID) > 4096 || entry.RegistrationID == "" || len(entry.RegistrationID) > 4096 || entry.RepoID == "" || len(entry.RepoID) > 4096 || buffer.count == len(buffer.captures) {
+	if after.state == "unknown" || entry.CacheUUID == "" || len(entry.CacheUUID) > 4096 || entry.RegistrationID == "" || len(entry.RegistrationID) > 4096 || entry.RepoID == "" || len(entry.RepoID) > 4096 || (scope == "repository_docs" && (source == "" || len(source) > 4096)) || buffer.count == len(buffer.captures) {
 		buffer.lost++
 		return
 	}
 	buffer.captures[buffer.count] = maintenanceObservationCapture{
-		identity: jobObservationIdentity{cache: entry.CacheUUID, registration: entry.RegistrationID, repo: entry.RepoID}, before: before, after: after,
+		identity: jobObservationIdentity{cache: entry.CacheUUID, registration: entry.RegistrationID, repo: entry.RepoID}, scope: scope, source: source, before: before, after: after,
 	}
 	buffer.count++
 }
@@ -134,7 +161,8 @@ func (b *maintenanceObservationBuffer) flush() {
 			Registration:     observability.KnownRef("registration", capture.identity.registration),
 			Repo:             observability.KnownRef("repo", capture.identity.repo),
 			Correlation:      b.collector.MaintenanceTransitionCorrelation(),
-			ExecutionDetails: observability.ExecutionDetails{Phase: "maintenance", MaintenanceScope: "registration", PreviousState: capture.before.state, PreviousFailureClass: capture.before.failure, Outcome: capture.after.state, FailureClass: capture.after.failure},
+			Source:           observability.KnownRef("source", capture.source),
+			ExecutionDetails: observability.ExecutionDetails{Phase: "maintenance", MaintenanceScope: capture.scope, PreviousState: capture.before.state, PreviousFailureClass: capture.before.failure, Outcome: capture.after.state, FailureClass: capture.after.failure},
 		})
 	}
 }

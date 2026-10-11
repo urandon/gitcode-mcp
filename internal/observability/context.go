@@ -18,7 +18,8 @@ func WithObservation(ctx context.Context, collector *Collector, refs Context) co
 		return ctx
 	}
 	refs.ExecutionDetails = ExecutionDetails{}
-	refs.Stage = Ref{} // stage identity belongs to one confirmed event, not a worker
+	refs.Stage = Ref{}  // stage identity belongs to one confirmed event, not a worker
+	refs.Source = Ref{} // source transition identity also belongs to one event
 	return context.WithValue(ctx, observationContextKey{}, observationBinding{collector, refs})
 }
 

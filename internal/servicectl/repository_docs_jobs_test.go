@@ -521,7 +521,9 @@ func TestCreateCoalescedJobDoesNotExposeUndurableQueuedWork(t *testing.T) {
 func runGitForRepositoryDocsJobTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, output)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// Command output can contain private fixture coordinates. Keep a failed
+		// setup distinguishable without publishing its raw stderr or arguments.
+		t.Fatal("repository-documentation Git fixture command failed")
 	}
 }
