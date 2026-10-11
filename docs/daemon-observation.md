@@ -77,15 +77,17 @@ all sources under the parent repository registration.
 timestamps spanning at most seven days. Omit both to read retained evidence only.
 The default result limit is 50; explicit limits must be 1 through 200.
 
-The opaque cursor binds the whole normalized filter, boot/generation, and loss
-epoch. Keep every selector identical on later pages. Sparse pages still advance
+The opaque cursor binds the whole normalized filter, durable ledger generation,
+and loss epoch. Keep every selector identical on later pages. Sparse pages still advance
 the bounded scan; an empty page with `has_more` is not the end of retained data.
 Do not combine a cursor with a changed source or time range.
 
 `invalid_cursor` reports an invalid encoding or changed filter. A
 `snapshot_required` response means the retained snapshot is no longer usable:
 restart without the cursor and show the discontinuity. Do not silently claim
-continuous coverage after boot, rotation, loss, or eviction.
+continuous coverage after an unclean restart, rotation, loss, or eviction. A
+clean same-ledger restart does not itself invalidate a cursor when its generation,
+loss epoch and retained position still match.
 
 ## Limits, contention, and cancellation
 
