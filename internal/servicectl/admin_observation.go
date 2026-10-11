@@ -493,6 +493,20 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 	return view
 }
 
+// Publish the same known parent authority carried by source events. Strict
+// browser joins must not invent missing parents or fall back to a sibling.
+func repositoryDocumentationSourceRefs(entry *MaintenanceEntry, sourceID string) *observability.EntityRefs {
+	if entry == nil {
+		return nil
+	}
+	return observability.ProjectEntityRefs(observability.Context{
+		Source:       observability.KnownRef("source", sourceID),
+		Cache:        observability.KnownRef("cache", entry.CacheUUID),
+		Repo:         observability.KnownRef("repo", entry.RepoID),
+		Registration: observability.KnownRef("registration", entry.RegistrationID),
+	})
+}
+
 func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLiteStore, repoID string, entry *MaintenanceEntry, vectorByteCeiling int64) adminhttp.RepositoryDocumentationObservation {
 	view := adminhttp.RepositoryDocumentationObservation{
 		State: "not_indexed", Retention: adminhttp.RepositoryDocumentationRetention{CommittedSetsPerIdentity: 8, OverlayMaxAgeHours: 24, TerminalMaxAgeHours: 24 * 7, VectorByteCeiling: vectorByteCeiling},
@@ -500,7 +514,7 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 	filter := cache.RepositoryDocRevisionSetFilter{RepoID: repoID}
 	if entry != nil {
 		for _, source := range entry.RepositoryDocsSources {
-			view.Sources = append(view.Sources, adminhttp.RepositoryDocumentationSource{ObservationRefs: observability.ProjectEntityRefs(observability.Context{Source: observability.KnownRef("source", source.SourceRegistrationID)}), SourceID: source.SourceRegistrationID, SourceGeneration: source.SourceRegistrationGeneration, State: source.State, GitStoreRef: source.GitStoreRef, WorktreeRef: source.WorktreeRef, CommitOID: source.CommitOID, PolicyHash: source.PolicyHash})
+			view.Sources = append(view.Sources, adminhttp.RepositoryDocumentationSource{ObservationRefs: repositoryDocumentationSourceRefs(entry, source.SourceRegistrationID), SourceID: source.SourceRegistrationID, SourceGeneration: source.SourceRegistrationGeneration, State: source.State, GitStoreRef: source.GitStoreRef, WorktreeRef: source.WorktreeRef, CommitOID: source.CommitOID, PolicyHash: source.PolicyHash})
 		}
 		sort.Slice(view.Sources, func(i, j int) bool { return view.Sources[i].SourceID < view.Sources[j].SourceID })
 	}
@@ -509,7 +523,7 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 		view.Registered = true
 		view.RegistrationID = entry.RegistrationID
 		view.SourceID = state.SourceRegistrationID
-		view.ObservationRefs = observability.ProjectEntityRefs(observability.Context{Source: observability.KnownRef("source", state.SourceRegistrationID), Registration: observability.KnownRef("registration", entry.RegistrationID)})
+		view.ObservationRefs = repositoryDocumentationSourceRefs(entry, state.SourceRegistrationID)
 		view.SourceGeneration = state.SourceRegistrationGeneration
 		view.ReconcileState = state.State
 		view.TargetCommitOID = state.CommitOID
