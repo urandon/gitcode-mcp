@@ -217,6 +217,12 @@ than becoming fabricated zeroes; confirmed execution counters may already exist
 before the first resource sample. A closed collector is not an admission-drop
 test: post-seal emissions are deliberately ignored.
 
+The real Admin revision poller shares nonblocking read locks. Qualification
+retries only typed `observation_busy` reads, at most five attempts separated by
+10 ms; unknown errors, cancellation and budget exhaustion still fail. This
+test-only handling never retries sync or relaxes DTO/privacy/provider-count
+assertions. Transport controls reject raw-text and mixed success/error envelopes.
+
 `web/tests/observation-integrated.spec.ts` compiles that test-only fixture and
 drives the embedded Admin bundle against its real authenticated API. It does
 not replace HTTP responses or EventSource with mocks. It checks the selected
@@ -259,4 +265,14 @@ do not distinguish an expired credential from insufficient access. Unknown
 classes remain `operation_failed`. The actual-owner transport suite verifies
 prior success, durable reload and confirmed recovery without erasing the cause;
 the real embedded browser verifies selected incident and terminal safe-copy.
+Actual timeout and truncated JSON controls also exhaust the default
+four-attempt durable retry budget with real backoff and bounded request
+deadlines. They retain `network_timeout`/`partial_response` as
+`provider_timeout`/`provider_invalid` health reasons and `timeout`/`invalid`
+terminal classes. Provider-call accounting includes all four failed attempts
+and verifies that observation adds no request. These terminal controls do not
+qualify a live retry-in-progress stream or an interrupted active retry.
+Timeout classification accepts both a context deadline and a typed timeout
+inside the provider's network error, including on the Go 1.22 baseline. This
+does not broaden status-based retry eligibility or interpret raw error text.
 No release or installed-service upgrade is implied by running the O5 suite.

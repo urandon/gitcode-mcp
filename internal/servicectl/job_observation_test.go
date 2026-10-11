@@ -34,6 +34,20 @@ func TestJobObservationAuthFailureIsClosed(t *testing.T) {
 	}
 }
 
+func TestJobObservationActualProviderFailureIsClosed(t *testing.T) {
+	for _, tc := range []struct{ class, want string }{
+		{"network_timeout", "timeout"},
+		{"partial_response", "invalid"},
+		{"NETWORK_TIMEOUT", "operation_failed"},
+		{"network_timeout synthetic-private", "operation_failed"},
+		{"partial_response synthetic-private", "operation_failed"},
+	} {
+		if jobObservationFailure(tc.class) != tc.want {
+			t.Fatal("actual provider failure violated the finite class mapping")
+		}
+	}
+}
+
 func jobObservationFixture(t *testing.T) *observability.Collector {
 	t.Helper()
 	c := observability.New(observability.Config{Directory: filepath.Join(t.TempDir(), "observation"), ManagedOutput: true})

@@ -26,6 +26,13 @@ func TestSyncCollectionFailurePolicyIsAllowListBased(t *testing.T) {
 	}{
 		{name: "deadline", err: context.DeadlineExceeded, class: "network_timeout", transient: true},
 		{name: "transport", err: gitcode.ErrNetworkUnavailable{Status: 0}, class: "network_unavailable", transient: true},
+		{name: "typed_transport_timeout", err: gitcode.ErrNetworkUnavailable{Cause: os.ErrDeadlineExceeded}, class: "network_timeout", transient: true},
+		{name: "wrapped_typed_transport_timeout", err: fmt.Errorf("outer: %w", gitcode.ErrNetworkUnavailable{Cause: fmt.Errorf("request: %w", os.ErrDeadlineExceeded)}), class: "network_timeout", transient: true},
+		{name: "typed_timeout_client_status", err: gitcode.ErrNetworkUnavailable{Status: 400, Cause: os.ErrDeadlineExceeded}, class: "network_timeout"},
+		{name: "typed_timeout_outside_server_range", err: gitcode.ErrNetworkUnavailable{Status: 600, Cause: os.ErrDeadlineExceeded}, class: "network_timeout"},
+		{name: "bare_typed_timeout_is_not_provider_evidence", err: os.ErrDeadlineExceeded, class: "sync_failed"},
+		{name: "raw_timeout_text_is_not_typed", err: gitcode.ErrNetworkUnavailable{Cause: errors.New("timeout synthetic-private")}, class: "network_unavailable", transient: true},
+		{name: "cancelled_typed_timeout", err: errors.Join(context.Canceled, gitcode.ErrNetworkUnavailable{Cause: os.ErrDeadlineExceeded}), class: "cancelled"},
 		{name: "server", err: gitcode.ErrNetworkUnavailable{Status: 503}, class: "network_unavailable", transient: true},
 		{name: "last_server_status", err: gitcode.ErrNetworkUnavailable{Status: 599}, class: "network_unavailable", transient: true},
 		{name: "outside_server_range", err: gitcode.ErrNetworkUnavailable{Status: 600}, class: "network_unavailable"},

@@ -47,8 +47,12 @@ func (s isolatedSource) WorkingDir() (string, error)     { return s.root, nil }
 func (s isolatedSource) ReadFile(string) ([]byte, error) { return nil, os.ErrNotExist }
 
 func eventually(t *testing.T, predicate func() bool) {
+	eventuallyWithin(t, 5*time.Second, predicate)
+}
+
+func eventuallyWithin(t *testing.T, budget time.Duration, predicate func() bool) {
 	t.Helper()
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(budget)
 	defer deadline.Stop()
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
@@ -96,9 +100,13 @@ func qualifyCollector(t *testing.T, mode, dir string) *observability.Collector {
 }
 
 func waitJob(t *testing.T, jobs *servicectl.JobManager, id, cacheID string) servicectl.Job {
+	return waitJobWithin(t, jobs, id, cacheID, 5*time.Second)
+}
+
+func waitJobWithin(t *testing.T, jobs *servicectl.JobManager, id, cacheID string, budget time.Duration) servicectl.Job {
 	t.Helper()
 	var out servicectl.Job
-	eventually(t, func() bool {
+	eventuallyWithin(t, budget, func() bool {
 		var ok bool
 		out, ok = jobs.Get(id)
 		if !ok || out.FinishedAt == nil {
@@ -115,14 +123,16 @@ func waitJob(t *testing.T, jobs *servicectl.JobManager, id, cacheID string) serv
 
 func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 	for _, tc := range []struct {
-		name, mode string
-		status     int
+		name, mode, class, reason, terminal string
+		status, attempts                    int
 	}{
-		{"retained", "retained", http.StatusForbidden},
-		{"unauthorized", "retained", http.StatusUnauthorized},
-		{"disabled", "disabled", http.StatusForbidden},
-		{"storage_unavailable", "storage_unavailable", http.StatusForbidden},
-		{"sealed", "sealed", http.StatusForbidden},
+		{"retained", "retained", "live_auth_failure", "provider_forbidden", "forbidden", http.StatusForbidden, 1},
+		{"unauthorized", "retained", "live_auth_failure", "provider_forbidden", "forbidden", http.StatusUnauthorized, 1},
+		{"disabled", "disabled", "live_auth_failure", "provider_forbidden", "forbidden", http.StatusForbidden, 1},
+		{"storage_unavailable", "storage_unavailable", "live_auth_failure", "provider_forbidden", "forbidden", http.StatusForbidden, 1},
+		{"sealed", "sealed", "live_auth_failure", "provider_forbidden", "forbidden", http.StatusForbidden, 1},
+		{"timeout", "retained", "network_timeout", "provider_timeout", "timeout", 0, 4},
+		{"partial", "retained", "partial_response", "provider_invalid", "invalid", http.StatusOK, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mode := tc.mode
@@ -140,6 +150,14 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				if forbidden.Load() {
+					if tc.name == "timeout" {
+						<-r.Context().Done()
+						return
+					}
+					if tc.name == "partial" {
+						_, _ = io.WriteString(w, `[{`)
+						return
+					}
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, `{"message":"synthetic-private-provider-body"}`)
 					return
@@ -167,6 +185,9 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 				t.Fatal("isolated config unavailable")
 			}
 			cfg.MaxRetries, cfg.RateLimitRPS, cfg.RateLimitBurst = 0, 1000, 1000
+			if tc.name == "timeout" {
+				cfg.DefaultTimeout = 250 * time.Millisecond
+			}
 			manager := servicectl.Manager{Source: src, RuntimeDir: root, EffectiveConfig: &cfg}
 			jobsPath := filepath.Join(root, "jobs.json")
 			jobs := servicectl.NewJobManager(jobsPath)
@@ -193,9 +214,49 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			}
 			forbidden.Store(true)
 			failed := start("qualification-failed")
-			failed = waitJob(t, jobs, failed.ID, identity.UUID)
-			if failed.Status != servicectl.JobStatusFailed || failed.ErrorClass != "live_auth_failure" || calls.Load() != 2 {
+			budget := 5 * time.Second
+			if tc.attempts > 1 {
+				// Real durable retries wait 1+2+4 seconds plus bounded jitter;
+				// only this cohort needs a longer terminal join deadline.
+				budget = 20 * time.Second
+			}
+			failed = waitJobWithin(t, jobs, failed.ID, identity.UUID, budget)
+			failedCalls := int64(1 + tc.attempts)
+			if failed.Status != servicectl.JobStatusFailed || failed.ErrorClass != tc.class || calls.Load() != failedCalls {
 				t.Fatalf("actual provider failure was not isolated: status=%s class=%s calls=%d", failed.Status, failed.ErrorClass, calls.Load())
+			}
+			if tc.attempts > 1 {
+				// HTTP call count alone could mistake adapter retries for the
+				// durable scheduler. Check the real persisted attempt/budget and
+				// each intermediate scheduled deadline as positive controls.
+				settled := false
+				for _, collection := range failed.SyncCollections {
+					if collection.Collection == "issues" && collection.Attempt == tc.attempts && collection.RetryBudget == tc.attempts && collection.Outcome == servicectl.SyncCollectionPermanentFailure && collection.ErrorClass == tc.class && collection.RetryAfter == nil {
+						settled = true
+					}
+				}
+				retries := map[int]time.Time{}
+				for _, progress := range failed.Progress {
+					if progress.Type != "retry_scheduled" || progress.Collection != "issues" {
+						continue
+					}
+					due, err := time.Parse(time.RFC3339Nano, progress.RetryAfter)
+					if err != nil || progress.Attempt < 1 || progress.Attempt >= tc.attempts || !due.After(*first.FinishedAt) {
+						t.Fatal("durable retry lost its bounded deadline or attempt identity")
+					}
+					if _, duplicate := retries[progress.Attempt]; duplicate {
+						t.Fatal("one durable retry was counted twice")
+					}
+					retries[progress.Attempt] = due
+				}
+				if !settled || len(retries) != tc.attempts-1 {
+					t.Fatal("actual durable retry budget or scheduled history missing")
+				}
+				for attempt := 2; attempt < tc.attempts; attempt++ {
+					if !retries[attempt].After(retries[attempt-1]) {
+						t.Fatal("durable retry deadlines did not advance")
+					}
+				}
 			}
 			closeCollector(t, collector)
 			var previousPage observability.Page
@@ -216,14 +277,14 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			}
 			found := false
 			for _, incident := range health.Incidents {
-				if incident.Collection == "issues" && incident.Reason == "provider_forbidden" && incident.LastSuccessAt != nil {
+				if incident.Collection == "issues" && incident.Reason == tc.reason && incident.LastSuccessAt != nil {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatal("failure diagnosis lost provider auth cause or prior confirmed collection success")
+				t.Fatal("failure diagnosis lost provider cause or prior confirmed collection success")
 			}
-			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			// New job owner reloads the durable snapshot, not event-derived state.
 			jobs = servicectl.NewJobManager(jobsPath)
 			if jobs.LoadAndMarkInterrupted() != nil {
@@ -234,7 +295,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 				t.Fatal("restart changed retained failure authority")
 			}
 			reader.Health = maintenance.ExecutionHealthContext
-			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			collector = qualifyCollector(t, mode, filepath.Join(root, "events"))
 			if mode == "retained" {
 				if collector.BootID() == previousBoot {
@@ -272,12 +333,12 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 					found = true
 				}
 			}
-			if !found || calls.Load() != 3 {
+			if !found || calls.Load() != failedCalls+1 {
 				t.Fatal("staged writer wait lost causal evidence or refetched")
 			}
 			release()
 			recovering = waitJob(t, jobs, recovering.ID, identity.UUID)
-			if recovering.Status != servicectl.JobStatusSucceeded || calls.Load() != 3 {
+			if recovering.Status != servicectl.JobStatusSucceeded || calls.Load() != failedCalls+1 {
 				t.Fatal("writer retry changed confirmed execution or amplified provider traffic")
 			}
 			closeCollector(t, collector)
@@ -290,17 +351,17 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			}
 			found = false
 			for _, incident := range health.Incidents {
-				if incident.Collection == "issues" && incident.State == "recovered" && incident.Reason == "provider_forbidden" && incident.LastSuccessAt != nil && incident.LastSuccessAt.After(*failed.FinishedAt) {
+				if incident.Collection == "issues" && incident.State == "recovered" && incident.Reason == tc.reason && incident.LastSuccessAt != nil && incident.LastSuccessAt.After(*failed.FinishedAt) {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatal("confirmed recovery erased the prior provider auth cause")
+				t.Fatal("confirmed recovery erased the prior provider cause")
 			}
 			if mode == "storage_unavailable" && collector.Coverage().State != "partial" {
 				t.Fatal("storage failure disappeared into execution success")
 			}
-			assertTransportParity(t, reader, src, &calls, mode == "retained", recovering, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParity(t, reader, src, &calls, mode == "retained", recovering, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			cached, err := store.GetSourceScoped(ctx, binding.RepoID, "ISSUE-1")
 			if err != nil || cached.Body != "synthetic-private-source-body" {
 				t.Fatal("telemetry mode changed durable cache truth")
@@ -309,7 +370,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 	}
 }
 
-func assertTransportParity(t *testing.T, reader *observability.Reader, src isolatedSource, calls *atomic.Int64, requireEvents bool, expectedJob servicectl.Job, private ...string) {
+func assertTransportParity(t *testing.T, reader *observability.Reader, src isolatedSource, calls *atomic.Int64, requireEvents bool, expectedJob servicectl.Job, failureClass string, private ...string) {
 	t.Helper()
 	// The collector is sealed and the actual worker joined, so the same Reader
 	// can be compared exactly without racing dynamic diagnostic snapshots.
@@ -375,7 +436,7 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 	if expectedRefs == nil || expectedRefs.Job == "" {
 		t.Fatal("actual admitted job has no observation identity")
 	}
-	summary, err := reader.Summary(ctx)
+	summary, err := retryObservationRead(ctx, func() (observability.Summary, error) { return reader.Summary(ctx) })
 	if err != nil {
 		t.Fatal("retained summary unavailable")
 	}
@@ -397,7 +458,9 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 		{[]string{"service", "observe", "--format", "json"}, "service_observability", `{}`, "/api/admin/v1/observability", summary},
 	}
 	if reader.Metrics != nil {
-		metrics, err := reader.MetricSnapshot(ctx, observability.MetricsRequest{HistoryMinutes: 3})
+		metrics, err := retryObservationRead(ctx, func() (observability.MetricsSnapshot, error) {
+			return reader.MetricSnapshot(ctx, observability.MetricsRequest{HistoryMinutes: 3})
+		})
 		if err != nil {
 			t.Fatal("retained metrics unavailable")
 		}
@@ -415,7 +478,9 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 		}{[]string{"service", "metrics", "--history-minutes", "3", "--format", "json"}, "service_metrics", `{"history_minutes":3}`, "/api/admin/v1/observability/metrics?history_minutes=3", metrics})
 	}
 	if reader.Collector != nil {
-		page, err := reader.Events(ctx, observability.EventsRequest{Limit: 50})
+		page, err := retryObservationRead(ctx, func() (observability.Page, error) {
+			return reader.Events(ctx, observability.EventsRequest{Limit: 50})
+		})
 		if err != nil {
 			t.Fatal("retained event page unavailable")
 		}
@@ -442,8 +507,8 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 					t.Fatal("actual job event lost causal identity")
 				}
 				admitted = admitted || event.Code == observability.JobAdmitted
-				if event.Code == observability.JobTerminal && outcome == servicectl.JobStatusFailed && event.FailureClass != "forbidden" {
-					t.Fatal("actual auth terminal lost its finite provider failure class")
+				if event.Code == observability.JobTerminal && outcome == servicectl.JobStatusFailed && event.FailureClass != failureClass {
+					t.Fatal("actual terminal lost its finite provider failure class")
 				}
 				terminal = terminal || event.Code == observability.JobTerminal && event.Outcome == outcome
 				provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch"
@@ -461,44 +526,58 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 	}
 	for _, tc := range tests {
 		var out, stderr bytes.Buffer
-		if cli.ExecuteWithSourceContext(ctx, tc.args, &out, &stderr, src) != 0 || stderr.Len() != 0 {
+		data, err := retryObservationRead(ctx, func() ([]byte, error) {
+			out.Reset()
+			stderr.Reset()
+			exit := cli.ExecuteWithSourceContext(ctx, tc.args, &out, &stderr, src)
+			return out.Bytes(), cliObservationError(exit, out.Bytes(), stderr.Bytes())
+		})
+		if err != nil {
 			t.Fatal("actual CLI observation failed")
 		}
-		assertJSON(t, out.Bytes(), tc.want, false, private)
+		assertJSON(t, data, tc.want, false, private)
 		for _, minimal := range []bool{false, true} {
-			out.Reset()
 			wire := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tc.tool + `","arguments":` + tc.params + `}}` + "\n"
-			server := mcp.NewWithToolAccess(strings.NewReader(wire), &out, &stderr, nil, nil, mcp.ToolAccessRead)
-			if minimal {
-				server = mcp.NewMinimal(strings.NewReader(wire), &out, &stderr, mcp.StartupDiagnostic{})
-			}
-			server.SetServiceClient(func() (*servicectl.RPCClient, error) { return ipc, nil })
-			server.SetToolBootstrap(func(context.Context, string, json.RawMessage) (*mcp.RPCHandler, error) {
-				t.Error("observation attempted bootstrap")
-				return nil, errors.New("observation must not bootstrap")
+			data, err := retryObservationRead(ctx, func() (json.RawMessage, error) {
+				out.Reset()
+				stderr.Reset()
+				server := mcp.NewWithToolAccess(strings.NewReader(wire), &out, &stderr, nil, nil, mcp.ToolAccessRead)
+				if minimal {
+					server = mcp.NewMinimal(strings.NewReader(wire), &out, &stderr, mcp.StartupDiagnostic{})
+				}
+				server.SetServiceClient(func() (*servicectl.RPCClient, error) { return ipc, nil })
+				server.SetToolBootstrap(func(context.Context, string, json.RawMessage) (*mcp.RPCHandler, error) {
+					t.Error("observation attempted bootstrap")
+					return nil, errors.New("observation must not bootstrap")
+				})
+				if server.Serve() != nil {
+					return nil, errors.New("actual MCP stdio observation failed")
+				}
+				return mcpObservationResult(out.Bytes(), stderr.Bytes())
 			})
-			if server.Serve() != nil {
-				t.Fatal("actual MCP stdio observation failed")
-			}
-			var response struct {
-				Error  json.RawMessage `json:"error"`
-				Result struct {
-					Structured json.RawMessage `json:"structuredContent"`
-				} `json:"result"`
-			}
-			if json.Unmarshal(out.Bytes(), &response) != nil || len(response.Error) > 0 || stderr.Len() != 0 {
+			if err != nil {
 				t.Fatal("MCP observation returned failure")
 			}
-			assertJSON(t, response.Result.Structured, tc.want, false, private)
+			assertJSON(t, data, tc.want, false, private)
 		}
-		resp, err := httpClient.Get(opened.URL + tc.route)
+		data, err = retryObservationRead(ctx, func() ([]byte, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, opened.URL+tc.route, nil)
+			if err != nil {
+				return nil, errors.New("Admin observation request unavailable")
+			}
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return nil, errors.New("actual authenticated Admin observation failed")
+			}
+			data, readErr := io.ReadAll(io.LimitReader(resp.Body, observability.MaxMetricsBytes+1))
+			_ = resp.Body.Close()
+			if readErr != nil {
+				return nil, errors.New("Admin observation body unavailable")
+			}
+			return data, adminObservationError(resp.StatusCode, resp.Header.Get("Cache-Control"), data)
+		})
 		if err != nil {
 			t.Fatal("actual authenticated Admin observation failed")
-		}
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, observability.MaxMetricsBytes+1))
-		_ = resp.Body.Close()
-		if readErr != nil || resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
-			t.Fatal("Admin observation failed its read contract")
 		}
 		assertJSON(t, data, tc.want, tc.tool == "service_observability", private)
 	}
