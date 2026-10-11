@@ -210,6 +210,14 @@ construction failure: discovery and observation do not create/migrate the cache
 or resolve credentials. Later explicit live writes use offline HTTP fixtures to
 prove provider confirmation, audit, and one POST on idempotent replay; absent
 credentials/offline requests fail closed rather than selecting fixture writes.
+Sync attempt-evidence fixtures cancel or expire contexts before dispatch,
+cancel rate-limit waits from their explicit callback, and inject failures at
+`RoundTrip` entry rather than racing a whole-command millisecond deadline.
+They distinguish zero-entry operation interruption from entered-transport
+failure, retain an empty successful list before later cancellation, freeze
+operation-local evidence independently of telemetry, and preserve typed error
+unwraps and partial aggregation. CLI text/JSON and MCP structured diagnostics
+must agree. Adapter tests preserve configured timeout and redirect policy.
 Safe-copy fixtures accept only returned catalog/incident evidence, reject raw
 free-form reasons, and preserve omitted unknown authority references. The
 dedicated UI and integrated rollout remain separately qualified cohorts; see

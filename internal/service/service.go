@@ -1578,7 +1578,9 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 	return OperationResult{Command: "index", Status: "ok", ProcessedCount: processed, Evidence: "snapshot_id=" + stored.ID, GeneratedAt: s.now().UTC()}, nil
 }
 
-func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult, error) {
+func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (_ SyncResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		return SyncResult{}, err
 	}
@@ -1691,7 +1693,9 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 // with structured per-resource failure details. Results always contains entries from
 // successful SyncToCache calls; Failures contains entries from failed calls.
 // Callers should check PartialSyncError before using the result.
-func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	result := &SyncResourcesResult{
 		Results:  make([]SyncResult, 0, len(reqs)),
 		Failures: make([]ResourceError, 0),
@@ -1734,7 +1738,9 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncR
 	return result, nil
 }
 
-func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		if req.Bounds != nil {
 			diag := SyncDiagnosticCancelled
@@ -2036,7 +2042,9 @@ func (s *Service) prepareIssueCommentSync(ctx context.Context, graph cache.Sourc
 	return item, issue.Comments == 0, item.Status != "complete", nil
 }
 
-func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2707,7 +2715,9 @@ func syncResultsDeferredCount(results []SyncResult) int {
 	return total
 }
 
-func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		if req.Bounds != nil {
 			diag := SyncDiagnosticCancelled
@@ -3031,7 +3041,9 @@ func (s *Service) recordSyncFrontierBestEffort(ctx context.Context, repoID, remo
 	_ = s.recordSyncFrontier(ctx, repoID, remoteType, result, high)
 }
 
-func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	remoteAlias := strings.TrimSpace(req.RemoteAlias)
 	targetedPRNumber := 0
 	if remoteAlias != "" {
@@ -3402,7 +3414,9 @@ func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, p
 	}
 }
 
-func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		if req.Bounds != nil {
 			diag := SyncDiagnosticCancelled
@@ -3693,7 +3707,9 @@ func (s *Service) skipWikiListItemByRevision(ctx context.Context, req SyncReques
 	return SyncResult{IdempotencyKey: req.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: true}, true, nil
 }
 
-func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
+	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -3746,12 +3762,14 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncRe
 	aggregated.FailureCount = len(aggregated.Failures)
 
 	if issuesErr != nil || wikiErr != nil {
-		return aggregated, &PartialSyncError{
+		partial := &PartialSyncError{
 			Errors:       aggregated.Failures,
 			SuccessCount: aggregated.SuccessCount,
 			FailureCount: aggregated.FailureCount,
 			Diagnostic:   firstDiagnostic,
 		}
+		partial.PreserveHTTPAttemptEvidence(issuesErr, wikiErr)
+		return aggregated, partial
 	}
 	if aggregated.FailureCount > 0 {
 		return aggregated, &PartialSyncError{

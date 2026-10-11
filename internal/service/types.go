@@ -668,11 +668,13 @@ func resourceStatusCode(err error) int {
 }
 
 type PartialSyncError struct {
-	Errors         []ResourceError `json:"errors"`
-	SuccessCount   int             `json:"success_count"`
-	FailureCount   int             `json:"failure_count"`
-	Diagnostic     SyncDiagnostic  `json:"diagnostic,omitempty"`
-	TotalRequested int             `json:"total_requested,omitempty"`
+	httpAttempted    bool
+	httpAttemptKnown bool
+	Errors           []ResourceError `json:"errors"`
+	SuccessCount     int             `json:"success_count"`
+	FailureCount     int             `json:"failure_count"`
+	Diagnostic       SyncDiagnostic  `json:"diagnostic,omitempty"`
+	TotalRequested   int             `json:"total_requested,omitempty"`
 }
 
 func (e PartialSyncError) Error() string {

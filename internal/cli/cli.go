@@ -2629,6 +2629,9 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			}
 			return attachSyncJob(ctx, client, job.ID, opts, stdout, stderr)
 		}
+		// Collections in this action share attempt evidence, including an empty
+		// successful list before cancellation in a later collection.
+		ctx, _ = diagnostics.WithHTTPAttemptWitness(ctx)
 		if syncSingleRecordRequested(opts) {
 			if opts.input != "" && (opts.prComments || opts.comments) && syncRemoteAliasSurface(opts.input) == "pull_request" {
 				started := time.Now().UTC()
@@ -3722,10 +3725,13 @@ func mergeSyncError(existing error, result *service.SyncResourcesResult, err err
 	if result == nil {
 		return existing
 	}
-	return &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	partial := &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	partial.PreserveHTTPAttemptEvidence(existing, err)
+	return partial
 }
 
 type syncResourcesCompactSummary struct {
+	HTTPAttempted      *bool                             `json:"http_attempted,omitempty"`
 	Status             string                            `json:"status"`
 	FailureClass       string                            `json:"failure_class,omitempty"`
 	SuccessCount       int                               `json:"success_count"`
@@ -3913,6 +3919,9 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 		summary.FailureGroups = syncFailureGroups(result.Failures)
 	}
 	if partial != nil {
+		if attempted, known := diagnostics.HTTPAttemptEvidence(partial); known {
+			summary.HTTPAttempted = &attempted
+		}
 		summary.Status = "partial"
 		summary.Diagnostic = partial.Diagnostic
 		summary.TotalRequested = partial.TotalRequested
@@ -3987,6 +3996,9 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 		summary.ZeroDeltaCount,
 		summary.Elapsed,
 	)
+	if summary.HTTPAttempted != nil {
+		fmt.Fprintf(w, " http_attempted=%t", *summary.HTTPAttempted)
+	}
 	if summary.PagesListed > 0 || summary.RecordsListed > 0 || summary.SkippedByWatermark > 0 {
 		fmt.Fprintf(w, " pages_listed=%d records_listed=%d skipped_by_watermark=%d", summary.PagesListed, summary.RecordsListed, summary.SkippedByWatermark)
 	}
@@ -4447,6 +4459,9 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 	if errors.As(err, &lockErr) {
 		publicErr = lockErr
 	}
+	if attempted, known := diagnostics.HTTPAttemptEvidence(err); known {
+		publicErr = diagnostics.RetainHTTPAttempt(publicErr, attempted)
+	}
 	message := config.RedactDiagnostic(publicErr.Error(), config.OSSource{})
 	var diagnostic diagnostics.Diagnostic
 	if plan.ProviderMode == "live-http" {
@@ -4595,8 +4610,11 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var partialSync *service.PartialSyncError
 	if errors.As(err, &partialSync) {
+		_, attemptKnown := diagnostics.HTTPAttemptEvidence(err)
 		for _, failure := range partialSync.Errors {
 			switch failure.FailureClass {
+			case "network_timeout":
+				ctx.HTTPAttempted, ctx.TransportFailure = true, true
 			case "schema_decode", "partial_response", "malformed_response", "unexpected_content_type":
 				ctx.HTTPAttempted = true
 				ctx.SchemaDecodeFailure = true
@@ -4606,7 +4624,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		switch partialSync.Diagnostic {
 		case service.SyncDiagnosticTimeout, service.SyncDiagnosticCancelled:
 			ctx.HTTPAttempted = true
-			ctx.TransportFailure = true
+			ctx.TransportFailure = ctx.TransportFailure || !attemptKnown
 			ctx.FailureSource = string(partialSync.Diagnostic)
 		case service.SyncDiagnosticEmptyWiki:
 			ctx.FailureSource = string(partialSync.Diagnostic)

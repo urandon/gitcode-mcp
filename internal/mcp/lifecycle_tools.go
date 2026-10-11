@@ -11,6 +11,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
@@ -32,10 +33,20 @@ type repoStatusResult struct {
 }
 
 type lifecycleDiagnostic struct {
-	Code        string `json:"code"`
-	ErrorClass  string `json:"error_class,omitempty"`
-	Message     string `json:"message"`
-	Remediation string `json:"remediation,omitempty"`
+	Code          string `json:"code"`
+	ErrorClass    string `json:"error_class,omitempty"`
+	Message       string `json:"message"`
+	Remediation   string `json:"remediation,omitempty"`
+	HTTPAttempted *bool  `json:"http_attempted,omitempty"`
+}
+
+func syncLifecycleDiagnostic(err error, code, message string) lifecycleDiagnostic {
+	d := lifecycleDiagnostic{Code: code, Message: message}
+	if classified, ok := mcpDiagnostic(err); ok {
+		d.ErrorClass = string(classified.Code)
+		d.HTTPAttempted = &classified.HTTPAttempted
+	}
+	return d
 }
 
 func (s *Server) callRepoStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -212,6 +223,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 		return
 	}
+	ctx, _ = diagnostics.WithHTTPAttemptWitness(ctx)
 	if strings.TrimSpace(a.RemoteAlias) != "" {
 		if commentSelection.PR && syncLiveRemoteAliasSurface(a.RemoteAlias) == "pull_request" {
 			part, err := s.svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
@@ -224,9 +236,9 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 					return
 				}
 				if partial, ok := extractLifecyclePartial(err); ok && partial.Diagnostic != "" {
-					result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: "pr_comments sync returned a diagnostic"})
+					result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(err, string(partial.Diagnostic), "pr_comments sync returned a diagnostic"))
 				} else {
-					result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "partial_sync", Message: err.Error()})
+					result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(err, "partial_sync", "pr_comments sync returned a partial failure"))
 				}
 			}
 			text := fmt.Sprintf("fresh_count=%d collections=pr_comments", result.FreshCount)
@@ -274,7 +286,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			}
 			syncErr = mergeLifecycleSyncError(syncErr, &result, err)
 			if partial, ok := extractLifecyclePartial(err); ok && partial.Diagnostic != "" {
-				result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: collection + " sync returned a diagnostic"})
+				result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(err, string(partial.Diagnostic), collection+" sync returned a diagnostic"))
 			}
 		}
 	}
@@ -304,9 +316,9 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 	if syncErr != nil {
 		if partial, ok := extractLifecyclePartial(syncErr); ok && partial.Diagnostic != "" {
-			result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: "sync_live completed with a diagnostic"})
+			result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(syncErr, string(partial.Diagnostic), "sync_live completed with a diagnostic"))
 		} else {
-			result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "partial_sync", Message: syncErr.Error()})
+			result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(syncErr, "partial_sync", "sync_live completed with a partial failure"))
 		}
 	}
 	text := fmt.Sprintf("fresh_count=%d collections=%s", result.FreshCount, strings.Join(result.Collections, ","))
@@ -370,7 +382,9 @@ func mergeLifecycleSyncError(existing error, result *syncLiveResult, err error) 
 	if result == nil {
 		return existing
 	}
-	return &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	partial := &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	partial.PreserveHTTPAttemptEvidence(existing, err)
+	return partial
 }
 
 func extractLifecyclePartial(err error) (*service.PartialSyncError, bool) {
