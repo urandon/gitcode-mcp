@@ -270,8 +270,9 @@ retain the following distinctions until exact-SHA qualification is complete:
 | Ownership and operations documentation | This playbook, architecture and contracts; final pass/skipped/blocked disposition belongs in issue comments, not an inferred release claim. |
 
 Launchd/systemd fixture tests establish the platform command/state contract;
-they do not certify an upgrade on an installed host. Native installation or
-legacy-output migration requires its own explicit scope and suitable host.
+they do not by themselves certify an upgrade on an installed host. The explicit
+native qualification below exercises actual platform owners in isolated fixture
+namespaces; it does not upgrade the operator's canonical installed daemon.
 Actual offline HTTP 401/403 controls preserve durable `live_auth_failure` as
 the finite health reason `provider_forbidden` and terminal event class
 `forbidden`. These names cover authentication and permission failures; they
@@ -374,6 +375,56 @@ request, joined job/collector/Admin/protocol owners, durable registry reload,
 path-free snapshots and bounded safe-copy. Browser API requests after session
 establishment are GET-only; no index, setup or execution action is invoked.
 This qualifies local navigation, not native installed-service upgrade.
+
+### Native owner upgrade qualification
+
+`TestNativeObservationUpgradeRecovery` uses a daemon compiled from the exact
+checkout before the test, creates a
+private offline cache/configuration, and bootstraps a unique launchd label or
+runtime-linked user-systemd unit. A test-only closed command adapter translates
+only the expected production target to that fixture target. Unknown commands
+fail closed. The child's environment is reset with `env -i`; HOME, config,
+cache, runtime, working directory and credential policy are fixture-owned.
+There is no provider setup, download, live sync, or canonical service mutation.
+
+The test compares the platform's actual PID with the daemon's IPC status and
+checks that its loaded stdout/stderr routing is null after replacement. It
+requires legacy readiness, a read-only plan, stale-plan refusal before platform
+effects, real quiescence and fixed-stream cleanup, an injected interruption
+before restart, then fresh-plan recovery to a new boot and managed readiness.
+The original cache UUID, completed local fixture job, and unrelated local file
+must survive. Both fixed legacy files must stay absent after restart. Teardown
+unloads the exact fixture and joins its process/socket before deleting private
+files; failure to prove quiescence retains those files and fails qualification.
+Platform output stays bounded in memory and is never printed.
+
+Default tests skip this native operation. On a suitable macOS GUI session,
+explicitly run:
+
+```sh
+fixture_dir=$(mktemp -d)
+go build -o "$fixture_dir/daemon" ./cmd/gitcode-mcp
+GITCODE_MCP_NATIVE_FIXTURE_BINARY="$fixture_dir/daemon" GITCODE_MCP_NATIVE_OBSERVATION_UPGRADE=1 go test ./internal/servicectl -run '^TestNativeObservationUpgradeRecovery$' -count=1 -timeout=180s
+```
+
+An explicit run fails rather than skips if the native bus is unavailable. The
+Linux CI gate runs on the ephemeral Ubuntu VM, establishes its user bus if
+necessary, and requires this exact fixture test to pass. macOS qualification is
+a separate exact-SHA receipt on a suitable host. This is native lifecycle proof,
+not a claim that every operator installation was migrated; production upgrades
+still require the normal explicit plan/confirmation flow.
+
+Linux additionally requires `GITCODE_MCP_NATIVE_SYSTEMD_ISOLATED=1`, an explicit
+attestation that the user manager belongs to a disposable test environment.
+Although fixture units are unique, `daemon-reload` is manager-wide; do not run
+this qualification against an ordinary operator user manager. CI sets this
+flag only inside its ephemeral VM. Native executable paths are pinned rather
+than resolved through inherited PATH. An attempted runtime link is owned even
+if its command times out, and teardown confirms the exact unit is not found
+before removing fixture files. Positive native absence is checked before the
+fixture claims its unique owner. Platform commands have finite context and
+pipe-drain bounds. Building beforehand keeps compiler descendants outside the
+native fixture lifecycle; the caller owns the separate build directory.
 
 Current documentation source authority is also fenced by the UUID read from
 the physical cache, not just its path and repository binding. Replacing a cache
