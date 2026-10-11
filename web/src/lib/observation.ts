@@ -163,27 +163,44 @@ export async function boundedObservationRead<T>(path: string, maxBytes: number, 
   if (parent.aborted) controller.abort();
   const timer = setTimeout(abort, 4000);
   try {
-    const response = await fetcher(path, { method: 'GET', signal: controller.signal, cache: 'no-store' });
-    if (response.status === 404 || response.status === 405 || response.status === 501) throw new ObservationError('unsupported');
-    if (response.status === 401 || response.status === 403) throw new ObservationError('session_required');
-    // Older daemons route unknown API paths to the HTML SPA with status 200.
-    // This is a compatibility boundary, not a failed observation payload.
-    if (response.ok && /^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '')) {
-      await response.body?.cancel().catch(() => {});
-      throw new ObservationError('unsupported');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (controller.signal.aborted) throw new ObservationError('timeout');
+      const response = await fetcher(path, { method: 'GET', signal: controller.signal, cache: 'no-store' });
+      if (response.status === 404 || response.status === 405 || response.status === 501) throw new ObservationError('unsupported');
+      if (response.status === 401 || response.status === 403) throw new ObservationError('session_required');
+      // Older daemons route unknown API paths to the HTML SPA with status 200.
+      // This is a compatibility boundary, not a failed observation payload.
+      if (response.ok && /^text\/html(?:;|$)/i.test(response.headers.get('content-type') || '')) {
+        await response.body?.cancel().catch(() => {});
+        throw new ObservationError('unsupported');
+      }
+      const reader = response.body?.getReader(); if (!reader) throw new ObservationError('unavailable');
+      let bytes = 0; const chunks: Uint8Array[] = [];
+      try { while (true) { const { value, done } = await reader.read(); if (done) break; bytes += value.length; if (bytes > maxBytes) throw new ObservationError('response_limit'); chunks.push(value); } }
+      finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      const data = new Uint8Array(bytes); let offset = 0; for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.length; }
+      const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data));
+      if (!response.ok) {
+        const code = records(records(parsed).error).code;
+        // Nonblocking local locks can reject concurrent summary/events reads.
+        // Retry only their typed 503, preserving query/cursor and this one shared
+        // deadline. No execution action or cursor-discontinuity retry is allowed.
+        if (response.status === 503 && code === 'observation_busy' && attempt < 4) {
+          await new Promise<void>((resolve, reject) => {
+            const signal = controller.signal;
+            const cancelled = () => { clearTimeout(wait); signal.removeEventListener('abort', cancelled); reject(new ObservationError('timeout')); };
+            const wait = setTimeout(() => { signal.removeEventListener('abort', cancelled); resolve(); }, 10);
+            signal.addEventListener('abort', cancelled, { once: true });
+            if (signal.aborted) cancelled();
+          });
+          continue;
+        }
+        const state: ReadState = code === 'snapshot_required' ? 'cursor_expired' : code === 'invalid_cursor' ? 'invalid_cursor' : code === 'invalid_query' ? 'invalid_query' : code === 'observation_busy' ? 'busy' : code === 'observation_timeout' || response.status === 504 ? 'timeout' : code === 'response_limit' ? 'response_limit' : 'unavailable';
+        throw new ObservationError(state);
+      }
+      return parsed as T;
     }
-    const reader = response.body?.getReader(); if (!reader) throw new ObservationError('unavailable');
-    let bytes = 0; const chunks: Uint8Array[] = [];
-    try { while (true) { const { value, done } = await reader.read(); if (done) break; bytes += value.length; if (bytes > maxBytes) throw new ObservationError('response_limit'); chunks.push(value); } }
-    finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-    const data = new Uint8Array(bytes); let offset = 0; for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.length; }
-    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data));
-    if (!response.ok) {
-      const code = records(records(parsed).error).code;
-      const state: ReadState = code === 'snapshot_required' ? 'cursor_expired' : code === 'invalid_cursor' ? 'invalid_cursor' : code === 'invalid_query' ? 'invalid_query' : code === 'observation_busy' ? 'busy' : code === 'observation_timeout' || response.status === 504 ? 'timeout' : code === 'response_limit' ? 'response_limit' : 'unavailable';
-      throw new ObservationError(state);
-    }
-    return parsed as T;
+    throw new ObservationError('busy'); // finite retry budget; never silent success
   } catch (error) { if (error instanceof ObservationError) throw error; throw new ObservationError(controller.signal.aborted ? 'timeout' : 'unavailable'); }
   finally { clearTimeout(timer); parent.removeEventListener('abort', abort); }
 }

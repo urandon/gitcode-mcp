@@ -83,4 +83,47 @@ describe('bounded observation browser contract', () => {
       await vi.advanceTimersByTimeAsync(4000); await check; expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
+  it('retries only typed 503 busy with exact GET selectors and a finite budget', async () => {
+    const busy = () => new Response(JSON.stringify({ error: { code: 'observation_busy' } }), { status: 503 });
+    const controller = new AbortController();
+    const fetcher = vi.fn().mockImplementationOnce(busy).mockResolvedValueOnce(new Response('{"ok":true}'));
+    const path = '/local?job_ref=opaque&cursor=e30';
+    await expect(boundedObservationRead(path, 1024, controller.signal, fetcher)).resolves.toEqual({ ok: true });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const [url, options] of fetcher.mock.calls) { expect(url).toBe(path); expect(options.method).toBe('GET'); expect(options.cache).toBe('no-store'); }
+    const exhausted = vi.fn().mockImplementation(busy);
+    await expect(boundedObservationRead(path, 1024, controller.signal, exhausted)).rejects.toThrow('busy');
+    expect(exhausted).toHaveBeenCalledTimes(5);
+    for (const [status, body] of [[503, 'observation_future_busy'], [500, 'observation_busy'], [503, 'snapshot_required'], [503, 'invalid_cursor'], [503, 'observation_timeout'], [401, 'observation_busy']] as const) {
+      const other = vi.fn().mockImplementation(() => new Response(JSON.stringify({ error: { code: body } }), { status }));
+      await expect(boundedObservationRead(path, 1024, controller.signal, other)).rejects.toThrow();
+      expect(other).toHaveBeenCalledTimes(1);
+    }
+    const raw = vi.fn().mockResolvedValue(new Response('observation_busy', { status: 503 }));
+    await expect(boundedObservationRead(path, 1024, controller.signal, raw)).rejects.toThrow('unavailable');
+    expect(raw).toHaveBeenCalledTimes(1);
+  });
+  it('joins busy backoff on cancellation and retains one overall four-second deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const fetcher = vi.fn().mockImplementation(() => new Response('{"error":{"code":"observation_busy"}}', { status: 503 }));
+      const pending = boundedObservationRead('/local', 1024, controller.signal, fetcher);
+      const checked = expect(pending).rejects.toThrow('timeout');
+      await vi.advanceTimersByTimeAsync(1);
+      controller.abort(); await checked;
+      expect(fetcher).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+      const late = vi.fn().mockImplementation(async (_: string, options: RequestInit) => {
+        if (late.mock.calls.length === 1) {
+          await new Promise(resolve => setTimeout(resolve, 3995));
+          return new Response('{"error":{"code":"observation_busy"}}', { status: 503 });
+        }
+        return new Promise((_, reject) => options.signal?.addEventListener('abort', () => reject(new Error('cancelled'))));
+      });
+      const read = boundedObservationRead('/local', 1024, new AbortController().signal, late);
+      const deadline = expect(read).rejects.toThrow('timeout');
+      await vi.advanceTimersByTimeAsync(4000); await deadline;
+      expect(late).toHaveBeenCalledTimes(1); expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
 });
