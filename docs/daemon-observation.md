@@ -71,7 +71,11 @@ events. These filters never resolve a private coordinate, filesystem path,
 repository id, or caller-provided label. Unknown local authority omits
 `observation_refs`; it does not invent a join key from a display name or path.
 An incident's source ref selects that actual repository-document source, not
-all sources under the parent repository registration.
+all sources under the parent repository registration. Listed documentation
+sources publish their known cache, repository and registration refs alongside
+the source ref, matching the same authority carried by retained source events.
+The browser requires every supplied parent ref to match; an incomplete or
+ambiguous bridge is unavailable, not permission to relax the join.
 
 `since` and `until` must be supplied together as ordered RFC3339Nano UTC (`Z`)
 timestamps spanning at most seven days. Omit both to read retained evidence only.
@@ -256,10 +260,10 @@ retain the following distinctions until exact-SHA qualification is complete:
 
 | Original #101 criterion | Evidence boundary / remaining qualification |
 |---|---|
-| Admin diagnosis without shell/file inspection | Real embedded browser reads/copy; complete causal timeout/retry and exact entity-navigation matrix remains O5 work. |
+| Admin diagnosis without shell/file inspection | Real embedded browser reads/copy, active retry/native SSE, and actual listed-entity/two-Git-source navigation; native upgrade remains separate. |
 | Bounded managed diagnostic data | Collector/output-writer tests and sanitized DTO contracts; native legacy-upgrade qualification is distinct from simulated platform responses. |
 | Units, reset and history semantics | Fixed metric catalog/history tests; actual-owner transport suite must not infer samples from counters or replay. |
-| Stable cross-surface correlation | Same actual-owner Reader across IPC/CLI/MCP/Admin; source joins and browser entity navigation have separate explicit gates. |
+| Stable cross-surface correlation | Same actual-owner Reader across IPC/CLI/MCP/Admin; actual ordinary Admin source bridges and embedded entity navigation are separately qualified. |
 | Retention, cursors and restart | Actual stopped-worker retry recovery, admission-drop reload/cursor parity and joined whole-footprint rotation diagnosis; native legacy-upgrade qualification remains separate. |
 | Observation is read-only | Isolated configuration, nil cache service in MCP, fixed Admin GETs and provider-call accounting; no install, sync or hidden repair. |
 | Go/frontend/browser contracts | Full repository, race, asset, type/unit and semantic gates plus independent exact-SHA review and head/main CI are required; individual focused runs are insufficient. |
@@ -351,6 +355,34 @@ A new confirmed sync recovers that same incident, updates last-success, and has
 mandatory correlated admission/provider/commit/terminal events in the new boot.
 These checks qualify isolated managed-file bounds and retained diagnosis, not a
 native installed-service upgrade or browser entity/source navigation.
+
+`internal/servicectl/observation_navigation_test.go` joins a real failed HTTP
+sync, temporary SQLite binding, normal maintenance enrollment and two local Git
+source registrations to the ordinary `Manager.adminObservation` snapshot. Real
+Git inspection failures retain separate source-specific transitions. The
+embedded browser cohort in `web/tests/observation-navigation.spec.ts` verifies
+cache/repository/job/registration observation links, exact job/registration
+back-links and both source-specific event back-links, with no API or EventSource
+mocks. Each source DTO carries the full known parent-ref bridge; the strict UI
+join is unchanged.
+
+After selecting a source, an explicit test-only durable registry removal makes
+that source unavailable through native snapshot SSE. The UI keeps the missing
+selection visible and refuses a plan or sibling fallback. This removal is not
+a new product endpoint or action. The fixture asserts one actual provider
+request, joined job/collector/Admin/protocol owners, durable registry reload,
+path-free snapshots and bounded safe-copy. Browser API requests after session
+establishment are GET-only; no index, setup or execution action is invoked.
+This qualifies local navigation, not native installed-service upgrade.
+
+Current documentation source authority is also fenced by the UUID read from
+the physical cache, not just its path and repository binding. Replacing a cache
+file at the same path cannot attach historical registrations or source events
+to the replacement container. Those registrations remain in maintenance
+history; restoring the original cache makes its own source bridge available
+again without enrollment or observation-triggered repair. A deterministic
+actual SQLite close/replace/restore fixture covers this boundary, including
+unknown identity and a historical same-path entry preceding the current one.
 
 Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
 when scheduling is durably observed. Later success replaces current failure and
