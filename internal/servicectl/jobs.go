@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -60,6 +62,8 @@ type Job struct {
 }
 
 type JobManager struct {
+	observation                         atomic.Pointer[observability.Collector]
+	metrics                             atomic.Pointer[jobMetrics]
 	mu                                  sync.Mutex
 	syncRetryMu                         sync.Mutex
 	jobs                                map[string]*Job
@@ -321,10 +325,12 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 	// directCacheWriters and waits at the real writer boundary.
 	if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 		m.mu.Unlock()
+		m.observeWriterContentionForIdentity("", ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 		m.mu.Unlock()
+		m.observeWriterContentionForIdentity("", ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
 	m.directCacheWriters[cacheUUID] = writerID
@@ -599,8 +605,19 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 // matching fences unrelated or stale work from being revived; callers remain
 // responsible for enforcing the durable retry window before invoking it.
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
+	var contention bool
+	var resumed bool
+	var identity jobObservationIdentity
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if contention {
+			m.observeWriterContentionForIdentity(RepositoryDocsIndexJobType, ErrCacheWriterBusy{}, identity)
+		}
+		if resumed {
+			m.observeJobRecovery(identity, jobRecoveryResumed, "", true)
+		}
+	}()
 	if m.closing {
 		return Job{}, false, errors.New("service is stopping")
 	}
@@ -610,6 +627,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 		return Job{}, false, nil
 	}
+	identity = observationIdentity(*job)
 	if m.syncRecoveryFences[strings.TrimSpace(job.CacheUUID)] {
 		return Job{}, false, CacheRecoveryFenceError{}
 	}
@@ -617,9 +635,11 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		return Job{}, false, CacheMutationFenceError{}
 	}
 	if activeID := m.directCacheWriters[strings.TrimSpace(job.CacheUUID)]; activeID != "" {
+		contention = true
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
 	if active, ok := m.activeReservedWriterLocked(job.CacheUUID); ok {
+		contention = true
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	previous := cloneJob(job)
@@ -642,6 +662,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		delete(m.inflightWorkers, job.ID)
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
+	resumed = true
 	return cloneJob(job), true, nil
 }
 
@@ -825,8 +846,18 @@ type JobRecoveryIntent struct {
 }
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
+	var admitted, contention bool
+	var admittedState jobMetricState
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if admitted {
+			m.observeJobAdmission(admittedState)
+		}
+		if contention {
+			m.observeWriterContentionForIdentity(jobType, ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID, repo: repoID, registration: registrationID})
+		}
+	}()
 	if m.closing {
 		return Job{}, false, errors.New("service is stopping")
 	}
@@ -858,9 +889,11 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	// per-cache FIFO instead of failing the whole sync before a stage exists.
 	if cacheWriter && jobType != SyncJobType {
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
+			contention = true
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
 		if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
+			contention = true
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}
@@ -892,6 +925,8 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		m.nextID--
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
+	admitted = true
+	admittedState = metricState(*job)
 	return cloneJob(job), true, nil
 }
 
@@ -1041,6 +1076,7 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	delete(m.cancelResolution, id)
 	close(resolution.done)
 	m.mu.Unlock()
+	m.observeJobTerminal(JobStatusCancelling, metricState(currentJob), saveErr == nil)
 	return resolution.job, resolution.found, resolution.err
 }
 
@@ -1080,10 +1116,13 @@ func (m *JobManager) updateRepositoryDocsTerminalJob(id string, fn func(*Job, ti
 			continue
 		}
 		now := m.now()
+		previousStatus := job.Status
 		fn(job, now)
 		trimJobProgress(job, m.retention.MaxProgressEvents)
-		_ = m.saveLocked()
+		err := m.saveLocked()
+		state := metricState(*job)
 		m.mu.Unlock()
+		m.observeJobTerminal(previousStatus, state, err == nil)
 		return
 	}
 }
@@ -1101,6 +1140,7 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 	m.mu.Lock()
 	now := m.now()
 	var cancels []context.CancelFunc
+	var terminal []jobMetricState
 	for id, job := range m.jobs {
 		if job == nil || job.Type != RepositoryDocsIndexJobType || job.RegistrationID != registrationID ||
 			job.SourceRegistrationID != sourceRegistrationID || job.SourceRegistrationGeneration != generation ||
@@ -1117,9 +1157,13 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 			cancels = append(cancels, cancel)
 		}
 		delete(m.cancel, id)
+		terminal = append(terminal, metricState(*job))
 	}
-	_ = m.saveLocked()
+	err := m.saveLocked()
 	m.mu.Unlock()
+	for _, state := range terminal {
+		m.observeJobTerminal(JobStatusRunning, state, err == nil)
+	}
 	for _, cancel := range cancels {
 		cancel()
 	}
@@ -1146,8 +1190,15 @@ func (m *JobManager) beginRepositoryDocsJob(id string) bool {
 }
 
 func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelFunc) Job {
+	var admitted bool
+	var admittedState jobMetricState
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if admitted {
+			m.observeJobAdmission(admittedState)
+		}
+	}()
 	if m.closing {
 		return Job{}
 	}
@@ -1158,7 +1209,8 @@ func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelF
 	m.jobs[id] = job
 	m.cancel[id] = cancel
 	m.inflightWorkers[id] = true
-	_ = m.saveLocked()
+	admitted = m.saveLocked() == nil
+	admittedState = metricState(*job)
 	return cloneJob(job)
 }
 
@@ -1214,34 +1266,74 @@ func (m *JobManager) finishJob(id, status, message string) {
 }
 
 func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
+	var previousStatus string
+	var state jobMetricState
+	var persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.observeJobTerminal(previousStatus, state, persisted)
+	}()
 	job := m.jobs[id]
 	if job == nil {
 		return
 	}
+	previousStatus = job.Status
 	fn(job, m.now())
 	trimJobProgress(job, m.retention.MaxProgressEvents)
-	_ = m.saveLocked()
+	persisted = m.saveLocked() == nil
+	state = metricState(*job)
 }
 
 // updateJobPersisted reports whether the mutated snapshot reached durable
 // storage. Callers that are about to discard independent recovery evidence
 // must only do so after this method succeeds.
 func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) error {
+	return m.updateJobPersistedObserved(id, jobRecoveryNone, fn)
+}
+
+// Only actual recovery owners select a recovery outcome. Generic progress and
+// terminal projections must not infer new evidence from an interrupted job.
+func (m *JobManager) updateRecoveredJobPersisted(id string, outcome jobRecoveryOutcome, fn func(*Job, time.Time)) error {
+	return m.updateJobPersistedObserved(id, outcome, fn)
+}
+
+func (m *JobManager) updateJobPersistedObserved(id string, recovery jobRecoveryOutcome, fn func(*Job, time.Time)) error {
+	var previousStatus string
+	var state jobMetricState
+	var persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if !persisted {
+			// This path rolls the mutation back. It has not retained a terminal
+			// transition that an unrelated snapshot can subsequently persist.
+			if jobActiveStatus(previousStatus) && jobTerminalStatus(state.status) {
+				if sink := m.metrics.Load(); sink != nil {
+					sink.metrics.LostObservation()
+				}
+			}
+			return
+		}
+		m.observeJobTerminal(previousStatus, state, persisted)
+		if previousStatus == JobStatusInterrupted && jobTerminalStatus(state.status) {
+			m.observeJobRecovery(state.identity, recovery, state.errorClass, true)
+		}
+	}()
 	job := m.jobs[id]
 	if job == nil {
 		return nil
 	}
 	previous := cloneJob(job)
+	previousStatus = job.Status
 	fn(job, m.now())
 	trimJobProgress(job, m.retention.MaxProgressEvents)
+	state = metricState(*job)
 	if err := m.saveLocked(); err != nil {
 		*job = previous
 		return err
 	}
+	persisted = true
 	return nil
 }
 

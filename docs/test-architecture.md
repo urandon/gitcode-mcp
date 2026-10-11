@@ -103,6 +103,102 @@ pressure, and prove that membership, chunks, and vectors have no orphans after
 GC. Maintenance tests register a private worktree, poll exact HEAD/policy
 identity, enqueue only on change, recover the registration after daemon
 restart, and assert that public JSON never contains the filesystem path.
+Inspection-health fixtures also force registry write failure, an unrelated
+later save/restart and independent provider-boundary admission rejection.
+They prove that only confirmed inspection recovers its source cohort and that
+generation/path replacement cannot publish a stale observation. Retry event
+fixtures exercise the actual scheduler with resume, cancelled waits, failed
+checkpoint writes and no metric sink; neither waiting nor replay alone counts
+as an actual retry admission.
+Durable journal reload followed by actual scheduler execution also covers the
+last representable ordinal, an accepted over-catalog ordinal and an unknown
+collection. The counter and execution result remain unchanged; qualified
+omissions conserve ledger loss, including observation-only execution, without
+inventing event rejection or poisoning metrics-only coverage. Context controls
+check malformed scopes, nonblocking loss under a held collector lock, sealed
+collectors and persisted loss after restart.
+Writer-event fixtures exercise actual pre-admission, direct and retained resume
+denials, a staged commit's typed lease failure and cancellation of its retry
+wait. They assert opaque worker correlation versus fixed pre-job scopes,
+optional metrics, no observation lookup of held job authority, wrapped typed
+errors versus raw strings/fences, closed work-kind replay and content privacy.
+Every actual boundary is retained or explicitly counted as lost; telemetry
+rejection cannot retry or revive execution.
+Stage-event fixtures exercise actual durable collection transitions and typed
+writer denial/cancellation, idempotent retention across journal restart,
+timestamp-only updates, failed create/state writes and scope mismatch. Strict
+catalog/replay tests enforce stage-only opaque identity and finite outcomes.
+One-turn tests hold the observation reader mutex, race Flush with late marks,
+and prove a rejected confirmation is counted once without retry. Confirmation
+never publishes while the coordinator owns its turn; private envelope bytes
+and raw error sentinels must be absent from all retained event JSON.
+Actual recovered SQLite commits also cover negative and over-catalog durable
+attempts: execution and the original ordinal remain unchanged, no fabricated
+stage event is emitted, and each omitted confirmed transition is counted as
+partial coverage. Buffered-omission tests reject mismatched scopes, defer loss
+until release, race duplicate/late flushes, and verify restart persistence.
+Recovery-event fixtures reload real job snapshots and exercise actual sync and
+repository-documentation resume, receipt/checkpoint terminal reconciliation and
+group rejection. Repeated/missing/stale/fenced decisions and generic projections
+emit no new boundary. Failed retained resume records loss while rolled-back
+resume/rejection emits nothing. Fixed-cap group capture is qualified using a
+supported retention policy larger than 128 jobs and paginated event reads,
+conserving retained plus lost boundaries without fabricating admission,
+terminal execution, provider or commit counters. Closed replay, reader-lock
+contention, count-only metric loss and durable loss-restart tests enforce the
+same nonblocking/public-safe contracts independently of optional metrics.
+Maintenance registration fixtures use real cache bindings, registry saves and
+Admin receipt-wrapped disable, covering new/replayed enrollment, unchanged
+reconcile/timestamp projections, schema block/recovery, retained failed save
+versus rollback, and rename-success/readback confirmation. A blocked actual
+save and nested outer-lock boundary prove no early event. Fixed 128-item capture
+conserves overflow using bounded cursor continuation instead of enlarged page
+limits; metrics-only mode reports unconfirmed persistence without inventing
+disabled event-queue loss. Strict replay rejects raw states/classes and other
+execution dimensions; primitive identity, config/key/error sentinels stay out
+of diagnostics, and registry restart emits no fresh transition.
+Repository-document source fixtures exercise real Git source registration,
+replay, distinct sources and generation-only versus degraded-state rebind reset.
+Actual inspection failure/recovery and indexing state owners preserve separate
+inspection health. Failed registration rolls back without diagnostic loss;
+retained failed source writes report count-only loss, and exact atomic readback
+confirms rename success without extra I/O. Source identity and finite classes
+survive strict replay; paths, source ids, content and raw safe-looking error
+classes remain excluded. Registration and source captures share one bounded
+operation-local buffer and publication boundary.
+Actual queued-job/rebind/fence and reconcile-snapshot/late-scheduling-failure
+fixtures pair obsolete owners with current-generation controls. They preserve
+existing execution results while requiring exactly one count-only loss for an
+obsolete changed pair, one confirmed source capture for a current pair, and no
+extra boundary on unchanged replay. The held generation-fence test waits for an
+accepted FIFO collector marker after registry save/unlock before asserting no
+early maintenance publication; releasing the real fence conserves the transition.
+Identity-resolution fixtures apply real legacy registry conflicts and physical
+SQLite clones through the existing Plan/Apply owners. They cover enabled/disabled
+Admin selection, stale plans, durable replay/restart, rollback/retry, panic before
+confirmation and exact atomic readback without additional writes. Earlier actual
+registration/source evidence survives a failed attempt. Multi-repository results
+are qualified after canonicalization, including residual identity conflicts and
+unresolved, timeout or config-snapshot-blocked results. An actual held job-redirect
+mutex, active cache mutation fence and persisted FIFO marker prove publication
+waits for authority unwind. Mixed-scope fixed capacity conserves qualified loss;
+unchanged pairs add none, unsupported changed pairs fabricate no success, and
+metrics-only mode invents no disabled event-stream loss. Later confirmed conflict
+episodes with the same predecessor receive distinct operation correlations.
+Closed replay enforces scope-specific predecessor/result enums and opaque
+historical predecessor identity, which never leaks into worker context or other
+event codes. Private candidate/plan/key/config/path coordinates stay excluded.
+Admin request fixtures use actual mux/authenticated control and SSE paths, with
+collector-only and combined metric modes. They conserve retained plus lost
+completions, preserve panic/write/short-write/flush/cancellation outcomes and
+streaming support, and wait for an active handler to unwind before recording
+completion. Strict replay rejects Admin dimensions on other events and every
+entity/private field on HTTP completions. Concurrent request correlation is
+collector-owned across controllers and never waits for a reader; restart
+preserves original events without replaying job/provider/commit throughput.
+Registered observability polling emits no self-events; unsupported/user-prefix
+paths remain observable ordinary requests. Synthetic control, cookie, body,
+header, request-id and URL sentinels must be absent from retained evidence.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

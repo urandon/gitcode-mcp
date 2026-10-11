@@ -841,6 +841,8 @@ func (c *Controller) getEvents(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "stream_unavailable", "Event streaming is unavailable.", "Use the snapshot endpoint.")
 		return
 	}
+	c.sseActive.Add(1)
+	defer c.sseActive.Add(-1)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")

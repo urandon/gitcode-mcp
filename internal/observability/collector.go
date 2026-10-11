@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,25 +35,34 @@ type Coverage struct {
 	ObservedBoots uint64 `json:"observed_boots"`
 }
 type Collector struct {
-	mu                 sync.Mutex
-	queue              chan pending
-	stop, done         chan struct{}
-	closing            bool
-	queued, queueBytes int
-	cleanRequested     bool
-	storageFailed      bool
-	generation, boot   string
-	cursorKey          string
-	sequence           uint64
-	events             []Event
-	historyBytes       int
-	coverage           Coverage
-	config             Config
+	mu                     sync.Mutex
+	queue                  chan pending
+	stop, done             chan struct{}
+	closing                bool
+	queued, queueBytes     int
+	cleanRequested         bool
+	storageFailed          bool
+	generation, boot       string
+	cursorKey              string
+	sequence               uint64
+	events                 []Event
+	historyBytes           int
+	coverage               Coverage
+	pendingLoss            atomic.Uint64
+	pendingBoundaryLoss    atomic.Uint64
+	admissionDrops         atomic.Uint64
+	adminRequests          atomic.Uint64
+	maintenanceTransitions atomic.Uint64
+	config                 Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
 }
 
 var entropyFallback atomic.Uint64
+
+// The upper bit seals admission loss at Close. Lower bits are pending losses,
+// not retained events. A racing post-seal Add is deliberately never published.
+const admissionClosed = uint64(1) << 63
 
 func randomID() string {
 	var b [16]byte
@@ -68,6 +78,23 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 func New(cfg Config) *Collector { return newCollector(cfg, openStorage) }
+
+// BootID is immutable process-local correlation, not a disk/read operation.
+func (c *Collector) BootID() string { return c.boot }
+
+// AdminRequestCorrelation is local request identity, never a browser-supplied
+// request id. Sharing the counter across controllers prevents same-boot reuse.
+// Allocation is atomic and performs no I/O or execution/observation lock wait.
+func (c *Collector) AdminRequestCorrelation() Ref {
+	return KnownRef("correlation", c.boot+"\x00admin\x00"+strconv.FormatUint(c.adminRequests.Add(1), 10))
+}
+
+// MaintenanceTransitionCorrelation identifies a fresh owner-confirmed boundary,
+// not a request id, generation or timestamp read from execution authority.
+func (c *Collector) MaintenanceTransitionCorrelation() Ref {
+	return KnownRef("correlation", c.boot+"\x00maintenance\x00"+strconv.FormatUint(c.maintenanceTransitions.Add(1), 10))
+}
+
 func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)) *Collector {
 	c := &Collector{queue: make(chan pending, MaxEvents), stop: make(chan struct{}), done: make(chan struct{}), boot: randomID(), config: cfg, open: open,
 		coverage: Coverage{State: "initializing", OutputState: "migration_required"}}
@@ -78,27 +105,38 @@ func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)
 	return c
 }
 
-// Emit never waits for disk or execution locks. Rejected codes and references
+// Emit never waits for disk, execution locks or observation readers. Rejected codes and references
 // never enter the queue. Diagnostic loss must not become a job failure.
 func (c *Collector) Emit(code Code, refs Context) bool {
+	if c.pendingLoss.Load()&admissionClosed != 0 {
+		return false
+	}
 	t, ok := catalog[code]
 	if !ok {
 		return false
 	}
 	e := Event{Schema: 1, EventID: c.boot, OccurredAt: time.Now().UTC(), BootID: c.boot, Sequence: 1, Stream: t.stream, Severity: t.severity, Component: t.component, Code: code, Message: t.message,
-		JobRef: refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value}
+		ExecutionDetails: refs.ExecutionDetails,
+		JobRef:           refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value, StageRef: refs.Stage.value, SourceRef: refs.Source.value, PreviousRegistrationRef: refs.PreviousRegistration.value}
 	b, err := marshalEvent(e)
 	if err != nil {
 		return false
 	}
-	c.mu.Lock()
+	if !c.mu.TryLock() {
+		if c.pendingLoss.Add(1)&admissionClosed == 0 {
+			c.admissionDrops.Add(1)
+		}
+		return false
+	}
 	defer c.mu.Unlock()
+	c.absorbLossLocked()
 	if c.closing {
 		return false
 	}
 	if c.queued >= MaxEvents || c.queueBytes+len(b) > MaxQueueBytes {
 		c.loseLocked("queue_overflow")
 		c.coverage.Dropped++
+		c.admissionDrops.Add(1)
 		return false
 	}
 	c.queued++
@@ -111,11 +149,63 @@ func (c *Collector) loseLocked(reason string) {
 	c.coverage.Reason = reason
 	c.coverage.LossEpoch++
 }
-func (c *Collector) Coverage() Coverage { c.mu.Lock(); defer c.mu.Unlock(); return c.coverage }
+
+// UnconfirmedExecution records an omitted execution observation whose durable
+// boundary was unavailable. No event was admitted or rejected, so this does
+// not increment event_drops. It never waits for a lock, storage or a retry.
+func (c *Collector) UnconfirmedExecution() {
+	c.UnconfirmedExecutions(1)
+}
+
+// UnconfirmedExecutions accounts for actual owner boundaries omitted by one
+// bounded capture or retained failed save. Count-only evidence never retains
+// identities, invokes callbacks or loops once per omitted job.
+func (c *Collector) UnconfirmedExecutions(count uint64) {
+	if count == 0 {
+		return
+	}
+	if c.pendingBoundaryLoss.Load()&admissionClosed == 0 {
+		c.pendingBoundaryLoss.Add(count)
+	}
+}
+
+// A fixed scalar accounts for contention without retaining rejected events.
+// Readers and the asynchronous writer fold it into the durable loss boundary;
+// no producer waits for that work or retries the rejected event.
+func (c *Collector) absorbLossLocked() {
+	if !c.closing {
+		c.foldLossLocked(c.pendingLoss.Swap(0))
+		c.foldBoundaryLossLocked(c.pendingBoundaryLoss.Swap(0))
+	}
+}
+func (c *Collector) foldBoundaryLossLocked(lost uint64) {
+	if lost != 0 {
+		c.coverage.Dropped += lost
+		c.coverage.LossEpoch += lost
+		c.coverage.State, c.coverage.Reason = "partial", "execution_boundary_unconfirmed"
+	}
+}
+func (c *Collector) foldLossLocked(lost uint64) {
+	if lost != 0 {
+		c.coverage.Dropped += lost
+		c.coverage.LossEpoch += lost
+		c.coverage.State, c.coverage.Reason = "partial", "observation_contention"
+	}
+}
+func (c *Collector) Coverage() Coverage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.absorbLossLocked()
+	return c.coverage
+}
 func (c *Collector) Close(ctx context.Context, workersUnwound bool) bool {
 	c.mu.Lock()
 	if !c.closing {
 		c.closing = true
+		// Swap is the loss linearization boundary. A preempted producer that
+		// increments afterward cannot change coverage or a sealed checkpoint.
+		c.foldLossLocked(c.pendingLoss.Swap(admissionClosed))
+		c.foldBoundaryLossLocked(c.pendingBoundaryLoss.Swap(admissionClosed))
 		c.cleanRequested = workersUnwound
 		close(c.stop)
 	}
@@ -189,6 +279,7 @@ func (c *Collector) run() {
 	} else {
 		c.coverage.ObservedBoots = 1
 	}
+	c.absorbLossLocked()
 	c.mu.Unlock()
 	if s != nil {
 		defer s.close()
@@ -280,6 +371,7 @@ func (c *Collector) run() {
 					c.mu.Unlock()
 				}
 				c.mu.Lock()
+				c.absorbLossLocked()
 				s.state.Dropped = c.coverage.Dropped
 				s.state.LossEpoch = c.coverage.LossEpoch
 				s.state.Partial = c.coverage.State != "ready"
@@ -308,8 +400,9 @@ func (c *Collector) write(s *storage, p pending) {
 	sequence := c.sequence
 	c.mu.Unlock()
 	e := Event{Schema: 1, EventID: randomID(), OccurredAt: p.at, BootID: c.boot, Sequence: sequence, Stream: t.stream, Severity: t.severity, Component: t.component, Code: p.code, Message: t.message,
-		Legacy: p.legacy, ObservedBytes: p.observedBytes,
-		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value}
+		ExecutionDetails: p.refs.ExecutionDetails,
+		Legacy:           p.legacy, ObservedBytes: p.observedBytes,
+		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value, StageRef: p.refs.Stage.value, SourceRef: p.refs.Source.value, PreviousRegistrationRef: p.refs.PreviousRegistration.value}
 	if p.legacy {
 		e.Stream = p.legacyStream
 	}
@@ -323,6 +416,7 @@ func (c *Collector) write(s *storage, p pending) {
 	var evicted uint64
 	if err == nil && s != nil {
 		c.mu.Lock()
+		c.absorbLossLocked()
 		s.state.Dropped = c.coverage.Dropped
 		s.state.LossEpoch = c.coverage.LossEpoch
 		s.state.Partial = c.coverage.State != "ready"

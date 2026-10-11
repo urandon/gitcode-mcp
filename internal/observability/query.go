@@ -50,8 +50,14 @@ func normalizeFilter(f Filter) (Filter, string, error) {
 	if f.Severity != "" && f.Severity != "info" && f.Severity != "warning" && f.Severity != "error" {
 		return f, "", errors.New("invalid filter")
 	}
-	if f.Component != "" && f.Component != "daemon" && f.Component != "recovery" && f.Component != "legacy" {
-		return f, "", errors.New("invalid filter")
+	if f.Component != "" {
+		known := false
+		for _, t := range catalog {
+			known = known || f.Component == t.component
+		}
+		if !known {
+			return f, "", errors.New("invalid filter")
+		}
 	}
 	if f.Code != "" {
 		if _, ok := catalog[f.Code]; !ok {
@@ -71,6 +77,7 @@ func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
 		return Page{}, QueryError{Code: "invalid_query", Reason: "unsupported_filter_or_limit"}
 	}
 	c.mu.Lock()
+	c.absorbLossLocked()
 	events := c.events
 	generation := c.generation
 	coverage := c.coverage

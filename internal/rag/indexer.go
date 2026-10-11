@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/progress"
 )
 
@@ -136,6 +137,16 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		emitProgress(req.ProgressChan, ev)
 	}
 	emit(progress.Event{Type: "queued", Phase: RAGIndexStatusQueued, Collection: "rag_index", Message: "rag index queued"})
+	// Only successful vector writes contribute to throughput, including writes
+	// retained before a later run/coverage failure. Flush after ReleaseWriter
+	// (registered below, so it runs first) on every exit. Reused vectors never
+	// enter this accumulator, and observation cannot hold the cache lease.
+	metrics := observability.MetricsFromContext(ctx)
+	confirmedEmbeddings := uint64(0)
+	if metrics != nil {
+		metrics.AttachOrigin("rag")
+		defer func() { metrics.Add("rag_embedded", nil, confirmedEmbeddings) }()
+	}
 	lease, err := i.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: req.RepoID, LockPath: i.lockPath})
 	if err != nil {
 		return i.failRun(ctx, run, events, "lease_failed", err)
@@ -263,6 +274,7 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 					emitRecords(fmt.Sprintf("failed chunk %s: %s", chunk.ID, err.Error()))
 					continue
 				}
+				confirmedEmbeddings++
 				run.EmbeddedChunks++
 			}
 			run.UpdatedAt = i.now().UTC()
@@ -299,6 +311,7 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 				run.FailedChunks++
 				return i.failRun(ctx, run, events, "write_embedding_failed", err)
 			}
+			confirmedEmbeddings++
 			run.EmbeddedChunks++
 		}
 		run.UpdatedAt = i.now().UTC()

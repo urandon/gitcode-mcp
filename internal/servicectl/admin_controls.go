@@ -153,6 +153,8 @@ func (m *AdminControlManager) DisableMaintenance(ctx context.Context, req adminh
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance controls are unavailable.", "Use the CLI maintenance surface.")
 	}
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.maintenance.jobs)
+	defer flushObservation()
 	return m.receipts.Apply(ctx, "maintenance_disable", req.RegistrationID, req.IdempotencyKey, struct {
 		RegistrationID string `json:"registration_id"`
 	}{req.RegistrationID}, func() (map[string]any, error) {
@@ -168,6 +170,8 @@ func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req admi
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance controls are unavailable.", "Use the CLI maintenance surface.")
 	}
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.maintenance.jobs)
+	defer flushObservation()
 	return m.receipts.Apply(ctx, "maintenance_reconcile", req.RegistrationID, req.IdempotencyKey, struct {
 		RegistrationID string `json:"registration_id"`
 	}{req.RegistrationID}, func() (map[string]any, error) {

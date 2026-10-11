@@ -1875,7 +1875,7 @@ func TestRepositoryDocsPendingAdmissionReplaysAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(prepared)
+	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(ctx, prepared)
 	if err != nil || !registered || entry.RepositoryDocs == nil {
 		t.Fatalf("registration=%+v registered=%v err=%v", entry, registered, err)
 	}
@@ -1965,7 +1965,7 @@ func TestRepositoryDocsPendingAdmissionRejectsChangedSnapshotBeforeRelaunch(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(prepared)
+	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(ctx, prepared)
 	if err != nil || !registered {
 		t.Fatalf("registration=%+v registered=%v err=%v", entry, registered, err)
 	}
@@ -2438,7 +2438,7 @@ func TestRepositoryDocsFailedAdmissionResumesAfterBackoffWithSameJobID(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, prepared, registered, err := maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+	entry, prepared, registered, err := maintenance.registerAndRecordRepositoryDocsAdmission(ctx, prepared)
 	if err != nil || !registered || entry.RepositoryDocs == nil {
 		t.Fatalf("registration=%+v registered=%t err=%v", entry, registered, err)
 	}
@@ -2494,10 +2494,10 @@ func TestRepositoryDocsFailedAdmissionResumesAfterBackoffWithSameJobID(t *testin
 func createRepositoryDocsRegistrationRepo(t *testing.T, path, body string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(path, "docs"), 0o755); err != nil {
-		t.Fatal(err)
+		t.Fatal("repository-documentation fixture directory unavailable")
 	}
 	if err := os.WriteFile(filepath.Join(path, "docs", "guide.md"), []byte("# Guide\n\n"+body+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+		t.Fatal("repository-documentation fixture content unavailable")
 	}
 	runGitForRepositoryDocsJobTest(t, path, "init")
 	runGitForRepositoryDocsJobTest(t, path, "add", "docs/guide.md")

@@ -123,6 +123,8 @@ func (m *JobActionManager) Load() error {
 	if m == nil || m.path == "" {
 		return nil
 	}
+	ctx, flushObservation := beginMaintenanceObservation(context.Background(), m.jobs)
+	defer flushObservation()
 	data, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -140,7 +142,7 @@ func (m *JobActionManager) Load() error {
 	for _, receipt := range file.Receipts {
 		m.receipts[receipt.KeyHash] = receipt
 	}
-	changed := m.recoverPendingLocked(context.Background())
+	changed := m.recoverPendingLocked(ctx)
 	m.pruneLocked()
 	if changed {
 		if err := m.saveLocked(); err != nil {
@@ -217,6 +219,8 @@ func (m *JobActionManager) Retry(ctx context.Context, req adminhttp.JobActionReq
 }
 
 func (m *JobActionManager) apply(ctx context.Context, action string, req adminhttp.JobActionRequest) (adminhttp.JobActionReceipt, error) {
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	req.JobID = strings.TrimSpace(req.JobID)

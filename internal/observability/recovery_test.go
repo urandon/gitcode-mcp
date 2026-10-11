@@ -32,7 +32,7 @@ func TestCorruptTailPreservesEventsAcrossLaterRestarts(t *testing.T) {
 	}
 	second := New(Config{Directory: path, ManagedOutput: true})
 	ready(t, second)
-	second.Emit(RecoveryFinished, Context{})
+	admitFixture(t, second, RecoveryFinished, Context{})
 	flush(t, second, true)
 	page, err := second.Query(Filter{Code: RecoveryFinished}, "", 200)
 	if err != nil || len(page.Events) != 1 {
@@ -116,7 +116,7 @@ func TestTransientAppendFailureRecoversWithoutErasingLoss(t *testing.T) {
 		return s, e, u, err
 	})
 	ready(t, c)
-	c.Emit(RecoveryFinished, Context{})
+	admitFixture(t, c, RecoveryFinished, Context{})
 	flush(t, c, true)
 	if attempts < 2 || c.Coverage().State != "partial" || c.Coverage().LossEpoch == 0 {
 		t.Fatal("transient storage recovery missing")

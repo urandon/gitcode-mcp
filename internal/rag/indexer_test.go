@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/observability"
 )
 
 func TestRAGIndexerEmbedsMissingAndSkipsFreshChunks(t *testing.T) {
@@ -175,7 +177,8 @@ func TestRAGIndexerFallsBackAndContinuesPastBadChunk(t *testing.T) {
 }
 
 func TestRAGIndexerMarksRunSupersededWhenContentAdvances(t *testing.T) {
-	ctx := context.Background()
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	ctx := observability.WithMetrics(context.Background(), metrics)
 	store := newVectorTestStore(t, ctx)
 	defer store.Close()
 	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{vectorTestChunk("chunk-a", "ISSUE-1", "hash-a")})
@@ -190,6 +193,9 @@ func TestRAGIndexerMarksRunSupersededWhenContentAdvances(t *testing.T) {
 	}
 	if result.Status != RAGIndexStatusSuperseded || result.StartGeneration != start.ContentGeneration || result.CoveredGeneration != start.ContentGeneration {
 		t.Fatalf("result=%+v start=%+v", result, start)
+	}
+	if embeddedCounter(t, metrics) != 1 {
+		t.Fatal("superseded coverage erased confirmed vector throughput")
 	}
 	finalState, err := store.GetRepoContentState(ctx, "fixture-a")
 	if err != nil {

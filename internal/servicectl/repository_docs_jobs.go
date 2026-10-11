@@ -189,6 +189,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 			return Job{}, err
 		}
 		if resumed {
+			jobCtx = m.withJobObservation(jobCtx, job)
 			go m.runRepositoryDocsIndexJob(jobCtx, manager, job.ID, req)
 			return job, nil
 		}
@@ -206,6 +207,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 		cancel()
 		return job, nil
 	}
+	jobCtx = m.withJobObservation(jobCtx, job)
 	go m.runRepositoryDocsIndexJob(jobCtx, manager, job.ID, req)
 	return job, nil
 }
@@ -222,6 +224,7 @@ func repositoryDocsRevisionSetIdentity(req StartRepositoryDocsIndexJobRequest, r
 }
 
 func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Manager, jobID string, req StartRepositoryDocsIndexJobRequest) {
+	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	if !m.beginRepositoryDocsJob(jobID) {
 		return
@@ -238,6 +241,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 		})
 	})
 	if err != nil {
+		m.observeWriterContentionInContext(ctx, RepositoryDocsIndexJobType, err)
 		status, class := repositoryDocsIndexErrorStatus(err)
 		m.updateRepositoryDocsTerminalJob(jobID, func(job *Job, now time.Time) {
 			if repositoryDocsJobSourceFenced(job) {

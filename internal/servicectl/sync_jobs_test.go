@@ -14,6 +14,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -168,7 +169,7 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restarted := NewJobManager(jobsPath)
+	restarted, metrics := testJobMetrics(t, jobsPath)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +179,8 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := waitForManagerJobTerminal(t, restarted, jobID)
+	requireJobCounter(t, metrics, "retry_admissions", map[string]string{"collection": "wiki"}, 1)
+	requireJobCounter(t, metrics, "retry_admissions", map[string]string{"collection": "issues"}, 0)
 	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthSucceeded {
 		t.Fatalf("recovered retry job=%+v", job)
 	}
@@ -260,7 +263,7 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 		t.Fatal(err)
 	}
 
-	restarted := NewJobManager(jobsPath)
+	restarted, metrics := testJobMetrics(t, jobsPath)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +273,12 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 		t.Fatal(err)
 	}
 	job, _ := restarted.Get(jobID)
+	for _, collection := range []string{"issues", "wiki"} {
+		value := jobMetric(t, metrics, "retry_admissions", map[string]string{"collection": collection}).Value
+		if value != nil && *value != 0 {
+			t.Fatal("receipt projection invented a collection retry")
+		}
+	}
 	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthPartial || job.Steps != 10 || job.Completed != 8 || job.ErrorClass != "forbidden" {
 		t.Fatalf("reconciled committed retry job=%+v", job)
 	}
@@ -610,6 +619,8 @@ func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) 
 
 	jobID := "job-000001"
 	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	jobs.SetMetrics(metrics)
 	now := time.Now().UTC()
 	jobs.jobs[jobID] = &Job{ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now}
 	jobs.nextID = 1
@@ -634,6 +645,10 @@ func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) 
 	}, workflow, 1)
 	if !errors.Is(err, fetchErr) || result == nil || result.SuccessCount != 2 {
 		t.Fatalf("durable partial result=%+v err=%v", result, err)
+	}
+	// A result/projection alone is not proof that the shared commit ran.
+	if jobMetric(t, metrics, "sync_committed", map[string]string{"collection": "issues"}).Value != nil {
+		t.Fatal("result summary fabricated confirmed throughput")
 	}
 	stages, err := NewSyncStageJournal(root, SyncStageLimits{}).List()
 	if err != nil || len(stages) != 1 || stages[0].Workflow == nil || stages[0].Workflow.Outcome == nil {
@@ -706,7 +721,7 @@ func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *t
 	}
 	identity, _ := store.CacheIdentity(ctx)
 	_ = store.Close()
-	jobs := NewJobManager("")
+	jobs, metrics := testJobMetrics(t, "")
 	releaseWriter, err := jobs.BeginDirectCacheWriter(identity.UUID, "admin-binding-test")
 	if err != nil {
 		t.Fatal(err)
@@ -741,6 +756,10 @@ func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *t
 	}
 	if observed.SyncStage == nil || observed.SyncStage.Phase != SyncStageWaitingCommit || observed.SyncStage.BlockingOp != "direct_cache_write" {
 		t.Fatalf("durable sync did not stage behind direct writer: %+v", observed)
+	}
+	value := jobMetric(t, metrics, "writer_contention", map[string]string{"kind": "sync"}).Value
+	if value == nil || *value < 1 {
+		t.Fatal("denied daemon writer reservation was not observed")
 	}
 	releaseWriter()
 	releasedWriter = true
@@ -893,7 +912,7 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	cfg := config.Default()
 	cfg.LockPath = lockPath
 	manager.EffectiveConfig = &cfg
-	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	jobs, metrics := testJobMetrics(t, filepath.Join(root, "jobs.json"))
 	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", MaxPages: 1, PerPage: 100})
 	if err != nil {
 		t.Fatalf("StartSync: %v", err)
@@ -909,6 +928,10 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	}
 	if waiting.SyncStage == nil || waiting.SyncStage.Phase != SyncStageWaitingCommit || waiting.Status != JobStatusRunning || waiting.SyncStage.BlockerClass != "cache_busy" || waiting.SyncStage.BlockingOp != "rag-index" {
 		t.Fatalf("waiting job = %+v", waiting)
+	}
+	value := jobMetric(t, metrics, "writer_contention", map[string]string{"kind": "sync"}).Value
+	if value == nil || *value < 1 {
+		t.Fatal("typed SQLite writer contention was not observed")
 	}
 	if err := store.ReleaseWriter(ctx, held); err != nil {
 		t.Fatal(err)
@@ -988,6 +1011,8 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := NewJobManager(jobsPath)
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	restarted.SetMetrics(metrics)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,6 +1052,11 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	if _, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-42"); err != nil {
 		t.Fatalf("recovered commit missing source: %v", err)
 	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, float64(batch.RecordCount()))
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal("repeat recovery failed")
+	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, float64(batch.RecordCount()))
 }
 
 func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testing.T) {
@@ -1085,6 +1115,12 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 		t.Fatal(err)
 	}
 	restarted := NewJobManager(jobsPath)
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	restarted.SetMetrics(metrics)
+	// The hook is available, but this boot must count no previous-boot commit.
+	collector := jobObservationFixture(t)
+	restarted.SetObservation(collector)
+	metrics.AttachOrigin("sync")
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -1098,11 +1134,16 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	}
 	job, ok := restarted.Get(stage.JobID)
 	if !ok || job.Status != JobStatusSucceeded || job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitted {
-		t.Fatalf("receipt recovery job=%+v ok=%t", job, ok)
+		t.Fatal("receipt recovery did not confirm the terminal projection")
 	}
 	if stages, err := journal.List(); err != nil || len(stages) != 0 {
-		t.Fatalf("receipt-confirmed terminal stage retained: %+v err=%v", stages, err)
+		t.Fatal("receipt-confirmed stage was not removed")
 	}
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal("repeated receipt recovery failed")
+	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, 0)
+	assertJobObservations(t, collector, job, map[observability.Code]int{observability.JobRecovered: 1})
 }
 
 func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {
@@ -1304,6 +1345,8 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
 	jobs := NewJobManager("")
+	collector := jobObservationFixture(t)
+	jobs.SetObservation(collector)
 	_, rejected, err := jobs.commitRecoveredSyncStage(ctx, manager, journal, stage)
 	if err == nil || rejected.State.Phase != SyncStageRejected {
 		t.Fatalf("recovery result stage=%+v err=%v", rejected, err)
@@ -1311,6 +1354,7 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	if _, statErr := os.Stat(missing); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("recovery created or mutated removed cache: %v", statErr)
 	}
+	assertJobObservations(t, collector, Job{ID: stage.JobID, CacheUUID: stage.CacheUUID, RegistrationID: stage.RegistrationID, RepoID: stage.RepoID}, map[observability.Code]int{observability.SyncStageChanged: 1})
 }
 
 func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testing.T) {

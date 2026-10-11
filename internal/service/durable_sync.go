@@ -184,6 +184,8 @@ func (s *Service) FetchIssueSyncBatch(ctx context.Context, req BulkSyncRequest) 
 }
 
 func (s *Service) CommitIssueSyncBatch(ctx context.Context, batch DurableIssueSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	observation := newConfirmedSyncObservation(ctx, "issues")
+	defer observation.finish()
 	if err := validateDurableIssueBatch(batch); err != nil {
 		return nil, err
 	}
@@ -258,6 +260,7 @@ func (s *Service) CommitIssueSyncBatch(ctx context.Context, batch DurableIssueSy
 		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
 	result.Results = durableResults(plans)
+	observation.confirm(len(graphs))
 	emitProgress(progress, ProgressEvent{Collection: "issues", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
 	// The transaction above is authoritative. Queue summary is optional UX
 	// enrichment and cannot turn a committed batch into a reported failure.
@@ -413,6 +416,8 @@ func (s *Service) FetchPullSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	observation := newConfirmedSyncObservation(ctx, "pulls")
+	defer observation.finish()
 	if err := validateDurablePullBatch(batch); err != nil {
 		return nil, err
 	}
@@ -464,6 +469,7 @@ func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSync
 		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
 	result.Results = durableResults(plans)
+	observation.confirm(len(graphs))
 	emitProgress(progress, ProgressEvent{Collection: "pulls", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
 	return result, nil
 }
@@ -557,6 +563,8 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	observation := newConfirmedSyncObservation(ctx, "wiki")
+	defer observation.finish()
 	if err := validateDurableWikiBatch(batch); err != nil {
 		return nil, err
 	}
@@ -601,6 +609,7 @@ func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSync
 		return bulkSyncFailureResult(err, "wiki:*", "wiki")
 	}
 	result.Results = durableResults(plans)
+	observation.confirm(len(graphs))
 	emitProgress(progress, ProgressEvent{Collection: "wiki", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
 	return result, nil
 }

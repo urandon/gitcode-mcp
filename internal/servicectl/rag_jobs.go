@@ -48,6 +48,7 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 		cancel()
 		return job, nil
 	}
+	ctx = m.withJobObservation(ctx, job)
 	go m.runRAGIndexJob(ctx, manager, job.ID, req)
 	return job, nil
 }
@@ -61,6 +62,7 @@ func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
+	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
@@ -86,6 +88,7 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 		}
 	}()
 	result, err := runRAGIndex(ctx, manager, req, progressCh)
+	m.observeWriterContentionInContext(ctx, RAGIndexJobType, err)
 	close(progressCh)
 	<-done
 	if err != nil {

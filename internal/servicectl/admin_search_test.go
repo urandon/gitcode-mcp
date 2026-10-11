@@ -375,7 +375,7 @@ func TestRepoOnlyIndexMaterializesAuthorityFenceBeforeAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err = maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+	_, _, _, err = maintenance.registerAndRecordRepositoryDocsAdmission(ctx, prepared)
 	var stale RepositoryDocsSourceGenerationConflictError
 	if !errors.As(err, &stale) {
 		t.Fatalf("stale auto-resolved admission error=%T %v", err, err)

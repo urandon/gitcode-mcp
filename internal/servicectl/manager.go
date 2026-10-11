@@ -89,6 +89,7 @@ type Status struct {
 
 type Manager struct {
 	observation        *observability.Collector
+	metrics            *observability.Metrics
 	observationUpgrade bool
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
@@ -488,6 +489,7 @@ func (m Manager) Run(ctx context.Context) error {
 	m.observation = observability.New(observability.Config{Directory: filepath.Join(paths.LogDir, "observation"), LegacyDirectory: paths.LogDir,
 		ManagedOutputProbe: func() bool { return observationOwner.managedObservationOutput(paths) }})
 	var jobsForShutdown *JobManager
+	var metricSampler *observability.MetricSampler
 	var maintenanceForShutdown *MaintenanceManager
 	var maintenanceDone, recoveryDone <-chan struct{}
 	var adminForShutdown *adminhttp.Controller
@@ -522,6 +524,9 @@ func (m Manager) Run(ctx context.Context) error {
 		if rpcHandlers.Load() > 0 {
 			clean = false
 		}
+		if metricSampler != nil && !metricSampler.Wait(shutdownCtx) {
+			clean = false
+		}
 		// A separate bounded flush budget still permits a durable incomplete
 		// marker when worker teardown consumed its own budget.
 		flushCtx, stop := context.WithTimeout(context.Background(), time.Second)
@@ -544,6 +549,10 @@ func (m Manager) Run(ctx context.Context) error {
 		retention = *m.JobRetention
 	}
 	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
+	m.metrics = observability.NewMetrics(m.observation.BootID(), now)
+	m.metrics.AttachCollector(m.observation)
+	jobs.SetMetrics(m.metrics)
+	jobs.SetObservation(m.observation)
 	jobsForShutdown = jobs
 	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)
 	maintenanceForShutdown = maintenance
@@ -578,7 +587,7 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	admin := adminhttp.New(adminhttp.Config{
 		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
-		Assets: assets, Readiness: m.adminReadiness,
+		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics, Observation: m.observation,
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
@@ -603,6 +612,12 @@ func (m Manager) Run(ctx context.Context) error {
 		ApplyRAGRepair:                     adminControls.ApplyRAGRepair,
 	})
 	adminForShutdown = admin
+	metricSampler = observability.StartMetricSampler(ctx, m.metrics, func(context.Context) map[string]observability.ProbeValue {
+		values := jobs.MetricProbes()
+		values["retry_scheduled"] = maintenance.ScheduledRetryProbe()
+		values["sse_connections"] = admin.SSEConnectionsProbe()
+		return values
+	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {
 			return err
@@ -645,6 +660,7 @@ func (m Manager) Run(ctx context.Context) error {
 // readiness. Any ordinary recovery error is projected onto the still-
 // interrupted sync jobs instead of terminating an otherwise usable daemon.
 func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, releaseFences func()) <-chan struct{} {
+	ctx = jobs.withJobMetrics(ctx)
 	done := make(chan struct{})
 	recoverStages := m.syncStageRecovery
 	if recoverStages == nil {

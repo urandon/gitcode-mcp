@@ -16,7 +16,10 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"gitcode-mcp/internal/observability"
 )
 
 const sessionCookie = "gitcode_mcp_admin_session"
@@ -76,6 +79,8 @@ type Config struct {
 	SmokeProvider                      ProviderSmokeProvider
 	PlanRAGRepair                      RAGRepairProvider
 	ApplyRAGRepair                     RAGRepairProvider
+	Metrics                            *observability.Metrics
+	Observation                        *observability.Collector
 }
 
 type Controller struct {
@@ -88,6 +93,7 @@ type Controller struct {
 	launch       map[[32]byte]time.Time
 	sessions     map[[32]byte]session
 	events       *eventLog
+	sseActive    atomic.Int64
 }
 
 type session struct {
@@ -104,6 +110,9 @@ func New(cfg Config) *Controller {
 	}
 	if cfg.EventPollInterval <= 0 {
 		cfg.EventPollInterval = time.Second
+	}
+	if cfg.Metrics != nil {
+		cfg.Metrics.AttachOrigin("admin")
 	}
 	return &Controller{cfg: cfg, shutdownDone: make(chan struct{}), launch: map[[32]byte]time.Time{}, sessions: map[[32]byte]session{}, events: newEventLog(cfg.EventCapacity)}
 }
@@ -231,14 +240,15 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
 	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)
 	mux.HandleFunc("/", c.serveAsset)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return c.observeRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)
 		if !c.validHost(r.Host) {
 			http.Error(w, "invalid host", http.StatusBadRequest)
 			return
 		}
+		observeAdminRoute(mux, r)
 		mux.ServeHTTP(w, r)
-	})
+	}))
 }
 
 func (c *Controller) pollObservation(ctx context.Context) {
