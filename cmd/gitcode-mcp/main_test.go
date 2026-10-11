@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -626,7 +628,6 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		{name: "SCN-CLI-ERROR-OUTPUT-MALFORMED-JSON", mode: testnet.GitCodeAPIFailureMalformedJSON, want: string(diagnostics.CodeSchemaDecode)},
 		{name: "SCN-CLI-ERROR-OUTPUT-SCHEMA-MISMATCH", mode: testnet.GitCodeAPIFailureSchemaMismatch, want: string(diagnostics.CodeSchemaDecode)},
 		{name: "SCN-CLI-ERROR-OUTPUT-PARTIAL-RESPONSE", mode: testnet.GitCodeAPIFailurePartial, want: string(diagnostics.CodeSchemaDecode)},
-		{name: "SCN-CLI-ERROR-OUTPUT-TIMEOUT", mode: testnet.GitCodeAPIFailureTimeout, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-CLI-ERROR-OUTPUT-500", mode: testnet.GitCodeAPIFailure500, want: string(diagnostics.CodeLiveTransportFailure)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -635,11 +636,6 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			cachePath := filepath.Join(t.TempDir(), "cache.db")
 			src := newTestSource(t)
 			src.env[config.EnvToken] = "test-token"
-			if tt.mode == testnet.GitCodeAPIFailureTimeout {
-				configPath := filepath.Join(t.TempDir(), "config.json")
-				src.env[config.EnvConfigPath] = configPath
-				src.files[configPath] = []byte(`{"default_timeout":"1ms","max_retries":0}`)
-			}
 			addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 			var stdout, stderr bytes.Buffer
@@ -653,6 +649,41 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			}
 			if tt.want == string(diagnostics.CodeAPIFailure) || tt.want == string(diagnostics.CodeSchemaDecode) {
 				assertNoDecommissionedFailureClass(t, out)
+			}
+		})
+	}
+
+	for _, cancelled := range []bool{false, true} {
+		name := "SCN-CLI-ERROR-OUTPUT-TIMEOUT"
+		if cancelled {
+			name = "SCN-CLI-ERROR-OUTPUT-TRANSPORT-CANCELLED"
+		}
+		t.Run(name, func(t *testing.T) {
+			var attempts atomic.Int32
+			// Inject only at Client.Do's transport boundary. Startup must reach
+			// HTTP with a live context; no whole-command deadline or sleep races.
+			withStartupTransport(t, startupRoundTripper(func(req *http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				if req.Context().Err() != nil || req.Method != http.MethodGet || req.URL.Host != "example.invalid" || req.URL.Path != "/api/v5/repos/owner-a/repo-a/issues" {
+					t.Error("transport entered with cancelled context or unexpected request")
+				}
+				if cancelled {
+					return nil, context.Canceled
+				}
+				return nil, context.DeadlineExceeded
+			}))
+			src := newTestSource(t)
+			src.env[config.EnvToken] = "test-token"
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			src.env[config.EnvConfigPath] = configPath
+			src.files[configPath] = []byte(`{"max_retries":0}`)
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			addRepoForStartupTest(t, cachePath, "https://example.invalid")
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
+			out := stdout.String() + stderr.String()
+			if code == 0 || attempts.Load() != 1 || !strings.Contains(out, "failure_class: live_transport_failure") || !strings.Contains(out, "http_attempted: true") {
+				t.Fatalf("exit=%d attempts=%d: transport failure with one HTTP attempt required", code, attempts.Load())
 			}
 		})
 	}
@@ -941,6 +972,62 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("stderr=%q counts=%#v", stderr.String(), counts)
 		}
 	})
+}
+
+type startupRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f startupRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// Entrypoint tests are serial (they also replace cliRoute). Never use this
+// process-wide test seam in a parallel test; restore before the next subtest.
+func withStartupTransport(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	old := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = old })
+}
+
+func TestCLIStartupPreHTTPCancellation(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "cancelled"
+		if deadline {
+			name = "deadline_expired"
+		}
+		t.Run(name, func(t *testing.T) {
+			src := newTestSource(t)
+			src.env[config.EnvToken] = "test-token"
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			src.env[config.EnvConfigPath] = configPath
+			src.files[configPath] = []byte(`{"max_retries":0}`)
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			addRepoForStartupTest(t, cachePath, "https://example.invalid")
+			var attempts atomic.Int32
+			withStartupTransport(t, startupRoundTripper(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return nil, errors.New("unexpected HTTP after startup cancellation")
+			}))
+			old := cliRoute
+			t.Cleanup(func() { cliRoute = old })
+			cliRoute = func(ctx context.Context, args []string, stdout, stderr io.Writer, deps StartupDeps) int {
+				// Fail the CLI startup read, after the entrypoint's own config
+				// load. This is a startup failure, not a provider cancellation.
+				if deadline {
+					src.readErr[configPath] = context.DeadlineExceeded
+				} else {
+					src.readErr[configPath] = context.Canceled
+				}
+				return old(ctx, args, stdout, stderr, deps)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
+			out := stdout.String() + stderr.String()
+			if code == 0 || attempts.Load() != 0 || !strings.Contains(out, "failure_class: configuration_error") || !strings.Contains(out, "http_attempted: false") {
+				t.Fatalf("exit=%d attempts=%d: pre-HTTP configuration failure required", code, attempts.Load())
+			}
+		})
+	}
 }
 
 func addRepoForStartupTest(t *testing.T, cachePath, baseURL string) {
