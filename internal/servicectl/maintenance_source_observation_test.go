@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestMaintenanceSourceObservationActualRegisterReplayAndRebind(t *testing.T)
 	}
 	// Confirmed failure uses the actual owner, not a reader's projection.
 	owner, flush := beginMaintenanceObservation(ctx, m.jobs)
-	m.updateRepositoryDocsFailure(owner, entry.RegistrationID, id, "git_store_unavailable", "synthetic-private-error")
+	m.updateRepositoryDocsFailure(owner, entry.RegistrationID, id, cloneMaintenanceEntryPrivate(m.entries[entry.RegistrationID]), "git_store_unavailable", "synthetic-private-error")
 	flush()
 	rebound, err := m.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{RegistrationID: entry.RegistrationID, SourceRegistrationID: id, ExpectedGeneration: 1, RepositoryPath: repoB})
 	if err != nil || rebound.RepositoryDocs == nil || rebound.RepositoryDocs.SourceRegistrationID != id || rebound.RepositoryDocs.SourceRegistrationGeneration != 2 || rebound.RepositoryDocs.State != "registered" {
@@ -159,7 +160,7 @@ func TestMaintenanceSourceObservationPersistenceAndSharedBuffer(t *testing.T) {
 					t.Fatal("source admission rollback changed")
 				}
 			default:
-				m.updateRepositoryDocsFailure(ctx, reg, id, "synthetic_private_safe_class", "synthetic-private-body")
+				m.updateRepositoryDocsFailure(ctx, reg, id, cloneMaintenanceEntryPrivate(m.entries[reg]), "synthetic_private_safe_class", "synthetic-private-body")
 				if m.sources[reg][id].State.State != "degraded" {
 					t.Fatal("retained source failure behavior changed")
 				}
@@ -182,7 +183,7 @@ func TestMaintenanceSourceObservationPersistenceAndSharedBuffer(t *testing.T) {
 			// transition; scope shares the existing registration capture boundary.
 			m.writeFile = nil
 			if mode == "retained_failure" || mode == "rename_readback" {
-				m.updateRepositoryDocsFailure(ctx, reg, id, "synthetic_private_safe_class", "changed-private-body")
+				m.updateRepositoryDocsFailure(ctx, reg, id, cloneMaintenanceEntryPrivate(m.entries[reg]), "synthetic_private_safe_class", "changed-private-body")
 			}
 			flush()
 			events := maintenanceObservationPage(t, c, expected+int(lost))
@@ -327,10 +328,137 @@ func TestMaintenanceSourceObservationStaleSnapshotAndSharedOverflow(t *testing.T
 	maintenanceObservationPage(t, c, maxMaintenanceObservations+6)
 }
 
+func TestMaintenanceSourceObservationActualObsoleteJobAndCurrentControl(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		name := "current"
+		if stale {
+			name = "obsolete"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, _, repo, reg, id := inspectionBoundaryFixture(t)
+			m.jobs.snapshotPath = filepath.Join(filepath.Dir(m.path), "jobs.json")
+			snapshot := cloneMaintenanceEntryPrivate(m.entries[reg])
+			active, created, err := m.jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, snapshot.RepoID, "", 0,
+				"fixture-old-source", snapshot.CacheUUID, reg, "fixture-namespace",
+				JobRecoveryIntent{SourceRegistrationID: id, SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "fixture-old-set"}, func() {})
+			if err != nil || !created || active.Status != JobStatusQueued {
+				t.Fatal("actual queued source intent unavailable")
+			}
+			replacement := createRepositoryDocsRegistrationRepo(t, repo+"-replacement", "fixture-replacement")
+			if _, err := m.RebindRepositoryDocsSource(context.Background(), RepositoryDocsSourceRebindRequest{RegistrationID: reg, SourceRegistrationID: id, ExpectedGeneration: 1, RepositoryPath: replacement}); err != nil {
+				t.Fatal("actual source rebind unavailable")
+			}
+			fenced, ok := m.jobs.Get(active.ID)
+			if !ok || fenced.Status != JobStatusSuperseded || m.sources[reg][id].State.SourceRegistrationGeneration != 2 || m.sources[reg][id].State.State != "registered" {
+				t.Fatal("actual old-generation fence unavailable")
+			}
+			// Acknowledge the cancelled starter's existing writer reservation;
+			// retain the actual pre-fence queued copy for the obsolete callback.
+			m.jobs.markWorkerFinished(active.ID)
+			if !stale {
+				snapshot = cloneMaintenanceEntryPrivate(m.entries[reg])
+				active, created, err = m.jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, snapshot.RepoID, "", 0,
+					"fixture-current-source", snapshot.CacheUUID, reg, "fixture-namespace",
+					JobRecoveryIntent{SourceRegistrationID: id, SourceRegistrationGeneration: 2, ExpectedRevisionSetID: "fixture-current-set"}, func() {})
+				if err != nil || !created || active.Status != JobStatusQueued {
+					t.Fatal("actual current-generation intent unavailable")
+				}
+			}
+			c := maintenanceEventCollector(t)
+			m.jobs.SetObservation(c)
+			ctx, flush := beginMaintenanceObservation(context.Background(), m.jobs)
+			defer flush()
+			updated := m.finishReconcileEntry(ctx, reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, active, time.Now().UTC())
+			// Execution semantics predate instrumentation and remain unchanged.
+			if updated.State != "indexing" || m.sources[reg][id].State.State != "indexing" || m.sources[reg][id].State.SourceRegistrationGeneration != 2 {
+				t.Fatal("observation changed retained execution behavior")
+			}
+			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
+			// Unchanged replay must not retroactively certify or recount the pair.
+			m.finishReconcileEntry(ctx, reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, active, time.Now().UTC())
+			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
+		})
+	}
+}
+
+func TestMaintenanceSourceObservationActualLateFailureAndCurrentControl(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		name := "current"
+		if stale {
+			name = "obsolete"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, _, repo, reg, id := inspectionBoundaryFixture(t)
+			c := maintenanceEventCollector(t)
+			m.jobs.SetObservation(c)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var first atomic.Bool
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			// The existing clock boundary follows reconcile's snapshot/unlock
+			// and precedes actual local-only source scheduling.
+			m.now = func() time.Time {
+				if first.CompareAndSwap(false, true) {
+					close(entered)
+					<-release
+				}
+				return time.Now().UTC()
+			}
+			ctx, flush := beginMaintenanceObservation(context.Background(), m.jobs)
+			defer flush()
+			done := make(chan MaintenanceEntry, 1)
+			go func() { entry, _ := m.reconcileEntry(ctx, reg); done <- entry }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual reconcile snapshot barrier unavailable")
+			}
+			if stale {
+				replacement := createRepositoryDocsRegistrationRepo(t, repo+"-replacement", "fixture-replacement")
+				if _, err := m.RebindRepositoryDocsSource(context.Background(), RepositoryDocsSourceRebindRequest{RegistrationID: reg, SourceRegistrationID: id, ExpectedGeneration: 1, RepositoryPath: replacement}); err != nil {
+					t.Fatal("actual source rebind unavailable")
+				}
+			}
+			unblock()
+			select {
+			case updated := <-done:
+				if updated.RepositoryDocs == nil || updated.RepositoryDocs.State != "degraded" {
+					t.Fatal("observation changed existing failure return")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("actual source scheduling failure did not unwind")
+			}
+			if m.sources[reg][id].State.State != "degraded" || m.sources[reg][id].State.LastErrorClass != "repository_docs_provider_boundary_blocked" {
+				t.Fatal("actual local-only scheduling boundary unavailable")
+			}
+			assertMaintenanceSourceAuthorityCaptures(t, ctx, stale)
+		})
+	}
+}
+
+func assertMaintenanceSourceAuthorityCaptures(t *testing.T, ctx context.Context, stale bool) {
+	t.Helper()
+	buffer := ctx.Value(maintenanceObservationKey{}).(*maintenanceObservationBuffer)
+	sourceCaptures := 0
+	for i := 0; i < buffer.count; i++ {
+		if buffer.captures[i].scope == "repository_docs" {
+			sourceCaptures++
+		}
+	}
+	expected, lost := 1, uint64(0)
+	if stale {
+		expected, lost = 0, 1
+	}
+	if sourceCaptures != expected || buffer.lost != lost {
+		t.Fatal("current confirmation and obsolete count-only loss not conserved")
+	}
+}
+
 func TestMaintenanceSourceObservationFlushAfterRebindFence(t *testing.T) {
 	m, _, repo, reg, id := inspectionBoundaryFixture(t)
 	owner, flush := beginMaintenanceObservation(context.Background(), m.jobs)
-	m.updateRepositoryDocsFailure(owner, reg, id, "git_store_unavailable", "fixture-error")
+	m.updateRepositoryDocsFailure(owner, reg, id, cloneMaintenanceEntryPrivate(m.entries[reg]), "git_store_unavailable", "fixture-error")
 	flush()
 	replacement := createRepositoryDocsRegistrationRepo(t, repo+"-replacement", "synthetic-private-replacement")
 	c := maintenanceEventCollector(t)
@@ -382,6 +510,29 @@ func TestMaintenanceSourceObservationFlushAfterRebindFence(t *testing.T) {
 	}
 	state := m.sources[reg][id].State.State
 	m.mu.Unlock()
+	// Establish that the FIFO collector has consumed everything admitted before
+	// this marker. A single empty query alone could merely race its async writer.
+	marker := observability.KnownRef("correlation", "fixture-held-generation-fence")
+	if !c.Emit(observability.RecoveryFinished, observability.Context{Correlation: marker}) {
+		finish()
+		t.Fatal("collector fence marker not admitted")
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		markers, err := c.Query(observability.Filter{Code: observability.RecoveryFinished}, "", 10)
+		if err != nil {
+			finish()
+			t.Fatal("collector fence marker query unavailable")
+		}
+		if len(markers.Events) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			finish()
+			t.Fatal("collector fence marker not persisted")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	page, err := c.Query(observability.Filter{Code: observability.MaintenanceStateChanged}, "", 10)
 	finish()
 	if state != "registered" || err != nil || len(page.Events) != 0 || page.Coverage.Dropped != 0 {

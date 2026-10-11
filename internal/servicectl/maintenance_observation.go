@@ -108,14 +108,16 @@ func captureMaintenanceObservation(ctx context.Context, before maintenanceObserv
 	captureMaintenanceTransition(ctx, before, maintenanceObservedState(entry), entry, "registration", "", persisted)
 }
 
-func captureMaintenanceSourceObservation(ctx context.Context, before maintenanceObservationState, entry *MaintenanceEntry, source *repositoryDocsRegisteredSource, persisted bool) {
+// Source confirmation requires both the existing save and current originating
+// authority. Retained stale-owner changes are count-only loss, not certification.
+func captureMaintenanceSourceObservation(ctx context.Context, before maintenanceObservationState, entry *MaintenanceEntry, source *repositoryDocsRegisteredSource, confirmed bool) {
 	if source == nil {
 		return
 	}
-	captureMaintenanceTransition(ctx, before, maintenanceObservedSourceState(source), entry, "repository_docs", source.State.SourceRegistrationID, persisted)
+	captureMaintenanceTransition(ctx, before, maintenanceObservedSourceState(source), entry, "repository_docs", source.State.SourceRegistrationID, confirmed)
 }
 
-func captureMaintenanceTransition(ctx context.Context, before, after maintenanceObservationState, entry *MaintenanceEntry, scope, source string, persisted bool) {
+func captureMaintenanceTransition(ctx context.Context, before, after maintenanceObservationState, entry *MaintenanceEntry, scope, source string, confirmed bool) {
 	buffer, _ := ctx.Value(maintenanceObservationKey{}).(*maintenanceObservationBuffer)
 	if buffer == nil || entry == nil {
 		return
@@ -123,12 +125,12 @@ func captureMaintenanceTransition(ctx context.Context, before, after maintenance
 	if before == after {
 		return
 	}
-	if !persisted {
+	if !confirmed {
 		buffer.lost++
 		return
 	}
 	// A disabled event sink has no admission buffer to overflow. Independent
-	// metrics still account for an actual unconfirmed persistence boundary.
+	// metrics still account for an actual unconfirmed execution boundary.
 	if buffer.collector == nil {
 		return
 	}

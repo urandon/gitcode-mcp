@@ -266,7 +266,12 @@ opaque `source_ref`, distinct for every durably registered source. Their states
 are registered, not_indexed, indexing, disabled, ready and degraded; the same
 closed failure map and shared capture cap apply. Actual registration/admission,
 rebind reset, reconcile completion and retained failure owners observe only a
-changed finite pair at their existing save confirmation. Generation-only rebind,
+changed finite pair at their existing save confirmation, qualified against the
+originating registration/cache/repository/path and source-generation authority.
+An obsolete owner that retains an execution mutation records count-only
+unconfirmed loss rather than certifying the replacement source. This observation
+guard does not change existing scheduling, mutation, save or return behavior;
+unchanged replay does not retroactively confirm or recount the pair. Generation-only rebind,
 source replay and inspection-health projection are not extra transitions. Flush
 also follows source-generation fences. Source refs are rejected on other events
 and cleared from per-worker context. No source path, Git identity, content or

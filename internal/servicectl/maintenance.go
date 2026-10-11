@@ -2788,7 +2788,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if hasPendingRepositoryDocsAdmission && errors.As(jobErr, &staleAdmission) {
 					_ = m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.AuthorityPathFingerprint)
 					recordJobActionIntentError(ctx, jobErr)
-					return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
+					return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, snapshot, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
 				}
 				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
@@ -2804,7 +2804,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if class == "repository_docs_provider_boundary_blocked" {
 					message = "repository documentation indexing requires an effective local_process or local_network provider boundary"
 				}
-				return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, class, message), started
+				return m.updateRepositoryDocsFailure(ctx, registrationID, snapshot.repositorySourceID, snapshot, class, message), started
 			}
 			started = append(started, job.ID)
 			activeRepositoryDocs = job
@@ -2835,12 +2835,13 @@ func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrat
 	entry.RAGStatus = ragStatus
 	entry.SyncStage = snapshot.SyncStage
 	entry.RAGStage = snapshot.RAGStage
-	if _, source, current := m.inspectionAuthorityLocked(&snapshot); current {
+	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&snapshot)
+	if currentSourceAuthority {
 		// Inspection is separately confirmed at its actual completion. A later
 		// stale finish must not overwrite that transaction or bypass its failure.
-		inspection := source.State.Inspection
-		source.State = *snapshot.RepositoryDocs
-		source.State.Inspection = inspection
+		inspection := authoritySource.State.Inspection
+		authoritySource.State = *snapshot.RepositoryDocs
+		authoritySource.State.Inspection = inspection
 	}
 	m.refreshLegacyRepositoryDocsLocked(entry)
 	entry.NamespaceID = namespaceID
@@ -2874,7 +2875,10 @@ func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrat
 	entry.NextReconcileAt = now.Add(time.Minute)
 	persisted := m.saveLocked() == nil
 	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
-	captureMaintenanceSourceObservation(ctx, beforeSourceObservation, entry, observedSource, persisted)
+	// An obsolete callback may retain an existing execution-state mutation. Do
+	// not certify it as a current source observation: conserve the changed pair
+	// as unconfirmed loss without altering execution or persistence behavior.
+	captureMaintenanceSourceObservation(ctx, beforeSourceObservation, entry, observedSource, persisted && currentSourceAuthority && observedSource == authoritySource)
 	updated := cloneMaintenanceEntry(entry)
 	m.mu.Unlock()
 	return updated
@@ -2950,7 +2954,7 @@ func (m *MaintenanceManager) reconcileRepositoryDocsState(ctx context.Context, s
 	return true
 }
 
-func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id, sourceID, class, message string) MaintenanceEntry {
+func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id, sourceID string, expected MaintenanceEntry, class, message string) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
@@ -2962,6 +2966,7 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id
 		return cloneMaintenanceEntry(entry)
 	}
 	beforeObservation := maintenanceObservedSourceState(source)
+	_, authoritySource, currentSourceAuthority := m.inspectionAuthorityLocked(&expected)
 	source.State.State = "degraded"
 	source.State.LastErrorClass = class
 	source.State.LastError = message
@@ -2971,7 +2976,7 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(ctx context.Context, id
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
 	persisted := m.saveLocked() == nil
-	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, persisted)
+	captureMaintenanceSourceObservation(ctx, beforeObservation, entry, source, persisted && currentSourceAuthority && source == authoritySource)
 	return cloneMaintenanceEntry(entry)
 }
 

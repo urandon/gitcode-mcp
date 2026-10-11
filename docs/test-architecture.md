@@ -159,6 +159,13 @@ confirms rename success without extra I/O. Source identity and finite classes
 survive strict replay; paths, source ids, content and raw safe-looking error
 classes remain excluded. Registration and source captures share one bounded
 operation-local buffer and publication boundary.
+Actual queued-job/rebind/fence and reconcile-snapshot/late-scheduling-failure
+fixtures pair obsolete owners with current-generation controls. They preserve
+existing execution results while requiring exactly one count-only loss for an
+obsolete changed pair, one confirmed source capture for a current pair, and no
+extra boundary on unchanged replay. The held generation-fence test waits for an
+accepted FIFO collector marker after registry save/unlock before asserting no
+early maintenance publication; releasing the real fence conserves the transition.
 Admin request fixtures use actual mux/authenticated control and SSE paths, with
 collector-only and combined metric modes. They conserve retained plus lost
 completions, preserve panic/write/short-write/flush/cancellation outcomes and
