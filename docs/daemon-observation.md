@@ -259,4 +259,11 @@ do not distinguish an expired credential from insufficient access. Unknown
 classes remain `operation_failed`. The actual-owner transport suite verifies
 prior success, durable reload and confirmed recovery without erasing the cause;
 the real embedded browser verifies selected incident and terminal safe-copy.
+Actual timeout and truncated JSON controls also exhaust the default
+four-attempt durable retry budget with real backoff and bounded request
+deadlines. They retain `network_timeout`/`partial_response` as
+`provider_timeout`/`provider_invalid` health reasons and `timeout`/`invalid`
+terminal classes. Provider-call accounting includes all four failed attempts
+and verifies that observation adds no request. These terminal controls do not
+qualify a live retry-in-progress stream or an interrupted active retry.
 No release or installed-service upgrade is implied by running the O5 suite.

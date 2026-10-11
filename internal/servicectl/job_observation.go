@@ -96,13 +96,13 @@ func jobObservationFailure(class string) string {
 	// Only a closed class mapping crosses the diagnostic boundary. Unknown
 	// typed execution classes remain operation_failed, never free-form text.
 	switch class {
-	case "timeout", "provider_timeout":
+	case "timeout", "provider_timeout", "network_timeout":
 		return "timeout"
 	case "rate_limited", "provider_rate_limited":
 		return "rate_limited"
 	case "forbidden", "provider_forbidden", "provider_unauthorized", "live_auth_failure":
 		return "forbidden"
-	case "invalid", "provider_invalid_response", "provider_unsupported_response":
+	case "invalid", "provider_invalid_response", "provider_unsupported_response", "partial_response":
 		return "invalid"
 	case "provider_failed", "provider_fetch_failed", "network_unavailable":
 		return "provider_failed"

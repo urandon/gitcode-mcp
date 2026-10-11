@@ -27,7 +27,12 @@ async function readyContext(page: Page): Promise<void> {
 
 // The test-only Go binary runs real HTTP sync, SQLite/job ownership, IPC and
 // authenticated Admin. Browser responses and EventSource are not mocked.
-test('actual failed job survives durable reload and recovers without observation side effects', async ({ page, context }) => {
+for (const scenario of [
+  { name: 'retained', reason: 'provider_forbidden', failure: 'forbidden' },
+  { name: 'timeout', reason: 'provider_timeout', failure: 'timeout' },
+  { name: 'partial', reason: 'provider_invalid', failure: 'invalid' }
+]) {
+test(`actual ${scenario.name} failure survives durable reload and recovers without observation side effects`, async ({ page, context }) => {
   test.setTimeout(120000);
   const directory = mkdtempSync(join(tmpdir(), 'gitcode-o5-'));
   const binary = join(directory, 'qualification.test');
@@ -36,7 +41,7 @@ test('actual failed job survives durable reload and recovers without observation
   try {
     try { execFileSync('go', ['test', '-c', '-o', binary, './internal/qualification'], { cwd: resolve('..'), stdio: 'pipe', timeout: 60000 }); }
     catch { throw new Error('Offline qualification fixture could not compile.'); }
-    child = spawn(binary, ['-test.run=^TestO5ActualFailureWriterWaitRecoveryAcrossTransports$/^retained$', '-test.timeout=100s'], {
+    child = spawn(binary, [`-test.run=^TestO5ActualFailureWriterWaitRecoveryAcrossTransports$/^${scenario.name}$`, '-test.timeout=100s'], {
       cwd: resolve('..'), env: { ...process.env, TMPDIR: directory, GITCODE_MCP_O5_BROWSER: '1' }, stdio: 'pipe'
     });
     // Never echo arbitrary fixture output or local coordinates into reports.
@@ -86,7 +91,7 @@ test('actual failed job survives durable reload and recovers without observation
       await expect(page.getByRole('heading', { name: 'Event timeline' })).toBeVisible();
       const incident = summary.execution_health.incidents.find((value: any) => value.collection === 'issues');
       expect(incident).toBeDefined();
-      expect(incident.reason).toBe('provider_forbidden');
+      expect(incident.reason).toBe(scenario.reason);
       expect(incident.last_success_at).toBeTruthy();
       const incidentSection = page.getByRole('region', { name: 'Active and recovered incidents', exact: true });
       const incidentButton = incidentSection.getByRole('button', { name: 'Sync · Issues', exact: true });
@@ -123,7 +128,7 @@ test('actual failed job survives durable reload and recovers without observation
       expect(eventCopy.event.code).toBe('job_terminal');
       expect(eventCopy.event.phase).toBe('completion');
       expect(eventCopy.event.outcome).toBe(phase < 2 ? 'failed' : 'succeeded');
-      expect(eventCopy.event.failure_class).toBe(phase < 2 ? 'forbidden' : undefined);
+      expect(eventCopy.event.failure_class).toBe(phase < 2 ? scenario.failure : undefined);
       expect(eventCopy.event.correlation_ref).toBeTruthy();
       expect(Buffer.byteLength(JSON.stringify(eventCopy), 'utf8')).toBeLessThanOrEqual(16 * 1024);
       expect(JSON.stringify(eventCopy)).not.toContain('synthetic-private');
@@ -144,3 +149,4 @@ test('actual failed job survives durable reload and recovers without observation
     rmSync(directory, { recursive: true, force: true });
   }
 });
+}
