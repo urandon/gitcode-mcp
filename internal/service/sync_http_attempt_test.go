@@ -142,3 +142,73 @@ func TestSyncCollectionsPriorHTTPThenLocalRateCancellation(t *testing.T) {
 		t.Fatalf("shared owner evidence mismatch: class=%s attempted=%t", d.Code, d.HTTPAttempted)
 	}
 }
+
+func TestSyncResourcesPriorHTTPThenCancelledAndSkippedTargets(t *testing.T) {
+	testSyncResourcesCancelledTail(t, true)
+}
+
+func TestSyncResourcesBatchSuccessThenCancelledAndSkippedTargets(t *testing.T) {
+	testSyncResourcesCancelledTail(t, false)
+}
+
+func testSyncResourcesCancelledTail(t *testing.T, priorCollection bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal("cache setup failed")
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://provider.invalid", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal("binding setup failed")
+	}
+	burst := 2
+	if priorCollection {
+		burst = 1
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "fixture-credential", ServiceConfig{BaseURL: "https://provider.invalid", RateLimitRPS: 0.001, RateLimitBurst: burst})
+	if err != nil {
+		t.Fatal("provider setup failed")
+	}
+	calls := 0
+	previous := http.DefaultTransport
+	defer func() { http.DefaultTransport = previous }()
+	http.DefaultTransport = syncAttemptTransport(func(req *http.Request) (*http.Response, error) {
+		calls++
+		body := `[]`
+		if !priorCollection && !strings.HasSuffix(req.URL.Path, "/comments") {
+			body = `{"id":1,"number":1,"title":"fixture","body":"","state":"open","comments":0,"labels":[]}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, ContentLength: -1, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})
+	ctx, _ = diagnostics.WithHTTPAttemptWitness(ctx)
+	if priorCollection {
+		if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "fixture-a", Bounds: &SyncBounds{MaxPages: 1}}); err != nil || calls != 1 {
+			t.Fatal("prior collection must succeed with one HTTP request")
+		}
+	}
+	ctx = gitcode.WithRateLimitObserver(ctx, func(event gitcode.RateLimitEvent) {
+		if event.Type == gitcode.RateLimitEventThrottleWaitStarted {
+			cancel()
+		}
+	})
+	reqs := []SyncRequest{{RepoID: "fixture-a", RemoteAlias: "issue:1"}, {RepoID: "fixture-a", RemoteAlias: "issue:2"}}
+	wantSuccess, wantCalls := 0, 1
+	if !priorCollection {
+		reqs = append(reqs, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:3"})
+		wantSuccess, wantCalls = 1, 2
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if result == nil || result.SuccessCount != wantSuccess || result.FailureCount != 2 {
+		t.Fatal("batch must retain prior success and both cancellation failures")
+	}
+	var network gitcode.ErrNetworkUnavailable
+	if !errors.As(err, &network) || network.Attempts != 0 || calls != wantCalls || !errors.Is(err, context.Canceled) {
+		t.Fatal("later target must stop locally and the final target must be skipped")
+	}
+	d := diagnostics.Classify(err, diagnostics.CommandContext{ProviderMode: "live-http", TransportFailure: true})
+	if d.Code != diagnostics.CodeOperationCancelled || !d.HTTPAttempted {
+		t.Fatalf("skipped-target evidence mismatch: class=%s attempted=%t", d.Code, d.HTTPAttempted)
+	}
+}

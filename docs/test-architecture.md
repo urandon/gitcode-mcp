@@ -223,6 +223,9 @@ list, cancel the later PR request from its local rate-limit callback, and retain
 overall HTTP evidence without classifying the unentered request as a transport
 failure. Failed-request receipts have separate mixed-cause and unknown-branch
 controls; prior confirmed provider/schema failures retain precedence.
+Target-batch controls also confirm that already-cancelled tail targets carry
+explicit skipped-before-dispatch evidence, while genuinely unknown failures
+remain unknown. Earlier successful targets and their HTTP receipts are retained.
 Safe-copy fixtures accept only returned catalog/incident evidence, reject raw
 free-form reasons, and preserve omitted unknown authority references. The
 dedicated UI and integrated rollout remain separately qualified cohorts; see

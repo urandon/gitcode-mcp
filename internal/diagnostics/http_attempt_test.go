@@ -97,6 +97,8 @@ func TestHTTPTransportFailureEvidenceIsNotOperationReceipt(t *testing.T) {
 		{local, false, true, CodeOperationCancelled},
 		{fmt.Errorf("outer: %w", local), false, true, CodeOperationCancelled},
 		{errors.Join(local, local), false, true, CodeOperationCancelled},
+		{errors.Join(local, RetainPreDispatchInterruption(context.Canceled)), false, true, CodeOperationCancelled},
+		{errors.Join(local, RetainPreDispatchInterruption(context.DeadlineExceeded)), false, true, CodeOperationCancelled},
 		{errors.Join(local, entered), true, true, CodeLiveTransportFailure},
 		{errors.Join(entered, local), true, true, CodeLiveTransportFailure},
 		{errors.Join(local, errors.New("unknown failure")), false, false, CodeLiveTransportFailure},
@@ -120,6 +122,24 @@ func TestHTTPTransportFailureEvidenceIsNotOperationReceipt(t *testing.T) {
 		d := Classify(RetainHTTPAttempt(local, true), ctx)
 		if d.Code != want || !d.HTTPAttempted {
 			t.Fatal("local cancellation masked confirmed provider/schema evidence")
+		}
+	}
+}
+
+func TestPreDispatchInterruptionRequiresOwnerGuardEvidence(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		err := RetainPreDispatchInterruption(cause)
+		attempted, known := HTTPTransportFailureEvidence(err)
+		if !known || attempted || !errors.Is(err, cause) {
+			t.Fatal("owner guard lost known pre-dispatch evidence or typed cause")
+		}
+		if attempted, known := HTTPAttemptEvidence(err); !known || attempted {
+			t.Fatal("skipped request is not HTTP")
+		}
+	}
+	for _, err := range []error{nil, errors.New("unknown"), fmt.Errorf("unknown boundary: %w", context.Canceled)} {
+		if RetainPreDispatchInterruption(err) != err {
+			t.Fatal("unknown boundary was inferred as skipped dispatch")
 		}
 	}
 }

@@ -52,6 +52,23 @@ func RetainHTTPAttempt(err error, attempted bool) error {
 	return httpAttemptError{cause: err, attempted: attempted}
 }
 
+type preDispatchInterruption struct{ cause error }
+
+func (e preDispatchInterruption) Error() string                              { return e.cause.Error() }
+func (e preDispatchInterruption) Unwrap() error                              { return e.cause }
+func (e preDispatchInterruption) HTTPAttemptEvidence() (bool, bool)          { return false, true }
+func (e preDispatchInterruption) HTTPTransportFailureEvidence() (bool, bool) { return false, true }
+
+// RetainPreDispatchInterruption is used only by an owner's context guard that
+// skips dispatch. It must not be applied to errors returned by a provider.
+// Unknown/wrapped causes are left unchanged rather than inferred as local.
+func RetainPreDispatchInterruption(err error) error {
+	if err != context.Canceled && err != context.DeadlineExceeded {
+		return err
+	}
+	return preDispatchInterruption{cause: err}
+}
+
 // HTTPAttemptEvidence returns known evidence, not an inference from error text.
 // An aggregate is definitely attempted if any child is; definitely not only
 // when every child has known negative evidence. Outer operation receipts win.

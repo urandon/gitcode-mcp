@@ -21,6 +21,7 @@ import (
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -1582,7 +1583,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (_ SyncResul
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
-		return SyncResult{}, err
+		return SyncResult{}, diagnostics.RetainPreDispatchInterruption(err)
 	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "sync")
 	if err != nil {
@@ -1703,7 +1704,7 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (_ *Syn
 	var partial *PartialSyncError
 	for i, req := range reqs {
 		if err := ctx.Err(); err != nil {
-			re := newResourceErrorWithMessage(req.StableID, "", err, fmt.Sprintf("sync resources: context cancelled at request %d", i))
+			re := newResourceErrorWithMessage(req.StableID, "", diagnostics.RetainPreDispatchInterruption(err), fmt.Sprintf("sync resources: context cancelled at request %d", i))
 			result.Failures = append(result.Failures, re)
 			continue
 		}

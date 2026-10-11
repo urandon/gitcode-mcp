@@ -38,6 +38,8 @@ func TestCLISyncLaterPreDispatchInterruptionKeepsPriorHTTP(t *testing.T) {
 			network := gitcode.ErrNetworkUnavailable{Attempts: entered, Cause: cause}
 			failure := service.ErrSyncFailure{Mode: "network_timeout", Cause: network}
 			partial := &service.PartialSyncError{Errors: []service.ResourceError{{Err: failure, FailureClass: "network_timeout"}}, SuccessCount: 1, FailureCount: 1}
+			partial.Errors = append(partial.Errors, service.ResourceError{Err: diagnostics.RetainPreDispatchInterruption(cause)})
+			partial.FailureCount++
 			partial.PreserveHTTPAttemptEvidence(diagnostics.RetainHTTPAttempt(failure, true))
 			d := diagnostics.Classify(partial, diagnosticContext(startupPlan{ProviderMode: "live-http"}, partial))
 			want := diagnostics.CodeOperationCancelled
