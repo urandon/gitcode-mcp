@@ -94,6 +94,7 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 	}
 	records := make([]healthAuthorityRecord, 0, min(len(m.jobs.jobs)*2, observability.MaxHealthEvidence))
 	limited := false
+	invalidRetryHistory := false
 	visited := 0
 	visit := func() bool {
 		if ctx.Err() != nil {
@@ -155,6 +156,10 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 					break
 				}
 				r := base
+				if !validSyncRetryHistory(collection, job.CreatedAt, at) {
+					invalidRetryHistory = true
+					continue
+				}
 				r.collection = healthCollection(collection.Collection)
 				if !collection.UpdatedAt.IsZero() {
 					r.at = collection.UpdatedAt
@@ -183,6 +188,21 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 					continue
 				}
 				add(r)
+				if collection.FirstRetryAt != nil {
+					history := r
+					history.signal, history.reason, history.retry = "failed", "retry_wait", time.Time{}
+					// Current scheduling wins the same-time tie and retains its
+					// exact deadline. A later outcome still supersedes this fault.
+					if r.signal == "retrying" {
+						history.signal, history.retry = r.signal, r.retry
+					}
+					history.at = *collection.FirstRetryAt
+					add(history)
+					if !collection.LastRetryAt.Equal(*collection.FirstRetryAt) {
+						history.at = *collection.LastRetryAt
+						add(history)
+					}
+				}
 				terminalRepresented = terminalRepresented || (r.signal == base.signal && r.reason == base.reason && r.at.Equal(base.at) && job.ErrorClass != "" && collection.ErrorClass == job.ErrorClass)
 			}
 		}
@@ -391,6 +411,9 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 	if limited {
 		return observability.UnavailableExecutionHealth(at, "evidence_limit"), nil
 	}
+	if invalidRetryHistory {
+		return observability.UnavailableExecutionHealth(at, "authority_unavailable"), nil
+	}
 	evidence := make([]observability.HealthEvidence, 0, len(records))
 	for _, r := range records {
 		if err := ctx.Err(); err != nil {
@@ -412,4 +435,16 @@ func (m *MaintenanceManager) ExecutionHealthContext(ctx context.Context, at time
 			Refs: observability.Context{Job: observability.KnownRef("job", r.job), Registration: observability.KnownRef("registration", r.registration), Cache: observability.KnownRef("cache", r.cache), Repo: observability.KnownRef("repo", r.repo), Source: source}})
 	}
 	return observability.ProjectExecutionHealthContext(ctx, at, evidence)
+}
+
+// Old records have no retry history. Incomplete, inverted, future or
+// out-of-lifetime timestamps must not manufacture recovered incidents.
+func validSyncRetryHistory(view SyncCollectionView, createdAt, at time.Time) bool {
+	if view.FirstRetryAt == nil && view.LastRetryAt == nil {
+		return true
+	}
+	if view.FirstRetryAt == nil || view.LastRetryAt == nil || view.FirstRetryAt.IsZero() || view.LastRetryAt.IsZero() {
+		return false
+	}
+	return !view.LastRetryAt.Before(*view.FirstRetryAt) && !view.LastRetryAt.After(view.UpdatedAt) && !view.LastRetryAt.After(at) && (createdAt.IsZero() || !view.FirstRetryAt.Before(createdAt))
 }

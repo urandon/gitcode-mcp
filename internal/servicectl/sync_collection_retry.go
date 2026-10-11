@@ -55,7 +55,11 @@ type SyncCollectionView struct {
 	RetryBudget   int                   `json:"retry_budget,omitempty"`
 	RetryAfter    *time.Time            `json:"retry_after,omitempty"`
 	LastSuccessAt *time.Time            `json:"last_success_at,omitempty"`
-	UpdatedAt     time.Time             `json:"updated_at"`
+	// Retained authority, not telemetry: success may replace the current
+	// outcome but cannot erase a retry already durably scheduled by this job.
+	FirstRetryAt *time.Time `json:"first_retry_at,omitempty"`
+	LastRetryAt  *time.Time `json:"last_retry_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 func aggregateSyncCollectionOutcome(collections []SyncCollectionView) SyncAggregateHealth {

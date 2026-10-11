@@ -271,7 +271,23 @@ deadlines. They retain `network_timeout`/`partial_response` as
 `provider_timeout`/`provider_invalid` health reasons and `timeout`/`invalid`
 terminal classes. Provider-call accounting includes all four failed attempts
 and verifies that observation adds no request. These terminal controls do not
-qualify a live retry-in-progress stream or an interrupted active retry.
+qualify an interrupted active retry.
+The separate `TestO5ActualActiveRetryAndSSERecovery` and
+`web/tests/observation-active.spec.ts` exercise actual HTTP 429/Retry-After,
+the ordinary delayed scheduler and the same job's confirmed second attempt.
+CLI, normal/minimal MCP and authenticated Admin identify the same retrying
+incident and recovered job. The browser retains its selected incident and
+updates from native SSE without navigation or manual refresh after the active
+snapshot. Only actual admitted retries increment the counter; observation adds
+no provider request. The stream must deliver the confirmed terminal revision,
+not merely an intermediate attempt-start invalidation.
+Collection authority retains bounded `first_retry_at`/`last_retry_at` timestamps
+when scheduling is durably observed. Later success replaces current failure and
+deadline but preserves this same-job recovery evidence across owner reload.
+These fields are not reconstructed from logs, progress text or metrics; legacy
+records without them acquire no invented history. Incomplete, inverted, future
+or out-of-job-lifetime retry timestamps make health authority unavailable rather
+than fabricate incidents. Retention/pruning still bounds the authority lifetime.
 Timeout classification accepts both a context deadline and a typed timeout
 inside the provider's network error, including on the Go 1.22 baseline. This
 does not broaden status-based retry eligibility or interpret raw error text.
