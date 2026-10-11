@@ -218,6 +218,11 @@ failure, retain an empty successful list before later cancellation, freeze
 operation-local evidence independently of telemetry, and preserve typed error
 unwraps and partial aggregation. CLI text/JSON and MCP structured diagnostics
 must agree. Adapter tests preserve configured timeout and redirect policy.
+Actual shared-service multi-collection controls succeed on the first issues
+list, cancel the later PR request from its local rate-limit callback, and retain
+overall HTTP evidence without classifying the unentered request as a transport
+failure. Failed-request receipts have separate mixed-cause and unknown-branch
+controls; prior confirmed provider/schema failures retain precedence.
 Safe-copy fixtures accept only returned catalog/incident evidence, reject raw
 free-form reasons, and preserve omitted unknown authority references. The
 dedicated UI and integrated rollout remain separately qualified cohorts; see

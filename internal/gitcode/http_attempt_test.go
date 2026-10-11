@@ -133,3 +133,32 @@ func TestHTTPAttemptWrapperPreservesClientRedirectPolicy(t *testing.T) {
 		t.Fatalf("client behavior changed: error type=%T calls=%d redirects=%d attempted=%t", err, calls, redirects, witness.Attempted())
 	}
 }
+
+func TestHTTPAttemptPriorSuccessThenLocalRateCancellation(t *testing.T) {
+	client, _ := NewHTTPClient(Config{BaseURL: "https://provider.invalid", MaxRetries: 0, RateLimitRPS: 0.001, RateLimitBurst: 1})
+	var calls atomic.Int32
+	client.client.Transport = attemptRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 200, Header: http.Header{}, ContentLength: -1, Body: io.NopCloser(strings.NewReader(`{"id":1,"number":1}`)), Request: req}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, witness := diagnostics.WithHTTPAttemptWitness(ctx)
+	if _, _, err := client.getBytes(ctx, "/fixture", nil); err != nil {
+		t.Fatal("initial request failed")
+	}
+	ctx = WithRateLimitObserver(ctx, func(event RateLimitEvent) {
+		if event.Type == RateLimitEventThrottleWaitStarted {
+			cancel()
+		}
+	})
+	_, err := client.GetIssue(ctx, IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 2})
+	var network ErrNetworkUnavailable
+	if !errors.As(err, &network) || network.Attempts != 0 || !errors.Is(err, context.Canceled) || calls.Load() != 1 || !witness.Attempted() {
+		t.Fatal("later request must stop before transport without erasing prior HTTP")
+	}
+	d := diagnostics.Classify(diagnostics.RetainHTTPAttempt(err, witness.Attempted()), diagnostics.CommandContext{ProviderMode: "live-http", TransportFailure: true})
+	if d.Code != diagnostics.CodeOperationCancelled || !d.HTTPAttempted {
+		t.Fatalf("prior successful HTTP is not a transport failure: class=%s attempted=%t", d.Code, d.HTTPAttempted)
+	}
+}

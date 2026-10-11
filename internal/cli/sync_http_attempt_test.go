@@ -9,6 +9,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -28,6 +29,28 @@ func TestCLISyncAggregateKeepsKnownHTTPAndInterruption(t *testing.T) {
 	d := diagnostics.Classify(merged, diagnosticContext(startupPlan{ProviderMode: "live-http"}, merged))
 	if d.Code != diagnostics.CodeOperationCancelled || !d.HTTPAttempted {
 		t.Fatal("late cancellation must retain prior HTTP without inventing a transport failure")
+	}
+}
+
+func TestCLISyncLaterPreDispatchInterruptionKeepsPriorHTTP(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		for _, entered := range []int{0, 1} {
+			network := gitcode.ErrNetworkUnavailable{Attempts: entered, Cause: cause}
+			failure := service.ErrSyncFailure{Mode: "network_timeout", Cause: network}
+			partial := &service.PartialSyncError{Errors: []service.ResourceError{{Err: failure, FailureClass: "network_timeout"}}, SuccessCount: 1, FailureCount: 1}
+			partial.PreserveHTTPAttemptEvidence(diagnostics.RetainHTTPAttempt(failure, true))
+			d := diagnostics.Classify(partial, diagnosticContext(startupPlan{ProviderMode: "live-http"}, partial))
+			want := diagnostics.CodeOperationCancelled
+			if cause == context.DeadlineExceeded {
+				want = diagnostics.CodeOperationTimeout
+			}
+			if entered != 0 {
+				want = diagnostics.CodeLiveTransportFailure
+			}
+			if d.Code != want || !d.HTTPAttempted {
+				t.Fatalf("partial interruption mismatch: entered=%d class=%s attempted=%t", entered, d.Code, d.HTTPAttempted)
+			}
+		}
 	}
 }
 

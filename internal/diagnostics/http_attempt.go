@@ -81,3 +81,33 @@ func HTTPAttemptEvidence(err error) (attempted, known bool) {
 	}
 	return false, false
 }
+
+// HTTPTransportFailureEvidence describes failed requests, not the enclosing
+// operation's HTTP receipt. A positive failed-request receipt in any branch
+// wins; a negative is authoritative only when every branch is known negative.
+func HTTPTransportFailureEvidence(err error) (attempted, known bool) {
+	if err == nil {
+		return false, false
+	}
+	if evidence, ok := err.(interface{ HTTPTransportFailureEvidence() (bool, bool) }); ok {
+		if attempted, known = evidence.HTTPTransportFailureEvidence(); known {
+			return attempted, true
+		}
+	}
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := e.Unwrap()
+		allKnown := len(children) != 0
+		for _, child := range children {
+			attempted, known := HTTPTransportFailureEvidence(child)
+			if attempted && known {
+				return true, true
+			}
+			allKnown = allKnown && known
+		}
+		return false, allKnown
+	case interface{ Unwrap() error }:
+		return HTTPTransportFailureEvidence(e.Unwrap())
+	}
+	return false, false
+}

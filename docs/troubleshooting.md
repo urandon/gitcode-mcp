@@ -155,6 +155,10 @@ reports `live_transport_failure` with `http_attempted: true`. Cancellation later
 in a multi-collection sync can report an operation interruption with
 `http_attempted: true`: even an empty successful list already contacted the
 provider. Partial results and retries retain that fact independently of metrics.
+This also applies when a later request is cancelled in its local rate-limit
+wait: an earlier successful request is not evidence that the failing request
+entered transport. Confirmed provider/schema failures or an actually entered
+failed request still retain their failure classification in mixed results.
 CLI compact partial summaries expose the known bit; MCP lifecycle diagnostics
 keep their existing `code` and add canonical `error_class` and `http_attempted`.
 Startup configuration-read cancellation remains a configuration failure.

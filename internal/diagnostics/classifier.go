@@ -205,6 +205,14 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if hasCode(err, "schema_decode") || hasCode(err, "malformed_response") || hasCode(err, "unexpected_content_type") {
 		return CodeSchemaDecode
 	}
+	// Earlier successful HTTP must not turn a later pre-dispatch interruption
+	// into a transport failure. Preserve confirmed provider/schema failures
+	// above, and any actually entered failed request in a mixed aggregate.
+	if attempted, known := HTTPTransportFailureEvidence(err); known && !attempted {
+		if code := operationInterruptionCode(err); code != "" {
+			return code
+		}
+	}
 	if (ctx.TransportFailure || hasCode(err, "live_transport_failure") || hasCode(err, "network_unavailable") || hasCode(err, "write_network_unavailable")) && ctx.HTTPAttempted {
 		return CodeLiveTransportFailure
 	}

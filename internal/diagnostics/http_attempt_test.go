@@ -75,3 +75,51 @@ func TestHTTPAttemptEvidenceOverridesInference(t *testing.T) {
 		}
 	}
 }
+
+type failedRequestReceipt struct {
+	cause   error
+	entered bool
+}
+
+func (e failedRequestReceipt) Error() string                              { return "fixture failed request" }
+func (e failedRequestReceipt) Unwrap() error                              { return e.cause }
+func (e failedRequestReceipt) DiagnosticCode() string                     { return "network_unavailable" }
+func (e failedRequestReceipt) HTTPTransportFailureEvidence() (bool, bool) { return e.entered, true }
+
+func TestHTTPTransportFailureEvidenceIsNotOperationReceipt(t *testing.T) {
+	local := failedRequestReceipt{cause: context.Canceled}
+	entered := failedRequestReceipt{cause: context.DeadlineExceeded, entered: true}
+	for _, tc := range []struct {
+		err              error
+		attempted, known bool
+		code             Code
+	}{
+		{local, false, true, CodeOperationCancelled},
+		{fmt.Errorf("outer: %w", local), false, true, CodeOperationCancelled},
+		{errors.Join(local, local), false, true, CodeOperationCancelled},
+		{errors.Join(local, entered), true, true, CodeLiveTransportFailure},
+		{errors.Join(entered, local), true, true, CodeLiveTransportFailure},
+		{errors.Join(local, errors.New("unknown failure")), false, false, CodeLiveTransportFailure},
+	} {
+		err := RetainHTTPAttempt(tc.err, true)
+		attempted, known := HTTPTransportFailureEvidence(err)
+		if attempted != tc.attempted || known != tc.known {
+			t.Fatal("outer operation receipt or unknown branch masked failed-request evidence")
+		}
+		d := Classify(err, CommandContext{ProviderMode: "live-http", TransportFailure: true})
+		if d.Code != tc.code || !d.HTTPAttempted {
+			t.Fatalf("failed-request evidence mismatch: class=%s attempted=%t", d.Code, d.HTTPAttempted)
+		}
+	}
+	for _, ctx := range []CommandContext{
+		{ProviderMode: "live-http", SchemaDecodeFailure: true, HTTPStatus: 200},
+		{ProviderMode: "live-http", APIFailure: true, HTTPStatus: 400},
+	} {
+		ctx.HTTPAttempted = true
+		want := Classify(errors.New("fixture provider failure"), ctx).Code
+		d := Classify(RetainHTTPAttempt(local, true), ctx)
+		if d.Code != want || !d.HTTPAttempted {
+			t.Fatal("local cancellation masked confirmed provider/schema evidence")
+		}
+	}
+}
