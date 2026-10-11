@@ -585,9 +585,10 @@ func (m Manager) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	observationReader := &observability.Reader{Collector: m.observation, Metrics: m.metrics, Health: maintenance.ExecutionHealthContext}
 	admin := adminhttp.New(adminhttp.Config{
 		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
-		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics, Observation: m.observation,
+		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics, Observation: m.observation, Observability: observationReader,
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
@@ -623,7 +624,7 @@ func (m Manager) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin, observationHandlers: &rpcHandlers, runtimeContext: ctx}
+	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin, Observability: observationReader, observationHandlers: &rpcHandlers, runtimeContext: ctx}
 	maintenanceFinished := make(chan struct{})
 	maintenanceDone = maintenanceFinished
 	go func() { defer close(maintenanceFinished); maintenance.Run(ctx) }()

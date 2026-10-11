@@ -93,7 +93,7 @@ gitcode-mcp mcp serve --transport http-sse --bind 127.0.0.1:9021
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Returns 200 if the server process is alive |
-| `/ready` | GET | Returns 200 if the cache is readable and at least one repository is configured |
+| `/ready` | GET | Reports MCP transport/diagnostic readiness without opening the cache or resolving credentials |
 | `/sse` | GET | SSE endpoint for server-to-client events |
 | `/message` | POST | JSON-RPC request endpoint |
 
@@ -117,10 +117,15 @@ Expected readiness codes:
 
 | Code | Meaning |
 |---|---|
-| (empty) | Ready |
-| `cache_unreadable` | Cache database cannot be opened or read |
-| `repo_unavailable` | No repositories configured |
-| `locked_writer` | Writer lock contention |
+| `transport_ready` | Transport ready; cache/provider readiness is evaluated only by a requested dependent tool |
+| `bootstrap_busy` | Transport ready while another requested tool initializes its dependencies |
+| A cache/bootstrap diagnostic | Transport and daemon observations remain ready, but dependent tools are degraded |
+| `service_unavailable` | Transport is closing |
+| `operation_cancelled` | Readiness request was cancelled |
+
+`ready: true` does not prove cache or live-write readiness. Discovery and daemon
+observations remain available with an unusable cache. See
+[Daemon observation](daemon-observation.md) for bounds and typed handoffs.
 
 ### Client configuration (generic HTTP/SSE)
 
@@ -207,7 +212,13 @@ Zed stdio example for a repo-local cache:
 }
 ```
 
-When credentials resolve, MCP startup selects the live provider by default for live lifecycle tools. Use `--offline` or `--fixture` only for deterministic fixture sessions. `doctor` reports the active `tool_access` and provider mode so agents can explain why write tools are or are not available.
+MCP startup and discovery do not resolve credentials or initialize the cache.
+An explicitly requested live lifecycle tool resolves credentials lazily and
+selects the live provider; missing credentials never fall back to fixture writes.
+Use `--offline` or `--fixture` only for deterministic fixture sessions. `doctor`
+reports `tool_access`, provider mode, and an explicit cache bootstrap diagnostic
+when needed. Feedback submission readiness is evaluated by `feedback_status`,
+not as a hidden discovery-side credential lookup.
 
 ### MCP tools exposed
 
@@ -215,6 +226,9 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 
 | Tool | Description |
 |---|---|
+| `service_observability` | Bounded daemon summary separating execution and observation health; no cache/provider bootstrap |
+| `service_metrics` | Fixed-catalog sampled metrics and up to 60 minute buckets; unavailable values stay null |
+| `service_events` | Bounded retained events with finite outcome/failure filters, opaque joins, and whole-query cursor fencing |
 | `search_sources` | Hybrid source search by default; lexical results always participate, semantic chunks are grouped into source citations, and `mode=full_text` disables the embedding branch |
 | `get_source` | Get a cached source record by stable id |
 | `list_sources` | List cached sources with kind/status/limit/offset |

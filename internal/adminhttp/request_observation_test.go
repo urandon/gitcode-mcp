@@ -132,7 +132,7 @@ func TestAdminCompletedRequestRealMuxPrivacyAndOutcomes(t *testing.T) {
 		{"GET", "/api/admin/v1/session", "session", "rejected", 401, false, false},
 		// These paths are not registered telemetry endpoints yet; they must
 		// not be silently excluded based on the user's raw path.
-		{"GET", "/api/admin/v1/observability/metrics", "unknown", "succeeded", 200, false, false},
+		{"GET", "/api/admin/v1/observability/not-registered", "unknown", "succeeded", 200, false, false},
 		{"GET", "/synthetic-private-spa?token=synthetic-private-query", "assets", "succeeded", 200, false, false},
 	} {
 		r := httptest.NewRequest(tc.method, "http://127.0.0.1:8080"+tc.target, strings.NewReader("synthetic-private-body"))

@@ -27,7 +27,7 @@ func ProjectObservationHealth(coverage Coverage, metrics MetricsSnapshot) Observ
 		out.OutputState = coverage.OutputState
 	}
 	switch metrics.State {
-	case "ready", "partial":
+	case "initializing", "ready", "partial":
 		out.MetricsState = metrics.State
 	}
 	if !metrics.SampledAt.IsZero() {

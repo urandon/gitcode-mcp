@@ -383,6 +383,9 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 }
 
 func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	if IsObservationCommand(args) {
+		return executeObservationCommand(ctx, args[1:], stdout, stderr, deps)
+	}
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
 	}
@@ -6082,6 +6085,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  stop        report how to stop the installed service")
 		fmt.Fprintln(w, "  status      inspect runtime state")
 		fmt.Fprintln(w, "  doctor      inspect service health")
+		fmt.Fprintln(w, "  observe     read bounded execution and observation health")
+		fmt.Fprintln(w, "  metrics     read fixed-catalog current metrics and sampled history")
+		fmt.Fprintln(w, "  events      read bounded filtered observation events")
 		fmt.Fprintln(w, "  maintenance inspect daemon-managed cache and RAG lifecycle state")
 		fmt.Fprintln(w, "  reconcile   request an immediate maintenance reconciliation")
 		fmt.Fprintln(w, "  run         run the coordinator foreground process")

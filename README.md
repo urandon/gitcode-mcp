@@ -226,7 +226,7 @@ see [MCP Setup](docs/mcp-setup.md).
 | First live repository | [Live readiness](docs/live-readiness.md) · [Repository binding](docs/repo-binding.md) |
 | Agent integration | [MCP setup](docs/mcp-setup.md) · [Read walkthrough](docs/read-walkthrough.md) · [Write walkthrough](docs/write-walkthrough.md) |
 | Search and RAG | [RAG setup](docs/rag.md) · [Repository documentation RAG](docs/repository-documentation-rag.md) |
-| Operate the service | [Cache maintenance](docs/cache-maintenance.md) · [Admin UI](docs/admin-ui.md) · [Cache and sync model](docs/cache-and-sync-model.md) |
+| Operate the service | [Cache maintenance](docs/cache-maintenance.md) · [Daemon observation](docs/daemon-observation.md) · [Admin UI](docs/admin-ui.md) · [Cache and sync model](docs/cache-and-sync-model.md) |
 | Understand the system | [Architecture](docs/architecture.md) · [Component architecture](docs/component-architecture.md) · [Test architecture](docs/test-architecture.md) |
 | Contribute and release | [Agent guide](AGENTS.md) · [PR/MR workflow](docs/pr-mr-workflow.md) · [Release process](docs/release-process.md) |
 | Safety and evidence | [Sanitization](docs/sanitization.md) · [GitCode API discovery](docs/gitcode-api-discovery.md) · [Structured feedback](docs/feedback.md) |

@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"math"
 	"sort"
 	"strings"
@@ -405,6 +406,37 @@ func metricHistoryIndex(minute int64) int {
 func (m *Metrics) Snapshot() MetricsSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	out, _ := m.snapshotLocked(context.Background(), true)
+	return out
+}
+
+// SnapshotContext is a non-waiting read of the existing sampled history. It
+// neither samples probes nor counts a rejected read as lost execution evidence.
+func (m *Metrics) SnapshotContext(ctx context.Context) (MetricsSnapshot, error) {
+	return m.readSnapshot(ctx, true)
+}
+
+// CurrentSnapshotContext avoids copying sampled history for summary polls.
+// Availability and fixed current points are identical to the full snapshot.
+func (m *Metrics) CurrentSnapshotContext(ctx context.Context) (MetricsSnapshot, error) {
+	return m.readSnapshot(ctx, false)
+}
+
+func (m *Metrics) readSnapshot(ctx context.Context, history bool) (MetricsSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	if !m.mu.TryLock() {
+		return MetricsSnapshot{}, QueryError{Code: "observation_busy", Reason: "metrics_busy"}
+	}
+	defer m.mu.Unlock()
+	return m.snapshotLocked(ctx, history)
+}
+
+func (m *Metrics) snapshotLocked(ctx context.Context, history bool) (MetricsSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return MetricsSnapshot{}, err
+	}
 	m.refreshCollectorCounterLocked()
 	out := MetricsSnapshot{BootID: m.boot, ResetAt: m.resetAt, SampledAt: m.sampledAt, State: "ready", Dropped: m.dropped.Load(), Catalog: MetricCatalog(), Series: make([]MetricSeries, 0, len(m.keys))}
 	if m.sampledAt.IsZero() {
@@ -413,6 +445,9 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		out.State = "partial"
 	}
 	for _, key := range m.keys {
+		if err := ctx.Err(); err != nil {
+			return MetricsSnapshot{}, err
+		}
 		c := m.cells[key]
 		point := MetricPoint{Name: c.definition.Name, Labels: copyLabels(c.labels), Reason: c.reason, Count: c.count, Sum: c.sum}
 		if c.available && c.definition.Type != "histogram" {
@@ -423,7 +458,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 			point.Distribution = append([]uint64(nil), c.distribution...)
 		}
 		series := MetricSeries{MetricPoint: point, History: make([]MetricBucket, 0, MetricHistoryMinutes)}
-		if !m.sampledAt.IsZero() {
+		if history && !m.sampledAt.IsZero() {
 			latest := m.sampledAt.UTC().Truncate(time.Minute)
 			for i := MetricHistoryMinutes - 1; i >= 0; i-- {
 				start := latest.Add(-time.Duration(i) * time.Minute)
@@ -444,5 +479,8 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		}
 		out.Series = append(out.Series, series)
 	}
-	return out
+	if err := ctx.Err(); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	return out, nil
 }

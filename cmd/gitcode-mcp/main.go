@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -112,6 +111,36 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		printMCPHelp(stdout)
 		return 0
 	}
+	if cli.IsObservationCommand(rest) {
+		formats := 0
+		for i := 0; i < len(args)-len(rest); i++ {
+			if args[i] == "--" {
+				continue
+			}
+			if args[i] == "--format" {
+				formats++
+				i++
+				continue
+			}
+			if strings.HasPrefix(args[i], "--format=") {
+				formats++
+				continue
+			}
+			fmt.Fprintln(stderr, "startup: observation accepts only --format before the command")
+			return 2
+		}
+		if formats > 1 {
+			fmt.Fprintln(stderr, "startup: repeated observation format flag")
+			return 2
+		}
+		localArgs := append([]string(nil), rest...)
+		if opts.overrides.Format != "" {
+			localArgs = append(localArgs, "--format", opts.overrides.Format)
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return cli.ExecuteWithSourceContext(ctx, localArgs, stdout, stderr, src)
+	}
 	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor" || rest[0] == "migrate-cache") {
 		localArgs := append([]string(nil), rest...)
 		if (rest[0] == "auth" || rest[0] == "doctor") && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
@@ -133,15 +162,15 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	}
 	cfg := eff.Config
 	credentialResolver := auth.NewCredentialResolver(src)
-	token := config.Token(src)
+	token := ""
+	if !opts.mcp && !opts.mcpServe {
+		token = config.Token(src)
+	}
 	live := opts.live
-	if opts.live || opts.mcp || opts.mcpServe {
+	if opts.live && !opts.mcp && !opts.mcpServe {
 		credential := credentialResolver.Resolve(context.Background(), eff)
 		if strings.TrimSpace(credential.Token) != "" {
 			token = credential.Token
-		}
-		if (opts.mcp || opts.mcpServe) && !opts.offline && credential.Present && strings.TrimSpace(credential.Token) != "" {
-			live = true
 		}
 	}
 	deps := buildStartupDeps(cfg, token, live)
@@ -504,87 +533,20 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 }
 
 func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
-	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
-		server.SetRuntimeContext(mcpRuntimeContext(deps))
-		return server, func() {}
-	}
-	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
-	if err != nil {
-		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
-		server.SetRuntimeContext(mcpRuntimeContext(deps))
-		return server, func() {}
-	}
-	svc, err := resolveService(store, deps)
-	if err != nil {
-		_ = store.Close()
-		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
-		server.SetRuntimeContext(mcpRuntimeContext(deps))
-		return server, func() {}
-	}
-	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
-	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
-	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
-	setMCPRepositoryDocsProviders(server.SetRepositoryDocsProviders, store, deps)
+	bootstrap := newMCPBootstrap(deps)
+	server := mcp.NewWithToolAccess(stdin, stdout, stderr, nil, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	server.SetToolBootstrap(bootstrap.ForTool)
+	server.SetBootstrapDiagnostic(bootstrap.Diagnostic)
+	server.SetServiceClient(bootstrap.ServiceClient)
 	server.SetRuntimeContext(mcpRuntimeContext(deps))
 	setMCPMaintenanceProviders(server.SetMaintenanceProviders, deps)
-	return server, func() { _ = store.Close() }
+	return server, bootstrap.Close
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
-	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
-		handler.SetRuntimeContext(mcpRuntimeContext(deps))
-		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
-		if err := transport.Serve(ctx); err != nil {
-			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-			return 1
-		}
-		return 0
-	}
-	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
-	if err != nil {
-		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
-		handler.SetRuntimeContext(mcpRuntimeContext(deps))
-		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
-		if err := transport.Serve(ctx); err != nil {
-			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-			return 1
-		}
-		return 0
-	}
-	defer store.Close()
-	svc, err := resolveService(store, deps)
-	if err != nil {
-		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
-		handler.SetRuntimeContext(mcpRuntimeContext(deps))
-		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
-		if err := transport.Serve(ctx); err != nil {
-			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-			return 1
-		}
-		return 0
-	}
-	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
-	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
-	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
-	setMCPRepositoryDocsProviders(handler.SetRepositoryDocsProviders, store, deps)
-	handler.SetRuntimeContext(mcpRuntimeContext(deps))
-	setMCPMaintenanceProviders(handler.SetMaintenanceProviders, deps)
-	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
-		repos, err := store.ListRepositories(ctx)
-		if err != nil {
-			var lockErr cache.ErrLockContention
-			if errors.As(err, &lockErr) {
-				return mcp.LockContentionReadiness(lockErr)
-			}
-			return mcp.Readiness{Ready: false, Code: "cache_unreadable", Message: err.Error()}
-		}
-		if len(repos) == 0 {
-			return mcp.Readiness{Ready: false, Code: "repo_unavailable", Message: "no repositories configured"}
-		}
-		return mcp.Readiness{Ready: true}
-	}})
+	handler, bootstrap := newMCPHTTPHandler(deps)
+	defer bootstrap.Close()
+	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: bootstrap.Readiness})
 	if err := transport.Serve(ctx); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1

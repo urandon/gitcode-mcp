@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"sync"
 
 	"gitcode-mcp/internal/config"
 )
@@ -19,6 +20,7 @@ type Result struct {
 }
 
 type CredentialResolver struct {
+	mu       sync.Mutex
 	provider config.CredentialProvider
 	result   *Result
 }
@@ -34,11 +36,24 @@ func NewCredentialResolverWithProvider(provider config.CredentialProvider) *Cred
 }
 
 func (r *CredentialResolver) Resolve(ctx context.Context, eff config.EffectiveConfig) Result {
+	if ctx.Err() != nil {
+		return cancelledResolution()
+	}
+	// MCP can now reach first-use credential diagnostics concurrently, without
+	// an eager startup result. Serialize that first use without making a second
+	// request wait behind a platform credential provider or cache transient state.
+	if !r.mu.TryLock() {
+		return Result{Source: "unavailable", ErrorClass: "credential-resolution-busy", Remediation: "Credential resolution is in progress; retry the explicit diagnostic or live operation."}
+	}
+	defer r.mu.Unlock()
 	if r.result != nil {
 		return *r.result
 	}
 	eff = normalizeEffectiveConfig(eff)
 	secret, status, _ := r.provider.Resolve(ctx, eff)
+	if ctx.Err() != nil {
+		return cancelledResolution()
+	}
 	result := Result{
 		Present:     status.Present,
 		Token:       secret.Value(),
@@ -49,6 +64,10 @@ func (r *CredentialResolver) Resolve(ctx context.Context, eff config.EffectiveCo
 	}
 	r.result = &result
 	return result
+}
+
+func cancelledResolution() Result {
+	return Result{Source: "unavailable", ErrorClass: "credential-resolution-cancelled", Remediation: "Credential resolution was cancelled; retry only if still needed."}
 }
 
 func (r *CredentialResolver) Status(ctx context.Context, eff config.EffectiveConfig) Result {

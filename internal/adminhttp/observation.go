@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/feedback"
+	"gitcode-mcp/internal/observability"
 )
 
 const observationAPIVersion = "1"
@@ -90,6 +91,7 @@ type AttentionItem struct {
 }
 
 type CacheObservation struct {
+	ObservationRefs       *observability.EntityRefs  `json:"observation_refs,omitempty"`
 	CacheRef              string                     `json:"cache_ref"`
 	PathFingerprint       string                     `json:"path_fingerprint,omitempty"`
 	StorageMode           string                     `json:"storage_mode,omitempty"`
@@ -129,20 +131,22 @@ type SchemaRecoveryObservation struct {
 }
 
 type RepositoryObservation struct {
-	RepoID        string                              `json:"repo_id"`
-	DisplayName   string                              `json:"display_name,omitempty"`
-	Aliases       []string                            `json:"aliases,omitempty"`
-	Scopes        []string                            `json:"scopes,omitempty"`
-	BindingState  string                              `json:"binding_state"`
-	Counts        CollectionCounts                    `json:"counts"`
-	Coverage      CoverageObservation                 `json:"coverage"`
-	Execution     ExecutionObservation                `json:"execution"`
-	Collections   []CollectionObservation             `json:"collections"`
-	RecentSync    []SyncEventObservation              `json:"recent_sync_events"`
-	Documentation *RepositoryDocumentationObservation `json:"documentation,omitempty"`
+	ObservationRefs *observability.EntityRefs           `json:"observation_refs,omitempty"`
+	RepoID          string                              `json:"repo_id"`
+	DisplayName     string                              `json:"display_name,omitempty"`
+	Aliases         []string                            `json:"aliases,omitempty"`
+	Scopes          []string                            `json:"scopes,omitempty"`
+	BindingState    string                              `json:"binding_state"`
+	Counts          CollectionCounts                    `json:"counts"`
+	Coverage        CoverageObservation                 `json:"coverage"`
+	Execution       ExecutionObservation                `json:"execution"`
+	Collections     []CollectionObservation             `json:"collections"`
+	RecentSync      []SyncEventObservation              `json:"recent_sync_events"`
+	Documentation   *RepositoryDocumentationObservation `json:"documentation,omitempty"`
 }
 
 type RepositoryDocumentationObservation struct {
+	ObservationRefs   *observability.EntityRefs               `json:"observation_refs,omitempty"`
 	State             string                                  `json:"state"`
 	Registered        bool                                    `json:"registered"`
 	RegistrationID    string                                  `json:"registration_id,omitempty"`
@@ -191,13 +195,14 @@ type RepositoryDocumentationRetention struct {
 }
 
 type RepositoryDocumentationSource struct {
-	SourceID         string `json:"source_registration_id"`
-	SourceGeneration int64  `json:"source_registration_generation"`
-	State            string `json:"state"`
-	GitStoreRef      string `json:"git_store_ref,omitempty"`
-	WorktreeRef      string `json:"worktree_ref,omitempty"`
-	CommitOID        string `json:"commit_oid,omitempty"`
-	PolicyHash       string `json:"policy_hash,omitempty"`
+	ObservationRefs  *observability.EntityRefs `json:"observation_refs,omitempty"`
+	SourceID         string                    `json:"source_registration_id"`
+	SourceGeneration int64                     `json:"source_registration_generation"`
+	State            string                    `json:"state"`
+	GitStoreRef      string                    `json:"git_store_ref,omitempty"`
+	WorktreeRef      string                    `json:"worktree_ref,omitempty"`
+	CommitOID        string                    `json:"commit_oid,omitempty"`
+	PolicyHash       string                    `json:"policy_hash,omitempty"`
 }
 
 type RepositoryDocumentationExclusionCount struct {
@@ -287,6 +292,7 @@ type StageError struct {
 }
 
 type JobObservation struct {
+	ObservationRefs     *observability.EntityRefs   `json:"observation_refs,omitempty"`
 	ID                  string                      `json:"id"`
 	Type                string                      `json:"type"`
 	CacheRef            string                      `json:"cache_ref,omitempty"`
@@ -376,6 +382,7 @@ type ProgressObservation struct {
 }
 
 type MaintenanceObservation struct {
+	ObservationRefs       *observability.EntityRefs               `json:"observation_refs,omitempty"`
 	RegistrationID        string                                  `json:"registration_id"`
 	CacheRef              string                                  `json:"cache_ref"`
 	RepoID                string                                  `json:"repo_id"`

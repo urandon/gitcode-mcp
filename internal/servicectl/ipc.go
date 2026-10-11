@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/observability"
 )
 
 const jsonrpcVersion = "2.0"
@@ -31,9 +33,10 @@ type RPCResponse struct {
 }
 
 type RPCError struct {
-	Code           int    `json:"code"`
-	Message        string `json:"message"`
-	DiagnosticCode string `json:"diagnostic_code,omitempty"`
+	Code           int                       `json:"code"`
+	Message        string                    `json:"message"`
+	DiagnosticCode string                    `json:"diagnostic_code,omitempty"`
+	Observation    *observability.QueryError `json:"observation,omitempty"`
 }
 
 type RPCDomainError struct {
@@ -83,6 +86,7 @@ type RPCServer struct {
 	Jobs                *JobManager
 	Maintenance         *MaintenanceManager
 	Admin               *adminhttp.Controller
+	Observability       *observability.Reader
 }
 
 type RPCClient struct {
@@ -115,44 +119,83 @@ func serveMemoryRPC(ctx context.Context, address string, server RPCServer, publi
 }
 
 func (s RPCServer) Serve(ctx context.Context, listener net.Listener) error {
-	errCh := make(chan error, 1)
-	go func() {
-		<-ctx.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
 		_ = listener.Close()
-	}()
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				select {
-				case <-ctx.Done():
-					errCh <- nil
-				default:
-					errCh <- err
-				}
-				return
-			}
-			go s.handleConn(ctx, conn)
+		close(closed)
+	})
+	var handlers sync.WaitGroup
+	defer func() {
+		cancel()
+		if !stop() {
+			<-closed
 		}
+		_ = listener.Close()
+		// Each handler owns a cancellation callback that closes its established
+		// socket. Returning from Serve means all accepted handlers have joined.
+		handlers.Wait()
 	}()
-	return <-errCh
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		handlers.Add(1)
+		go func() {
+			defer handlers.Done()
+			s.handleConn(ctx, conn)
+		}()
+	}
 }
 
 func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	defer conn.Close()
-	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
+	limited := &io.LimitedReader{R: conn, N: maxRPCRequestBytes + 1}
+	dec := json.NewDecoder(limited)
 	for {
-		var req RPCRequest
-		if err := dec.Decode(&req); err != nil {
+		readDeadline := time.Now().Add(observability.ReadBudget)
+		if deadline, ok := ctx.Deadline(); ok && deadline.Before(readDeadline) {
+			readDeadline = deadline
+		}
+		_ = conn.SetReadDeadline(readDeadline)
+		// Keep one decoder so pipelined values retain normal JSON-stream framing
+		// without a recursively growing chain of buffered replay readers.
+		limited.N = maxRPCRequestBytes + 1
+		before := dec.InputOffset()
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil || len(raw) > maxRPCRequestBytes || dec.InputOffset()-before > maxRPCRequestBytes {
 			return
 		}
-		resp := s.handleRequest(ctx, req)
+		var req RPCRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return
+		}
+		var resp RPCResponse
+		if observationMethod(req.Method) {
+			_ = conn.SetWriteDeadline(readDeadline)
+			if len(raw) > observability.MaxReadRequestBytes+observationEnvelopeBytes || strictObservationEnvelope(raw) != nil {
+				// The invalid envelope's ID is untrusted: structured or duplicate
+				// IDs may carry a raw private body. Reflect none of it in an error.
+				resp = RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32602, Message: "invalid observation request", DiagnosticCode: "invalid_query"}}
+			} else {
+				readCtx, cancel := context.WithDeadline(ctx, readDeadline)
+				resp = s.handleRequest(readCtx, req)
+				cancel()
+			}
+		} else {
+			resp = s.handleRequest(ctx, req)
+		}
 		if err := enc.Encode(resp); err != nil {
 			return
 		}
+		_ = conn.SetWriteDeadline(time.Time{})
 	}
 }
 
@@ -177,6 +220,10 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 		if errors.As(err, &coded) {
 			resp.Error.DiagnosticCode = coded.DiagnosticCode()
 		}
+		var query observability.QueryError
+		if observationMethod(req.Method) && errors.As(err, &query) {
+			resp.Error.Observation = &query
+		}
 		return resp
 	}
 	resp.Result = result
@@ -184,6 +231,9 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 }
 
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if observationMethod(method) {
+		return s.dispatchObservation(ctx, method, params)
+	}
 	switch method {
 	case "Service.Status":
 		return s.serviceStatus(ctx)
@@ -473,6 +523,9 @@ func decodeJobID(params json.RawMessage) (string, error) {
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params any, result any) error {
+	if observationMethod(method) {
+		return c.callObservation(ctx, method, params, result)
+	}
 	network := c.Network
 	if network == "" {
 		network = "unix"

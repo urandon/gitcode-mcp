@@ -1160,7 +1160,7 @@ func TestEntrypointMCPStartupFallback(t *testing.T) {
 		if len(lines) != 2 {
 			t.Fatalf("stdout lines=%d %q", len(lines), stdout.String())
 		}
-		assertStartupToolsList(t, lines[0], "schema_incompatible")
+		assertStartupToolsList(t, lines[0], "")
 		assertStartupDoctor(t, lines[1], "schema_incompatible", "upgrade")
 	})
 
@@ -1179,7 +1179,7 @@ func TestEntrypointMCPStartupFallback(t *testing.T) {
 		if len(lines) != 2 {
 			t.Fatalf("stdout lines=%d %q", len(lines), stdout.String())
 		}
-		assertStartupToolsList(t, lines[0], "startup-failure")
+		assertStartupToolsList(t, lines[0], "")
 		assertStartupDoctor(t, lines[1], "startup-failure", "doctor")
 	})
 }
@@ -1230,8 +1230,14 @@ func assertStartupToolsList(t *testing.T, line string, wantCode string) {
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
 		t.Fatalf("decode tools/list: %v line=%q", err, line)
 	}
-	if len(resp.Result.Tools) != 1 || resp.Result.Tools[0].Name != "doctor" {
-		t.Fatalf("tools/list tools=%+v", resp.Result.Tools)
+	names := map[string]bool{}
+	for _, tool := range resp.Result.Tools {
+		names[tool.Name] = true
+	}
+	for _, name := range []string{"doctor", "service_observability", "service_metrics", "service_events"} {
+		if !names[name] {
+			t.Fatalf("tools/list missing %s", name)
+		}
 	}
 	if resp.Result.StartupDiagnostic.ErrorClass != wantCode {
 		t.Fatalf("diagnostic=%q want %q", resp.Result.StartupDiagnostic.ErrorClass, wantCode)
@@ -1328,7 +1334,7 @@ func TestEntrypointMCPServeLiveFlagRouting(t *testing.T) {
 	}
 }
 
-func TestEntrypointMCPAutoLiveWithKeychainCredential(t *testing.T) {
+func TestEntrypointMCPDefersKeychainAndLiveProviderUntilRequestedTool(t *testing.T) {
 	src := newTestSource(t)
 	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
 	old := mcpRoute
@@ -1343,8 +1349,8 @@ func TestEntrypointMCPAutoLiveWithKeychainCredential(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
 	}
-	if !got.GitCode.Live || got.GitCode.Token != "test-token" {
-		t.Fatalf("expected MCP auto-live with keychain token, got %#v", got.GitCode)
+	if got.GitCode.Live || got.GitCode.Token != "" {
+		t.Fatal("MCP startup resolved a credential or selected a live provider before a requested operation")
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
 		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())

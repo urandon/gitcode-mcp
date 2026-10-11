@@ -81,6 +81,7 @@ type Config struct {
 	ApplyRAGRepair                     RAGRepairProvider
 	Metrics                            *observability.Metrics
 	Observation                        *observability.Collector
+	Observability                      *observability.Reader
 }
 
 type Controller struct {
@@ -145,11 +146,16 @@ func (c *Controller) Start(ctx context.Context) (Status, error) {
 		}
 	}()
 	go func() { _ = c.server.Serve(ln) }()
+	var pollers sync.WaitGroup
 	if c.cfg.Snapshot != nil {
-		go func() { defer close(pollDone); c.pollObservation(ctx) }()
-	} else {
-		close(pollDone)
+		pollers.Add(1)
+		go func() { defer pollers.Done(); c.pollObservation(ctx) }()
 	}
+	if c.cfg.Observability != nil {
+		pollers.Add(1)
+		go func() { defer pollers.Done(); c.pollObservability(ctx) }()
+	}
+	go func() { pollers.Wait(); close(pollDone) }()
 	return c.status, nil
 }
 
@@ -239,6 +245,9 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
 	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)
+	mux.HandleFunc("GET /api/admin/v1/observability", c.getObservability)
+	mux.HandleFunc("GET /api/admin/v1/observability/metrics", c.getObservabilityMetrics)
+	mux.HandleFunc("GET /api/admin/v1/observability/events", c.getObservabilityEvents)
 	mux.HandleFunc("/", c.serveAsset)
 	return c.observeRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)
