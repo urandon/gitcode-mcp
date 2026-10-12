@@ -117,3 +117,57 @@ func TestAuthoritySilentPrivateSocketCancellationJoins(t *testing.T) {
 		t.Error("private caller remained blocked")
 	}
 }
+
+func TestAuthorityPrivateSocketRetainsDeclaredErrorIdentity(t *testing.T) {
+	for _, code := range []authority.Code{authority.InvalidContract, authority.Unavailable, authority.Unsupported, authority.NoAuthority, authority.PolicyDenied, authority.Conflict, authority.RevisionConflict, authority.InitializationRequired, "synthetic-private"} {
+		t.Run(string(code), func(t *testing.T) {
+			dir, err := shortWorkspaceTemp(t, "a1-")
+			if err != nil {
+				t.Fatal("short private fixture unavailable")
+			}
+			path := filepath.Join(dir, "s")
+			listener, err := net.Listen("unix", path)
+			if err != nil {
+				t.Fatal("private error fixture unavailable")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				closed := make(chan struct{})
+				stop := context.AfterFunc(ctx, func() { _ = conn.Close(); close(closed) })
+				defer func() {
+					if !stop() {
+						<-closed
+					}
+				}()
+				var req RPCRequest
+				if json.NewDecoder(conn).Decode(&req) != nil {
+					return
+				}
+				_ = json.NewEncoder(conn).Encode(RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID, Error: &RPCError{Code: -32000, Message: "synthetic-private-peer-body", DiagnosticCode: string(code)}})
+			}()
+			t.Cleanup(func() {
+				cancel()
+				_ = listener.Close()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("private error peer not joined")
+				}
+			})
+			c := RPCClient{Network: "unix", Address: path}
+			r := authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}
+			want := code
+			if code == "synthetic-private" {
+				want = authority.Unsupported
+			}
+			requireAuthorityCode(t, c.Call(ctx, "AuthorityV1.Negotiate", r, &authority.Negotiation{}), want)
+		})
+	}
+}
