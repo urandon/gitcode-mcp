@@ -107,7 +107,7 @@ func TestAuditIsContentFreeAndProjectionResetCannotDeleteAuthority(t *testing.T)
 
 func TestNewerSchemaAndPhysicalReplacementFailClosed(t *testing.T) {
 	s, registry, dir := testStore(t)
-	if _, err := s.db.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := s.db.Exec("PRAGMA user_version=999"); err != nil {
 		t.Fatal("future schema fixture failed")
 	}
 	_ = s.Close()

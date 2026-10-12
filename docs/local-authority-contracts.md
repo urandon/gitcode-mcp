@@ -1,7 +1,8 @@
 # Local authority contracts
 
 Status: L1 contracts (#180) and the L2 tracker domain/store (#181), epic #179.
-This is not an enabled local project runtime. Git knowledge, runtime ownership
+This is not an enabled local project runtime. The L3 document contract and owned
+Git primitives are being implemented, but full Git knowledge, runtime ownership
 integration, recovery, CLI/MCP workflows, Admin, backup and integrated feature
 acceptance remain #182–#186. Current `authority.v1`
 negotiation reports `available: false`, an empty implemented-method list and
@@ -214,9 +215,18 @@ the complete UI cohort; #186 gates integrated recovery and release.
 not an adapter over `internal/cache`. Its dedicated database application/schema
 identity, manifest UUID and random store-instance UUID are checked before writer
 admission. Explicit initialization never replaces an existing database. Existing
-open never initializes, promotes a cache or silently migrates. Newer/older or
-foreign/damaged schemas fail closed; bytes and identity are preserved for the
+open never initializes, promotes a cache or silently migrates. Supported database
+versions are 1 and 2: existing v1 preserves its exact original catalog and tracker
+operations; fresh explicit initialization selects v2's dedicated knowledge
+metadata/journal catalog. Manifest, document and transport schema versions are
+independent of the database version. Unknown or foreign/damaged schemas fail
+closed; bytes and identity are preserved for the
 CLI-only migration/backup/recovery cohort (#186).
+
+The v2 catalog alone does not initialize Git or enable document workflows. Its
+populated setup/journal admission and integrity are part of the remaining L3
+implementation; current negotiation remains contracts-only. There is no automatic
+v1-to-v2 migration, and the existing cache schema is unrelated to this store.
 
 The machine registry is global to the current OS user across every runtime
 profile, not configurable per project/daemon. Kernel leases use project UUID.

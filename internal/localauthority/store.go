@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"gitcode-mcp/internal/authority"
@@ -21,6 +22,7 @@ type Store struct {
 	lease     *lease
 	manifest  authority.Manifest
 	instance  authority.UUID
+	schema    int
 	directory string // private, never serialized
 	fenced    bool
 	closed    bool
@@ -38,6 +40,16 @@ type Inspection struct {
 // prepareEmpty never publishes project ownership or the final database name.
 // Its staging directory is unique to one unacknowledged initialization.
 func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, instance authority.UUID, fault func(string) error) (*Store, error) {
+	return prepareEmptySchema(ctx, directory, m, instance, fault, schemaVersion)
+}
+
+// The public fresh initialization path selects v2 explicitly. Existing v1 is
+// opened and validated separately, never passed through this DDL constructor.
+func prepareEmptySchema(ctx context.Context, directory string, m authority.Manifest, instance authority.UUID, fault func(string) error, version int) (*Store, error) {
+	ddl := authoritySchemaSQL(version)
+	if ddl == "" {
+		return nil, authority.Error{Code: authority.Unsupported}
+	}
 	if m.Validate() != nil || !m.ID.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
@@ -48,7 +60,7 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 	if err = qualifyFilesystem(path); err != nil {
 		return nil, err
 	}
-	s := &Store{manifest: m, instance: instance, directory: path, fault: fault}
+	s := &Store{manifest: m, instance: instance, directory: path, fault: fault, schema: version}
 	ok := false
 	defer func() {
 		if !ok {
@@ -84,7 +96,7 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 		return nil, storageError(ctx)
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, schemaSQL); err != nil {
+	if _, err = tx.ExecContext(ctx, ddl); err != nil {
 		return nil, storageError(ctx)
 	}
 	body, err := json.Marshal(m)
@@ -99,7 +111,10 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 			return nil, storageError(ctx)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "PRAGMA application_id=1195593025; PRAGMA user_version=1"); err != nil {
+	if _, err = tx.ExecContext(ctx, "PRAGMA application_id=1195593025"); err != nil {
+		return nil, storageError(ctx)
+	}
+	if _, err = tx.ExecContext(ctx, "PRAGMA user_version="+strconv.Itoa(version)); err != nil {
 		return nil, storageError(ctx)
 	}
 	if err = s.inject("init_schema"); err != nil {
@@ -256,10 +271,13 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version) != nil {
 		return Error{Corrupt}
 	}
-	if version != schemaVersion {
+	if authoritySchemaSQL(version) == "" {
 		return authority.Error{Code: authority.Unsupported}
 	}
-	if err := checkSchema(ctx, tx); err != nil {
+	if s.schema != 0 && s.schema != version {
+		return Error{Corrupt}
+	}
+	if err := checkSchema(ctx, tx, version); err != nil {
 		return err
 	}
 	var id, instance, manifest string
@@ -285,6 +303,18 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	}
 	s.manifest = m
 	s.instance = authority.UUID(instance)
+	s.schema = version
+	if version == 2 {
+		// Keep populated knowledge unavailable until the next L3 increment
+		// supplies strict journal/metadata integrity and explicit setup. The
+		// empty v2 catalog cannot activate unimplemented document workflows.
+		for _, table := range []string{"knowledge_setup", "document_operations"} {
+			var count int
+			if tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count) != nil || count != 0 {
+				return Error{Corrupt}
+			}
+		}
+	}
 	return nil
 }
 
@@ -342,7 +372,7 @@ func verifyHeader(path string) error {
 	if _, err = io.ReadFull(f, header[:]); err != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != applicationID {
 		return Error{Corrupt}
 	}
-	if binary.BigEndian.Uint32(header[60:64]) != schemaVersion {
+	if authoritySchemaSQL(int(binary.BigEndian.Uint32(header[60:64]))) == "" {
 		return authority.Error{Code: authority.Unsupported}
 	}
 	return nil

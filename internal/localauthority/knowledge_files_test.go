@@ -210,3 +210,68 @@ func TestKnowledgeFilesRejectForeignStateAndPreserveEvidence(t *testing.T) {
 	_, _, err = g.verifyLayout()
 	requireKnowledgeError(t, err, KnowledgeCorrupt)
 }
+
+func TestKnowledgeFilesPairedRefLocksArePreservedAndFenced(t *testing.T) {
+	for _, name := range []string{"heads/knowledge", "pins/" + string(knowledgeTestOperation)} {
+		for _, equal := range []bool{false, true} {
+			t.Run(name+map[bool]string{true: "-equal", false: "-conflicting"}[equal], func(t *testing.T) {
+				g := knowledgeRepositoryFixture(t)
+				c, _ := planKnowledgeCandidate(nil, authority.EmptyKnowledgeRef, knowledgeTestOperation, knowledgeTestEntity, []byte("paired lock fixture"), false)
+				writeKnowledgeCandidateFixture(t, g, c)
+				if g.publishRef(name, authority.EmptyKnowledgeRef, c.commit.oid) != nil {
+					t.Fatal("finalized ref fixture failed")
+				}
+				lockedOID := strings.Repeat("b", 64)
+				if equal {
+					lockedOID = c.commit.oid
+				}
+				lock := filepath.Join(g.directory, "refs", name) + ".lock"
+				if os.WriteFile(lock, []byte(lockedOID+"\n"), 0600) != nil {
+					t.Fatal("paired lock fixture failed")
+				}
+				_, _, err := g.verifyLayout()
+				requireKnowledgeError(t, err, KnowledgeCorrupt)
+				for _, expected := range []string{authority.EmptyKnowledgeRef, c.commit.oid} {
+					requireKnowledgeError(t, g.publishRef(name, expected, c.commit.oid), DocumentRecoveryRequired)
+				}
+				final, _ := os.ReadFile(filepath.Join(g.directory, "refs", name))
+				pending, _ := os.ReadFile(lock)
+				if string(final) != c.commit.oid+"\n" || string(pending) != lockedOID+"\n" {
+					t.Fatal("ambiguous paired evidence was changed or removed")
+				}
+			})
+		}
+	}
+}
+
+func TestKnowledgeFilesInterruptedUpdateNeedsOriginalJournalProof(t *testing.T) {
+	g := knowledgeRepositoryFixture(t)
+	c, _ := planKnowledgeCandidate(nil, authority.EmptyKnowledgeRef, knowledgeTestOperation, knowledgeTestEntity, []byte("original"), false)
+	writeKnowledgeCandidateFixture(t, g, c)
+	if g.publishRef("heads/knowledge", authority.EmptyKnowledgeRef, c.commit.oid) != nil {
+		t.Fatal("original ref fixture failed")
+	}
+	entries, _ := decodeDocumentTree(c.documents.data)
+	next, _ := planKnowledgeCandidate(entries, c.commit.oid, knowledgeTestOperation, knowledgeTestEntity, []byte("next"), false)
+	writeKnowledgeCandidateFixture(t, g, next)
+	injected := errors.New("synthetic update ref interruption")
+	g.fault = func(at string) error {
+		if at == "knowledge_ref_file" {
+			return injected
+		}
+		return nil
+	}
+	if !errors.Is(g.publishRef("heads/knowledge", c.commit.oid, next.commit.oid), injected) {
+		t.Fatal("update ref interruption was not observed")
+	}
+	g.fault = nil
+	// The basic primitive cannot assert journal ownership just from two OIDs.
+	// The subsequent SQL recovery layer must prove the original bound operation
+	// before a separate explicit recovery transition can publish this pair.
+	requireKnowledgeError(t, g.publishRef("heads/knowledge", c.commit.oid, next.commit.oid), DocumentRecoveryRequired)
+	final, _ := g.readRef("heads/knowledge")
+	locked, _ := g.readRef("heads/knowledge.lock")
+	if final != c.commit.oid || locked != next.commit.oid {
+		t.Fatal("interrupted update lost its original ref/lock evidence")
+	}
+}

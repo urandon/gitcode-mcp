@@ -145,14 +145,20 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 		err = Error{KnowledgeCorrupt}
 		return
 	}
+	headNames := map[string]bool{}
 	for _, entry := range entries {
 		if entry.Name() != "knowledge" && entry.Name() != "knowledge.lock" {
 			err = Error{KnowledgeCorrupt}
 			return
 		}
+		headNames[entry.Name()] = true
 		if _, err = g.readRef(filepath.Join("heads", entry.Name())); err != nil {
 			return
 		}
+	}
+	if headNames["knowledge"] && headNames["knowledge.lock"] {
+		err = Error{KnowledgeCorrupt}
+		return
 	}
 	entries, err = knowledgeNames(filepath.Join(g.directory, "refs", "pins"), maxRetainedKnowledgePins*2)
 	if err != nil {
@@ -162,6 +168,13 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 	for _, entry := range entries {
 		name := strings.TrimSuffix(entry.Name(), ".lock")
 		if !authority.UUID(name).Valid() {
+			err = Error{KnowledgeCorrupt}
+			return
+		}
+		if seenPins[name] {
+			// A paired final/lock is ambiguous evidence, even if both OIDs
+			// match. It is not one ordinary retained pin. Only an original
+			// journal-owned recovery transition may later interpret the pair.
 			err = Error{KnowledgeCorrupt}
 			return
 		}
@@ -338,7 +351,8 @@ func (g knowledgeRepository) readRef(name string) (string, error) {
 }
 
 // publishRef is serialized by the authority writer, after verified SQL binding.
-// A surviving exact lock can resume; a partial/foreign lock is preserved/fenced.
+// An exact unborn-ref lock can resume. Paired final/lock recovery requires an
+// explicit journal-owned transition; partial/foreign evidence is preserved.
 // It never implements a hidden fetch, force-update or weaker ref acknowledgement.
 func (g knowledgeRepository) publishRef(name, expected, next string) error {
 	if !knowledgeRefName(name) || strings.HasSuffix(name, ".lock") || !knowledgeOIDValid(expected, true) || !knowledgeOIDValid(next, false) {
@@ -347,6 +361,15 @@ func (g knowledgeRepository) publishRef(name, expected, next string) error {
 	current, err := g.readRef(name)
 	if err != nil {
 		return err
+	}
+	if current != authority.EmptyKnowledgeRef {
+		if _, e := os.Lstat(filepath.Join(g.directory, "refs", name) + ".lock"); e == nil {
+			// This primitive has no journal proof authorizing a paired-state
+			// recovery. Do not infer ownership/cleanup from current == next.
+			return Error{DocumentRecoveryRequired}
+		} else if !os.IsNotExist(e) {
+			return Error{KnowledgeCorrupt}
+		}
 	}
 	if current != expected && current != next {
 		return Error{DocumentRecoveryRequired}
