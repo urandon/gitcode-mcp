@@ -175,6 +175,12 @@ func writeObservationError(w http.ResponseWriter, err error) {
 // Compact invalidation only, from an owned poller joined at daemon shutdown.
 // This intentionally bypasses the broad Admin/cache/feedback snapshot provider.
 func (c *Controller) pollObservability(ctx context.Context) {
+	c.pollObservabilityWithWait(ctx, waitObservabilityInterval)
+}
+
+// The wait seam qualifies ordering without inferring timer behavior from UTC
+// event timestamps. It is internal; the product always uses a fresh timer.
+func (c *Controller) pollObservabilityWithWait(ctx context.Context, wait func(context.Context, time.Duration) bool) {
 	previous := ""
 	for {
 		if ctx.Err() != nil {
@@ -186,12 +192,19 @@ func (c *Controller) pollObservability(ctx context.Context) {
 		}
 		// Measure from completion of the actual publication. A fixed ticker can
 		// retain a tick while append is delayed and burst on the next iteration.
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !wait(ctx, time.Second) {
 			return
-		case <-timer.C:
 		}
+	}
+}
+
+func waitObservabilityInterval(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
