@@ -97,6 +97,19 @@ When cache identity evidence conflicts, the text and JSON diagnostics expose onl
 
 ## Failure and restart behavior
 
+Private socket RPC callers apply their context deadline to the established
+connection, not only its initial dial. Cancellation closes that call's socket
+and joins its cancellation callback; another concurrent call is independent.
+Generic methods retain the caller's budget rather than inheriting observation's
+two-second read budget. A caller without a deadline has no implicit new timeout,
+but explicit cancellation still interrupts a stalled transfer.
+
+There is no automatic request replay. A lost or cancelled reply does not prove
+that an admitted job or local mutation was rolled back, and closing the client
+socket is not `Jobs.Cancel`. Inspect the durable job/receipt and use the existing
+explicit cancellation or same-key recovery contract before retrying a write.
+Observation retains its separate capability, validation and response-size limits.
+
 The registry and bounded job history survive daemon restart. Active jobs restored after a crash become `interrupted`; the next reconciliation validates the cache again and safely reschedules incomplete work. Identity replacement, unreadable caches, sync failures, and index failures become explicit degraded states. Startup validates registered caches through a fixed four-worker pool behind one global one-second inspection budget; filesystem canonicalization and SQLite inspection are both inside that boundary. Registry size therefore cannot grow pre-listener latency or permanently blocked inspection workers without bound. An OS or host-policy filesystem operation that does not observe context cancellation disables the affected and not-yet-inspected registrations as `cache_inspection_timeout`; the control socket still becomes available. Durable sync-stage recovery begins only after the control endpoint is published, and affected cache writer authorities remain fenced until recovery finishes or its terminal failure is durably recorded. If either recovery or that persistence fails, the interrupted job and writer fence remain in place for a later restart. A blocked recovery stays visible as an interrupted job without preventing cached status and diagnostic reads. The diagnostic tells operators to grant the installed service access to the cache location or use foreground service mode, without returning the private path. A later successful daemon restart restores the prior enabled state through normal identity validation. A persisted enrollment whose configuration snapshot hash or cache authority no longer matches its registration is disabled as `config_snapshot_invalid`; reconciliation remains blocked until the snapshot is repaired and revalidated.
 
 Sync and RAG failures are tracked independently. Each failed stage keeps a sanitized error class and uses persisted exponential retry backoff from one minute up to 64 minutes; success of that same stage clears its failure state. A backed-off stage does not prevent healthy work in the other stage. Disabling a registration is reversible and does not mutate cache content.
