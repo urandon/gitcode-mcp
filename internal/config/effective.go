@@ -588,24 +588,36 @@ func projectYAMLKeys(n *yaml.Node, depth int, budget *int) (bool, error) {
 	if n.Kind == yaml.AliasNode {
 		return projectYAMLKeys(n.Alias, depth+1, budget)
 	}
-	if n.Kind == yaml.SequenceNode {
-		for _, child := range n.Content {
-			found, err := projectYAMLKeys(child, depth+1, budget)
-			if found || err != nil {
-				return found, err
-			}
-		}
-		return false, nil
-	}
 	if n.Kind != yaml.MappingNode {
 		return false, nil
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		switch strings.ToLower(n.Content[i].Value) {
+		key := n.Content[i]
+		for key.Kind == yaml.AliasNode {
+			(*budget)--
+			if *budget < 0 || key.Alias == nil {
+				return false, errors.New("configuration merge traversal limit")
+			}
+			key = key.Alias
+		}
+		switch strings.ToLower(key.Value) {
 		case "project", "local_projects", "authority":
 			return true, nil
-		case "<<":
-			found, err := projectYAMLKeys(n.Content[i+1], depth+1, budget)
+		}
+		if key.Tag == "!!merge" {
+			value := n.Content[i+1]
+			// Match legacyYAMLScalars: a merge sequence is syntax, not an
+			// extra visited node/level. Each source is inspected at depth+1.
+			if value.Kind == yaml.SequenceNode {
+				for _, child := range value.Content {
+					found, err := projectYAMLKeys(child, depth+1, budget)
+					if found || err != nil {
+						return found, err
+					}
+				}
+				continue
+			}
+			found, err := projectYAMLKeys(value, depth+1, budget)
 			if found || err != nil {
 				return found, err
 			}
