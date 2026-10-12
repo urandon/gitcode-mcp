@@ -3,6 +3,7 @@ package localauthority
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"gitcode-mcp/internal/authority"
 	"strings"
 )
@@ -72,6 +73,10 @@ func checkLogicalRows(ctx context.Context, tx *sql.Tx, project authority.UUID) e
 		if v.Citation.Kind == authority.Document {
 			_ = rows.Close()
 			return Error{Corrupt}
+		}
+		if err := checkHistoricalReferences(ctx, tx, v); err != nil {
+			_ = rows.Close()
+			return err
 		}
 	}
 	if rows.Err() != nil {
@@ -166,6 +171,116 @@ func checkActiveRelations(ctx context.Context, tx *sql.Tx, project authority.UUI
 	}
 	if tx.QueryRowContext(ctx, `SELECT count(*) FROM (SELECT from_id,to_id FROM relations WHERE relation='label' GROUP BY from_id,to_id HAVING count(*)>1)`).Scan(&invalid) != nil || invalid != 0 {
 		return Error{Corrupt}
+	}
+	return checkActiveBlocks(ctx, tx)
+}
+
+// Validate the existing snapshot once in O(vertices + edges), rather than run
+// one recursive reachability/count query per edge. The edge bound also bounds
+// both maps and the queue to at most 8192 distinct endpoint identities.
+func checkActiveBlocks(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT CASE WHEN length(from_id)=36 THEN from_id END,
+ CASE WHEN length(to_id)=36 THEN to_id END FROM relations WHERE relation='blocks' LIMIT 4097`)
+	if err != nil {
+		return storageError(ctx)
+	}
+	defer rows.Close()
+	adjacent := map[authority.UUID][]authority.UUID{}
+	indegree := map[authority.UUID]int{}
+	edges := 0
+	for rows.Next() {
+		var from, to authority.UUID
+		if rows.Scan(&from, &to) != nil || !from.Valid() || !to.Valid() {
+			return Error{Corrupt}
+		}
+		edges++
+		if edges > maxActiveBlocks {
+			return Error{Capacity}
+		}
+		adjacent[from] = append(adjacent[from], to)
+		if _, ok := indegree[from]; !ok {
+			indegree[from] = 0
+		}
+		indegree[to]++
+	}
+	if rows.Err() != nil {
+		return storageError(ctx)
+	}
+	_ = rows.Close()
+	queue := make([]authority.UUID, 0, len(indegree))
+	for id, degree := range indegree {
+		if degree == 0 {
+			queue = append(queue, id)
+		}
+	}
+	for head := 0; head < len(queue); head++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		for _, to := range adjacent[queue[head]] {
+			indegree[to]--
+			if indegree[to] == 0 {
+				queue = append(queue, to)
+			}
+		}
+	}
+	if len(queue) != len(indegree) {
+		return Error{Corrupt}
+	}
+	return nil
+}
+
+func checkHistoricalReferences(ctx context.Context, tx *sql.Tx, view authority.EntityView) error {
+	if view.Tombstone {
+		if view.Citation.Revision == 1 {
+			return Error{Corrupt}
+		}
+		var later int
+		if tx.QueryRowContext(ctx, "SELECT count(*) FROM revisions WHERE entity_id=? AND revision>?", view.Citation.EntityID, view.Citation.Revision).Scan(&later) != nil || later != 0 {
+			return Error{Corrupt}
+		}
+		return nil
+	}
+	var refs []authority.Citation
+	switch view.Citation.Kind {
+	case authority.Comment:
+		var payload authority.CommentPayload
+		if authority.DecodeJSON(view.Payload, &payload) != nil {
+			return Error{Corrupt}
+		}
+		var original string
+		if tx.QueryRowContext(ctx, `SELECT CASE WHEN length(CAST(payload AS BLOB))<=516096 THEN payload END FROM revisions WHERE entity_id=? AND revision=1`, view.Citation.EntityID).Scan(&original) != nil {
+			return Error{Corrupt}
+		}
+		var first authority.CommentPayload
+		if authority.DecodeJSON([]byte(original), &first) != nil || first.Issue != payload.Issue {
+			return Error{Corrupt}
+		}
+		refs = []authority.Citation{payload.Issue}
+	case authority.Link:
+		var payload authority.LinkPayload
+		if authority.DecodeJSON(view.Payload, &payload) != nil || !validRelationShape(payload) {
+			return Error{Corrupt}
+		}
+		refs = []authority.Citation{payload.From, payload.To}
+	}
+	for _, ref := range refs {
+		var matches int
+		if ref.ProjectID != view.Citation.ProjectID || tx.QueryRowContext(ctx, `SELECT count(*) FROM entities e JOIN revisions r ON r.entity_id=e.entity_id WHERE e.entity_id=? AND e.kind=? AND r.revision=? AND r.sequence<? AND r.tombstone=0`, ref.EntityID, ref.Kind, ref.Revision, view.ProjectSequence).Scan(&matches) != nil || matches != 1 {
+			return Error{Corrupt}
+		}
+		current, err := scanView(tx.QueryRowContext(ctx, "SELECT "+revisionColumns+` FROM entities e JOIN revisions r ON r.entity_id=e.entity_id WHERE e.entity_id=? AND r.sequence=(SELECT max(sequence) FROM revisions WHERE entity_id=? AND sequence<?)`, ref.EntityID, ref.EntityID, view.ProjectSequence), view.Citation.ProjectID)
+		if err != nil || current.Tombstone || current.Citation.Kind != ref.Kind {
+			return Error{Corrupt}
+		}
+		if ref.Kind == authority.Label || ref.Kind == authority.Milestone {
+			var state struct {
+				Archived bool `json:"archived"`
+			}
+			if json.Unmarshal(current.Payload, &state) != nil || state.Archived {
+				return Error{Corrupt}
+			}
+		}
 	}
 	return nil
 }

@@ -89,12 +89,7 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 	}
 	keyHash := hash([]byte(string(m.Intent.ProjectID) + "\x00" + m.Intent.IdempotencyKey))
 	m.Payload = payload
-	m.Intent.IdempotencyKey = ""
-	canonical, _ := json.Marshal(struct {
-		Request authority.MutationRequest
-		Actor   string
-	}{m, actor.ID})
-	intentHash := hash(canonical)
+	intentHash := mutationFingerprint(m, actor.ID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ctx.Err() != nil {
@@ -276,6 +271,15 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 		return zero, ctx.Err()
 	}
 	return r, nil
+}
+
+func mutationFingerprint(m authority.MutationRequest, actor string) string {
+	m.Intent.IdempotencyKey = ""
+	canonical, _ := json.Marshal(struct {
+		Request authority.MutationRequest
+		Actor   string
+	}{m, actor})
+	return hash(canonical)
 }
 
 func (s *Store) inject(phase string) error {

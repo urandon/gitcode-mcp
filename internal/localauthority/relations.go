@@ -9,6 +9,8 @@ import (
 	"gitcode-mcp/internal/authority"
 )
 
+const maxActiveBlocks = 4096
+
 // A reference binds an immutable revision, but new relationships additionally
 // require a live current target. Historical reads remain available afterward.
 func reference(ctx context.Context, tx *sql.Tx, c authority.Citation) error {
@@ -110,6 +112,13 @@ func validateRelationships(ctx context.Context, tx *sql.Tx, id authority.UUID, m
 		case "blocks":
 			if p.From.Kind != authority.Issue || p.To.Kind != authority.Issue {
 				return authority.Error{Code: authority.InvalidContract}
+			}
+			var edges int
+			if tx.QueryRowContext(ctx, "SELECT count(*) FROM relations WHERE relation='blocks' AND link_id<>?", id).Scan(&edges) != nil {
+				return storageError(ctx)
+			}
+			if edges >= maxActiveBlocks {
+				return Error{Capacity}
 			}
 			// UNION deduplicates cycles in damaged data, and the hard cap bounds
 			// fanout/memory. At capacity, refuse rather than guess acyclicity.

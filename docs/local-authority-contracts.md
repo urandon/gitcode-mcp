@@ -281,7 +281,10 @@ labels/milestones archive; links create/update/tombstone without erasing history
 All referenced immutable revisions must exist and current targets must be live.
 Label assignments are issue-to-label and unique; milestone membership is singular
 per issue. `evidence_for` is comment/document-to-issue; `blocks` is issue-to-issue
-and rejects cycles under a finite traversal budget. `relates_to` connects distinct
+and rejects cycles under a finite traversal budget. At most 4096 active `blocks`
+edges are admitted, so supported mutations cannot build a graph whose restart
+validation exceeds the same bound. A coherently oversized external graph returns
+`authority_capacity`, not silent trimming or an acyclicity guess. `relates_to` connects distinct
 non-link entities. Tombstoned links cannot be resurrected; new relationships get
 new UUIDs/aliases. No irreversible purge/reset API exists. Document mutations are
 unsupported here: SQLite must never gain Markdown bytes while L3 is absent.
@@ -293,8 +296,13 @@ entities. Inspection validates one consistent read snapshot, not several samples
 mixed across concurrent commits. Projection reset/corruption cannot delete or
 block canonical entity history. Admission checks exact schema/constraint/trigger
 guards, contiguous sequence/revision/alias domains, canonical revision/receipt
-values, audit-to-receipt/revision/actor/time bindings and active relation parity
-with current non-tombstoned links in that same bounded snapshot. Audit fields
+values, recomputed canonical operation/payload/actor/CAS intent fingerprints,
+audit-to-receipt/revision/actor/time bindings and active relation parity
+with current non-tombstoned links in that same bounded snapshot. Historical
+citations must resolve to an earlier live exact revision, with a live target at
+the relationship's original sequence; later archive does not invalidate history.
+Every comment revision retains its original issue citation, and the existing
+active `blocks` graph is bounded and acyclic. Audit fields
 are bounded and validated before returning them. Structurally valid but
 logically inconsistent SQLite is not writable authority; no implicit repair
 or projection-based reconstruction is attempted. Initial manifests are immutable intake; future
