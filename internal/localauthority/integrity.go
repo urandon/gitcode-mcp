@@ -10,9 +10,9 @@ import (
 
 // Schema version means the entire constraint/trigger contract, not merely a
 // writable user_version marker. The catalog and each value have fixed bounds.
-func checkSchema(ctx context.Context, tx *sql.Tx) error {
+func checkSchema(ctx context.Context, tx *sql.Tx, version int) error {
 	want := map[string]string{}
-	for _, statement := range strings.Split(schemaSQL, ";\n") {
+	for _, statement := range strings.Split(authoritySchemaSQL(version), ";\n") {
 		statement = strings.TrimSuffix(strings.TrimSpace(statement), ";")
 		if statement == "" {
 			continue
@@ -21,7 +21,14 @@ func checkSchema(ctx context.Context, tx *sql.Tx) error {
 		if len(fields) < 3 {
 			return Error{Corrupt}
 		}
-		want[fields[2]] = statement
+		name := fields[2]
+		if fields[1] == "UNIQUE" {
+			if len(fields) < 4 || fields[2] != "INDEX" {
+				return Error{Corrupt}
+			}
+			name = fields[3]
+		}
+		want[name] = statement
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT type,
  CASE WHEN length(name)<=128 THEN name END,
@@ -71,8 +78,7 @@ func checkLogicalRows(ctx context.Context, tx *sql.Tx, project authority.UUID) e
 			return e
 		}
 		if v.Citation.Kind == authority.Document {
-			_ = rows.Close()
-			return Error{Corrupt}
+			continue // metadata/citation checked by scanView and journal cross-check.
 		}
 		if err := checkHistoricalReferences(ctx, tx, v); err != nil {
 			_ = rows.Close()

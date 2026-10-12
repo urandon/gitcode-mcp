@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"gitcode-mcp/internal/authority"
@@ -21,9 +22,13 @@ type Store struct {
 	lease     *lease
 	manifest  authority.Manifest
 	instance  authority.UUID
+	schema    int
 	directory string // private, never serialized
 	fenced    bool
-	closed    bool
+	// Logical corruption cannot be cleared by a receipt's physical OS barrier.
+	// A verified reopen must validate repaired authority before any fresh ack.
+	logicalFenced bool
+	closed        bool
 	// fault is test-only injection at transaction boundaries; no public option.
 	fault func(string) error
 }
@@ -38,6 +43,16 @@ type Inspection struct {
 // prepareEmpty never publishes project ownership or the final database name.
 // Its staging directory is unique to one unacknowledged initialization.
 func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, instance authority.UUID, fault func(string) error) (*Store, error) {
+	return prepareEmptySchema(ctx, directory, m, instance, fault, schemaVersion)
+}
+
+// The public fresh initialization path selects v2 explicitly. Existing v1 is
+// opened and validated separately, never passed through this DDL constructor.
+func prepareEmptySchema(ctx context.Context, directory string, m authority.Manifest, instance authority.UUID, fault func(string) error, version int) (*Store, error) {
+	ddl := authoritySchemaSQL(version)
+	if ddl == "" {
+		return nil, authority.Error{Code: authority.Unsupported}
+	}
 	if m.Validate() != nil || !m.ID.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
@@ -48,7 +63,7 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 	if err = qualifyFilesystem(path); err != nil {
 		return nil, err
 	}
-	s := &Store{manifest: m, instance: instance, directory: path, fault: fault}
+	s := &Store{manifest: m, instance: instance, directory: path, fault: fault, schema: version}
 	ok := false
 	defer func() {
 		if !ok {
@@ -84,7 +99,7 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 		return nil, storageError(ctx)
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, schemaSQL); err != nil {
+	if _, err = tx.ExecContext(ctx, ddl); err != nil {
 		return nil, storageError(ctx)
 	}
 	body, err := json.Marshal(m)
@@ -99,7 +114,10 @@ func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, i
 			return nil, storageError(ctx)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "PRAGMA application_id=1195593025; PRAGMA user_version=1"); err != nil {
+	if _, err = tx.ExecContext(ctx, "PRAGMA application_id=1195593025"); err != nil {
+		return nil, storageError(ctx)
+	}
+	if _, err = tx.ExecContext(ctx, "PRAGMA user_version="+strconv.Itoa(version)); err != nil {
 		return nil, storageError(ctx)
 	}
 	if err = s.inject("init_schema"); err != nil {
@@ -256,10 +274,13 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version) != nil {
 		return Error{Corrupt}
 	}
-	if version != schemaVersion {
+	if authoritySchemaSQL(version) == "" {
 		return authority.Error{Code: authority.Unsupported}
 	}
-	if err := checkSchema(ctx, tx); err != nil {
+	if s.schema != 0 && s.schema != version {
+		return Error{Corrupt}
+	}
+	if err := checkSchema(ctx, tx, version); err != nil {
 		return err
 	}
 	var id, instance, manifest string
@@ -277,7 +298,7 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if tx.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check) != nil || check != "ok" {
 		return Error{Corrupt}
 	}
-	if err := s.checkConsistency(ctx, tx); err != nil {
+	if err := s.checkConsistency(ctx, tx, version); err != nil {
 		return err
 	}
 	if err := checkLogicalRows(ctx, tx, m.ID); err != nil {
@@ -285,10 +306,19 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	}
 	s.manifest = m
 	s.instance = authority.UUID(instance)
+	s.schema = version
+	if version == 2 {
+		if err := checkKnowledgeSetup(ctx, tx, m.ID, authority.UUID(instance), s.directory); err != nil {
+			return err
+		}
+		if err := checkDocumentOperations(ctx, tx, m.ID, authority.UUID(instance), s.directory); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
+func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx, version int) error {
 	var count, sequence, generation int64
 	if tx.QueryRowContext(ctx, "SELECT count(*),sequence,generation FROM project").Scan(&count, &sequence, &generation) != nil || count != 1 || sequence < 0 || generation != sequence+1 {
 		return Error{Corrupt}
@@ -308,14 +338,18 @@ func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
 	if tx.QueryRowContext(ctx, `SELECT count(*) FROM entities e WHERE e.current_revision<>(SELECT max(r.revision) FROM revisions r WHERE r.entity_id=e.entity_id)`).Scan(&count) != nil || count != 0 {
 		return Error{Corrupt}
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+coalesce((SELECT max(e.alias_number) FROM entities e WHERE e.kind=a.kind),0)`).Scan(&count) != nil || count != 0 {
-		return Error{Corrupt}
-	}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM aliases").Scan(&count) != nil || count != 6 {
 		return Error{Corrupt}
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+(SELECT count(*) FROM entities e WHERE e.kind=a.kind)`).Scan(&count) != nil || count != 0 {
-		return Error{Corrupt}
+	if version == 1 {
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+coalesce((SELECT max(e.alias_number) FROM entities e WHERE e.kind=a.kind),0)`).Scan(&count) != nil || count != 0 {
+			return Error{Corrupt}
+		}
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+(SELECT count(*) FROM entities e WHERE e.kind=a.kind)`).Scan(&count) != nil || count != 0 {
+			return Error{Corrupt}
+		}
+	} else if err := checkReservedAliases(ctx, tx); err != nil {
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
@@ -342,7 +376,7 @@ func verifyHeader(path string) error {
 	if _, err = io.ReadFull(f, header[:]); err != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != applicationID {
 		return Error{Corrupt}
 	}
-	if binary.BigEndian.Uint32(header[60:64]) != schemaVersion {
+	if authoritySchemaSQL(int(binary.BigEndian.Uint32(header[60:64]))) == "" {
 		return authority.Error{Code: authority.Unsupported}
 	}
 	return nil

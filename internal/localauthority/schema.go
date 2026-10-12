@@ -1,7 +1,18 @@
 package localauthority
 
-const schemaVersion = 1
+const schemaVersion = 2
 const applicationID = 0x47434d41
+
+func authoritySchemaSQL(version int) string {
+	switch version {
+	case 1:
+		return schemaSQL
+	case 2:
+		return schemaSQL + knowledgeSchemaSQL
+	default:
+		return ""
+	}
+}
 
 const schemaSQL = `
 CREATE TABLE project (
@@ -51,4 +62,42 @@ CREATE TRIGGER immutable_audit_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(
 CREATE TRIGGER immutable_identity BEFORE UPDATE OF project_id,instance_id,manifest ON project BEGIN SELECT RAISE(ABORT,'immutable project'); END;
 CREATE TRIGGER immutable_entity_identity BEFORE UPDATE OF entity_id,kind,alias_number ON entities BEGIN SELECT RAISE(ABORT,'immutable entity'); END;
 CREATE TRIGGER immutable_entities_delete BEFORE DELETE ON entities BEGIN SELECT RAISE(ABORT,'immutable entity'); END;
+`
+
+// The v1 catalog above remains byte-for-byte its original contract, pinned by
+// knowledge_compatibility_test.go. Only fresh explicit initialization creates
+// v2; opening v1 never executes this DDL or silently migrates any stored bytes.
+// Planned OIDs do not authorize ref publication without a verified binding CAS.
+const knowledgeSchemaSQL = `
+CREATE TABLE knowledge_setup (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ project_id TEXT NOT NULL REFERENCES project(project_id), tracker_instance TEXT NOT NULL REFERENCES project(instance_id),
+ knowledge_instance TEXT NOT NULL UNIQUE CHECK(length(knowledge_instance)=36),
+ coordinate_hash TEXT NOT NULL CHECK(length(coordinate_hash)=64), physical_hash TEXT NOT NULL CHECK(length(physical_hash) IN(0,64)), binding_hash TEXT NOT NULL CHECK(length(binding_hash) IN(0,64)),
+ config_hash TEXT NOT NULL CHECK(length(config_hash)=64), algorithm INTEGER NOT NULL CHECK(algorithm=1),
+ key_hash TEXT NOT NULL UNIQUE CHECK(length(key_hash)=64), intent_hash TEXT NOT NULL CHECK(length(intent_hash)=64),
+ phase TEXT NOT NULL CHECK(phase IN('reserved','bound','ready')), generation INTEGER NOT NULL,
+ CHECK((phase='reserved' AND generation=1 AND physical_hash='' AND binding_hash='') OR (phase='bound' AND generation=2 AND length(physical_hash)=64 AND length(binding_hash)=64) OR (phase='ready' AND generation=3 AND length(physical_hash)=64 AND length(binding_hash)=64))
+);
+CREATE TABLE document_operations (
+ key_hash TEXT PRIMARY KEY CHECK(length(key_hash)=64), intent_hash TEXT NOT NULL CHECK(length(intent_hash)=64),
+ operation_id TEXT NOT NULL UNIQUE CHECK(length(operation_id)=36), entity_id TEXT NOT NULL CHECK(length(entity_id)=36), alias_number INTEGER NOT NULL CHECK(alias_number>0),
+ operation TEXT NOT NULL CHECK(operation IN('document.create','document.update','document.tombstone')),
+ metadata TEXT NOT NULL CHECK(length(CAST(metadata AS BLOB))<=4096),
+ documents_oid TEXT NOT NULL CHECK(length(documents_oid)=64), root_oid TEXT NOT NULL CHECK(length(root_oid)=64),
+ actor_id TEXT NOT NULL CHECK(length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 128), recorded_at TEXT NOT NULL CHECK(length(recorded_at) BETWEEN 1 AND 64),
+ lane INTEGER NOT NULL CHECK(lane=1), phase TEXT NOT NULL CHECK(phase IN('reserved','bound','settled')), generation INTEGER NOT NULL,
+ result TEXT CHECK(result IS NULL OR length(CAST(result AS BLOB))<=8192),
+ pin_cleanup TEXT NOT NULL CHECK(pin_cleanup IN('retained','cleared')),
+ CHECK((phase='reserved' AND generation=1 AND result IS NULL) OR (phase='bound' AND generation=2 AND result IS NULL) OR (phase='settled' AND generation=3 AND result IS NOT NULL)),
+ CHECK(pin_cleanup='retained' OR phase='settled')
+);
+CREATE UNIQUE INDEX document_operation_lane ON document_operations(lane) WHERE phase<>'settled';
+CREATE TRIGGER immutable_knowledge_setup_identity BEFORE UPDATE OF singleton,project_id,tracker_instance,knowledge_instance,coordinate_hash,config_hash,algorithm,key_hash,intent_hash ON knowledge_setup BEGIN SELECT RAISE(ABORT,'immutable knowledge identity'); END;
+CREATE TRIGGER monotonic_knowledge_setup BEFORE UPDATE OF physical_hash,binding_hash,phase,generation ON knowledge_setup WHEN NOT ((OLD.phase='reserved' AND NEW.phase='bound' AND NEW.generation=2 AND length(NEW.physical_hash)=64 AND length(NEW.binding_hash)=64) OR (OLD.phase='bound' AND NEW.phase='ready' AND NEW.generation=3 AND NEW.physical_hash=OLD.physical_hash AND NEW.binding_hash=OLD.binding_hash)) BEGIN SELECT RAISE(ABORT,'knowledge setup phase conflict'); END;
+CREATE TRIGGER immutable_knowledge_setup_delete BEFORE DELETE ON knowledge_setup BEGIN SELECT RAISE(ABORT,'immutable knowledge setup'); END;
+CREATE TRIGGER immutable_document_operation_identity BEFORE UPDATE OF key_hash,intent_hash,operation_id,entity_id,alias_number,operation,metadata,documents_oid,root_oid,actor_id,recorded_at,lane ON document_operations BEGIN SELECT RAISE(ABORT,'immutable document operation'); END;
+CREATE TRIGGER monotonic_document_operation BEFORE UPDATE OF phase,generation,result ON document_operations WHEN NOT ((OLD.phase='reserved' AND NEW.phase='bound' AND NEW.generation=2 AND NEW.result IS NULL) OR (OLD.phase='bound' AND NEW.phase='settled' AND NEW.generation=3 AND NEW.result IS NOT NULL)) BEGIN SELECT RAISE(ABORT,'document operation phase conflict'); END;
+CREATE TRIGGER monotonic_document_pin_cleanup BEFORE UPDATE OF pin_cleanup ON document_operations WHEN NOT (OLD.phase='settled' AND NEW.phase='settled' AND OLD.pin_cleanup='retained' AND NEW.pin_cleanup='cleared') BEGIN SELECT RAISE(ABORT,'document pin cleanup conflict'); END;
+CREATE TRIGGER immutable_document_operation_delete BEFORE DELETE ON document_operations BEGIN SELECT RAISE(ABORT,'immutable document operation'); END;
 `

@@ -34,6 +34,13 @@ func scanView(row scanner, project authority.UUID) (authority.EntityView, error)
 	v.DisplayAlias = fmt.Sprintf("%s-%d", prefix[v.Citation.Kind], alias)
 	v.ProjectSequence = uint64(sequence)
 	v.Payload = json.RawMessage(payload)
+	if v.Citation.Kind == authority.Document {
+		metadata, err := decodeDocumentMetadata(v.Payload)
+		if err != nil || metadata.citation() != v.Citation || v.Tombstone != (metadata.Result.State == "tombstone") || v.Citation.Validate() != nil {
+			return authority.EntityView{}, Error{Corrupt}
+		}
+		return v, nil // internal metadata view; public reads hydrate exact Git bytes.
+	}
 	if v.Validate() != nil {
 		return authority.EntityView{}, Error{Corrupt}
 	}
@@ -65,6 +72,17 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 	if r.ProjectID != s.manifest.ID {
 		return zero, authority.Error{Code: authority.NoAuthority}
 	}
+	var knowledge *knowledgeRepository
+	if r.Kind == authority.Document {
+		if s.schema == 1 {
+			return zero, Error{KnowledgeMigrationRequired}
+		}
+		g, err := s.readyKnowledgeRepository(ctx)
+		if err != nil {
+			return zero, err
+		}
+		knowledge = &g
+	}
 	result := authority.ReadResult{ProjectID: r.ProjectID, Entities: []authority.EntityView{}}
 	if r.Operation == "get" {
 		query := "SELECT " + revisionColumns + " FROM entities e JOIN revisions r ON r.entity_id=e.entity_id AND r.revision=e.current_revision WHERE e.entity_id=? AND e.kind=?"
@@ -93,7 +111,17 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 			}
 			return zero, err
 		}
+		if knowledge != nil {
+			v, err = hydrateDocument(*knowledge, v)
+			if err != nil {
+				return zero, err
+			}
+		}
 		result.Entities = append(result.Entities, v)
+		encoded, err := json.Marshal(result)
+		if err != nil || len(encoded) > authority.MaxContractBytes {
+			return zero, Error{Capacity}
+		}
 		return result, nil
 	}
 	var current int64
@@ -134,6 +162,12 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 		v, err := scanView(extraScanner{row: rows, last: &last}, r.ProjectID)
 		if err != nil {
 			return zero, err
+		}
+		if knowledge != nil {
+			v, err = hydrateDocument(*knowledge, v)
+			if err != nil {
+				return zero, err
+			}
 		}
 		candidate := result
 		candidate.Entities = append(append([]authority.EntityView{}, result.Entities...), v)

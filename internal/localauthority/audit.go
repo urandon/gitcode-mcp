@@ -64,6 +64,17 @@ func scanAudit(row scanner, project authority.UUID) (AuditEntry, error) {
 		return AuditEntry{}, Error{Corrupt}
 	}
 	request := authority.MutationRequest{Intent: authority.WriteIntent{ProjectID: project, WriteMode: "local", IdempotencyKey: "synthetic-integrity-validation"}, Operation: a.Operation, Payload: json.RawMessage(payload)}
+	if kind == string(authority.Document) {
+		metadata, err := decodeDocumentMetadata([]byte(payload))
+		if err != nil || metadata.citation() != (authority.Citation{ProjectID: project, EntityID: a.EntityID, Kind: authority.Document, Revision: revision}) || metadata.OperationID != a.OperationID || metadata.operation() != a.Operation || tombstone != (metadata.Result.State == "tombstone") {
+			return AuditEntry{}, Error{Corrupt}
+		}
+		fingerprint, err := documentMetadataFingerprint(metadata, Actor{ID: actor})
+		if err != nil || fingerprint != a.IntentHash {
+			return AuditEntry{}, Error{Corrupt}
+		}
+		return a, nil
+	}
 	if revision > 1 {
 		request.Intent.EntityID = a.EntityID
 		request.Intent.ExpectedRevision = revision - 1

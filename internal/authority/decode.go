@@ -3,6 +3,7 @@ package authority
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
@@ -33,6 +34,13 @@ func DecodeJSON(data []byte, target any) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(target); err != nil {
+		// Strict versioned union decoders may reject a supported JSON shape
+		// before outer validation. Preserve only this finite semantic code;
+		// parser errors and arbitrary custom decoder details remain hidden.
+		var contractError Error
+		if errors.As(err, &contractError) && contractError.Code == Unsupported {
+			return contractError
+		}
 		return Error{InvalidContract}
 	}
 	if validated, ok := target.(interface{ Validate() error }); ok {

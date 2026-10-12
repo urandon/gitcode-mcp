@@ -101,6 +101,9 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 	if m.Intent.ProjectID != s.manifest.ID {
 		return zero, authority.Error{Code: authority.NoAuthority}
 	}
+	if s.logicalFenced {
+		return zero, Error{Corrupt}
+	}
 	if err = s.verifyPhysicalBinding(); err != nil {
 		s.fenced = true
 		return zero, err
@@ -113,6 +116,28 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 		return zero, storageError(ctx)
 	}
 	defer tx.Rollback()
+	if s.schema == 2 {
+		if err = checkKnowledgeSetup(ctx, tx, s.manifest.ID, s.instance, s.directory); err != nil {
+			var e Error
+			if errors.As(err, &e) && e.Code == Corrupt {
+				s.fenced, s.logicalFenced = true, true
+			}
+			return zero, err
+		}
+		if err = checkReservedAliases(ctx, tx); err == nil {
+			err = checkDocumentOperations(ctx, tx, s.manifest.ID, s.instance, s.directory)
+		}
+		if err != nil {
+			return zero, s.documentSQLError(err)
+		}
+		var used int
+		if tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM knowledge_setup WHERE key_hash=?)+(SELECT count(*) FROM document_operations WHERE key_hash=?)`, keyHash, keyHash).Scan(&used) != nil {
+			return zero, storageError(ctx)
+		}
+		if used != 0 {
+			return zero, authority.Error{Code: authority.Conflict}
+		}
+	}
 	original, receiptErr := loadReceipt(ctx, tx, keyHash, s.manifest.ID)
 	err = receiptErr
 	if err == nil {
