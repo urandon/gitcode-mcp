@@ -223,7 +223,25 @@ and increased dropped/loss counters since that recovery phase began. Earlier
 loss, unrelated loss reasons, unknown/ready coverage, truncation and sibling or
 prior-boot events cannot substitute for evidence. Held-reader-lock fixtures
 confirm that one deferred commit rejection is counted once, never retried, and
-survives collector restart. Entrypoint fault
+survives collector restart.
+The whole-footprint rotation sibling uses the same strict predicate after a
+queryable fresh-boot barrier, with a new recovery-phase loss baseline. Bounded
+sparse pagination preserves the final page's coverage and never treats an empty
+continuation as completion. Recovery independently proves distinct provider
+bytes, the same waiting-to-committed stage, one committed issues collection and
+new commit/success timestamps; retained events cannot manufacture that proof.
+Its strict mandatory chain is admitted through an explicit qualification-only
+collector factory/window: the serial writer acknowledges an idle boundary, then
+pauses without a mutex for at most ten seconds. Real one-shot Emit calls still
+use the same bounded queue; the fixture makes no observation reads until worker
+join and writer release. Close drains/persists those actual entries. Normal
+constructors and all product config/transports leave the window disabled.
+Default-disabled, exclusivity, queue-limit, pre-ack cancellation, deadline,
+shutdown and idempotent resume controls qualify this test scheduling boundary;
+caller release and automatic expiry/stop share one atomic terminal transition,
+with deterministic overlap fixtures proving each winner remains immutable;
+neither fabricated causal events nor producer wait/retry is permitted.
+Entrypoint fault
 fixtures cover missing/damaged/old/future/cache-parent state and actual adapter
 construction failure: discovery and observation do not create/migrate the cache
 or resolve credentials. Later explicit live writes use offline HTTP fixtures to

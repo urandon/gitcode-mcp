@@ -2,6 +2,7 @@ package qualification
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/observability"
@@ -29,11 +30,21 @@ func qualifyJobEvidence(page observability.Page, baseline observability.Coverage
 			return errors.New("actual terminal lost its finite provider failure class")
 		}
 		terminal = terminal || event.Code == observability.JobTerminal && event.Outcome == outcome
-		provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch"
+		provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch" && (outcome != servicectl.JobStatusSucceeded || event.Outcome == "succeeded")
 		committed = committed || event.Code == observability.SyncCommitted && event.Collection == "issues" && event.Outcome == "succeeded"
 	}
 	if !admitted || !terminal || !provider {
-		return errors.New("actual correlated admission/provider/terminal evidence missing")
+		var missing []string
+		if !admitted {
+			missing = append(missing, "admission")
+		}
+		if !provider {
+			missing = append(missing, "provider")
+		}
+		if !terminal {
+			missing = append(missing, "terminal")
+		}
+		return errors.New("actual correlated evidence missing: " + strings.Join(missing, ","))
 	}
 	if outcome == servicectl.JobStatusSucceeded && !committed {
 		coverage := page.Coverage
@@ -69,6 +80,8 @@ func TestO5CommitEvidenceRequiresNewAccountedLoss(t *testing.T) {
 		{"truncated", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events = p.Events[:3]; p.HasMore = true }, false},
 		{"missing_admission", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events = p.Events[1:] }, false},
 		{"missing_provider", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events[1].Code = observability.JobAdmitted }, false},
+		{"failed_provider_for_success", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events[1].Outcome = "failed" }, false},
+		{"missing_terminal", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events[2].Code = observability.JobAdmitted }, false},
 		{"wrong_terminal", observability.Coverage{State: "partial", Reason: "observation_contention", Dropped: 8, LossEpoch: 8}, func(p *observability.Page) { p.Events[2].Outcome = "failed" }, false},
 		{"sibling_commit", observability.Coverage{State: "ready"}, func(p *observability.Page) { p.Events[3].JobRef = "fixture-sibling" }, false},
 		{"prior_boot_commit", observability.Coverage{State: "ready"}, func(p *observability.Page) { p.Events[3].BootID = "fixture-prior-boot" }, false},

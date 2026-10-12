@@ -38,6 +38,10 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 			_, _ = io.WriteString(w, `{"message":"synthetic-private-provider-body"}`)
 			return
 		}
+		if ordinal == 3 {
+			_, _ = io.WriteString(w, `[{"id":1,"number":1,"title":"Recovered rotation fixture","body":"synthetic-private-rotation-recovery-body","state":"open","comments":0}]`)
+			return
+		}
 		_, _ = io.WriteString(w, `[{"id":1,"number":1,"title":"Fixture","body":"synthetic-private-source-body","state":"open","comments":0}]`)
 	}))
 	defer provider.Close()
@@ -162,7 +166,9 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), failed, *baseline.SyncCollections[0].LastSuccessAt, "active")
 	assertTransportParity(t, reader, src, &calls, false, failed, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
 
-	fresh := qualifyCollector(t, "retained", ledger)
+	fresh := observability.NewQualificationCollector(observability.Config{Directory: ledger, ManagedOutput: true})
+	t.Cleanup(func() { closeCollector(t, fresh) })
+	eventually(t, func() bool { return fresh.Coverage().State != "initializing" })
 	freshMetrics := observability.NewMetrics(fresh.BootID(), time.Now().UTC())
 	if !freshMetrics.AttachCollector(fresh) || dropMetric(t, freshMetrics) != 0 {
 		t.Fatal("rotated ledger reload replayed admission-drop metrics")
@@ -193,26 +199,79 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 	}
 	maintenance = servicectl.NewMaintenanceManager(manager, reloaded, "")
 	reader.Collector, reader.Metrics, reader.Health = fresh, freshMetrics, maintenance.ExecutionHealthContext
-	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), retained, *baseline.SyncCollections[0].LastSuccessAt, "active")
-	assertTransportParity(t, reader, src, &calls, false, retained, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
 	reloaded.SetObservation(fresh)
 	reloaded.SetMetrics(freshMetrics)
+	// Ready coverage precedes the asynchronous boot write. Query that concrete
+	// marker before starting work, then fence loss to this recovery phase only.
+	eventually(t, func() bool {
+		page, err := scanRotationEventPage(reader, observability.Filter{Code: observability.Boot})
+		if err != nil {
+			var query observability.QueryError
+			if errors.As(err, &query) && query.Code == "observation_busy" {
+				return false
+			}
+			t.Fatal("rotation boot evidence unavailable")
+		}
+		for _, event := range page.Events {
+			if event.BootID == fresh.BootID() {
+				return true
+			}
+		}
+		return false
+	})
+	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), retained, *baseline.SyncCollections[0].LastSuccessAt, "active")
+	assertTransportParity(t, reader, src, &calls, false, retained, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
+	recoveryCoverage := fresh.Coverage()
+	resumeWriter, err := fresh.PauseWriterForQualification(ctx)
+	if err != nil {
+		t.Fatal("rotation qualification writer boundary unavailable")
+	}
+	defer resumeWriter()
+	// No collector reads occur until the real recovery worker has joined and
+	// the writer resumes. Emit remains one-shot and uses the bounded real queue.
+	release, err := reloaded.BeginDirectCacheWriter(identity.UUID, "synthetic-private-rotation-writer")
+	if err != nil {
+		t.Fatal("rotation recovery writer fixture unavailable")
+	}
+	defer release()
 	job, err := reloaded.StartSync(ctx, manager, servicectl.StartSyncJobRequest{RepoID: binding.RepoID, CachePath: cachePath, Issues: true, MaxPages: 1, MaxRecords: 100, IdempotencyKey: "rotation-recovered"})
 	if err != nil {
 		t.Fatal("actual post-rotation recovery admission unavailable")
 	}
+	var waitingStage string
+	eventually(t, func() bool {
+		waiting, ok := reloaded.Get(job.ID)
+		if ok && waiting.SyncStage != nil && waiting.SyncStage.Phase == servicectl.SyncStageWaitingCommit {
+			waitingStage = waiting.SyncStage.StageRef
+			return waitingStage != ""
+		}
+		return false
+	})
+	if calls.Load() != 3 {
+		t.Fatal("rotation recovery staging changed provider traffic")
+	}
+	release()
 	job = waitJob(t, reloaded, job.ID, identity.UUID)
 	if job.Status != servicectl.JobStatusSucceeded || calls.Load() != 3 {
 		t.Fatal("rotation recovery did not confirm new work exactly once")
+	}
+	if job.SyncStage == nil || job.SyncStage.StageRef != waitingStage || job.SyncStage.Collection != "issues" || job.SyncStage.Phase != servicectl.SyncStageCommitted || job.SyncStage.Committed != 1 || job.SyncStage.CommittedAt.IsZero() || !job.SyncStage.CommittedAt.After(*failed.FinishedAt) {
+		t.Fatal("rotation recovery did not confirm the same durable staged commit")
+	}
+	if len(job.SyncCollections) != 1 || job.SyncCollections[0].Collection != "issues" || job.SyncCollections[0].Outcome != servicectl.SyncCollectionSuccess || job.SyncCollections[0].Committed != 1 || job.SyncCollections[0].LastSuccessAt == nil || !job.SyncCollections[0].LastSuccessAt.After(*failed.FinishedAt) {
+		t.Fatal("rotation recovery lost durable collection commit evidence")
+	}
+	if !resumeWriter() {
+		t.Fatal("rotation qualification window expired before worker completion")
 	}
 	closeCollector(t, fresh)
 	assertRotationInventory(t, ledger, root, provider.URL, identity.UUID, binding.RepoID)
 	at = *job.FinishedAt
 	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), retained, *job.SyncCollections[0].LastSuccessAt, "recovered")
-	assertRotationRecoveryEvents(t, reader, job)
+	assertRotationRecoveryEvents(t, reader, recoveryCoverage, job)
 	assertTransportParity(t, reader, src, &calls, false, job, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
 	cached, err := store.GetSourceScoped(ctx, binding.RepoID, "ISSUE-1")
-	if err != nil || cached.Body != "synthetic-private-source-body" || calls.Load() != 3 {
+	if err != nil || cached.Body != "synthetic-private-rotation-recovery-body" || cached.Title != "Recovered rotation fixture" || calls.Load() != 3 {
 		t.Fatal("rotation diagnosis changed durable cache or provider traffic")
 	}
 }
@@ -234,51 +293,55 @@ func assertRotationIncident(t *testing.T, summary observability.Summary, failed 
 
 func rotationJobEvents(t *testing.T, reader *observability.Reader, ref string) []observability.Event {
 	t.Helper()
+	return rotationEventPage(t, reader, observability.Filter{JobRef: ref}).Events
+}
+
+func rotationEventPage(t *testing.T, reader *observability.Reader, filter observability.Filter) observability.Page {
+	t.Helper()
+	page, err := scanRotationEventPage(reader, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return page
+}
+
+func scanRotationEventPage(reader *observability.Reader, filter observability.Filter) (observability.Page, error) {
 	var events []observability.Event
 	cursor := ""
 	// A 4 MiB ledger and 64 KiB scan chunks need bounded sparse continuation.
 	// Keep every selector unchanged; never assume an empty page ends the scan.
 	for pages := 0; pages < 128; pages++ {
-		page, err := reader.Events(context.Background(), observability.EventsRequest{Filter: observability.Filter{JobRef: ref}, Cursor: cursor, Limit: 50})
+		page, err := reader.Events(context.Background(), observability.EventsRequest{Filter: filter, Cursor: cursor, Limit: 50})
 		if err != nil {
-			t.Fatal("bounded rotated job timeline unavailable")
+			return observability.Page{}, err
 		}
 		for _, event := range page.Events {
-			if event.JobRef != ref {
-				t.Fatal("rotated timeline admitted a different job")
+			if filter.JobRef != "" && event.JobRef != filter.JobRef || filter.Code != "" && event.Code != filter.Code {
+				return observability.Page{}, errors.New("rotated timeline admitted a different selector")
 			}
 		}
 		events = append(events, page.Events...)
 		if len(events) > observability.MaxPageEvents {
-			t.Fatal("fixture job exceeded bounded causal evidence")
+			return observability.Page{}, errors.New("fixture exceeded bounded causal evidence")
 		}
 		if !page.HasMore {
-			return events
+			page.Events = events
+			return page, nil
 		}
 		if page.Cursor == "" || page.Cursor == cursor {
-			t.Fatal("sparse rotated scan did not make cursor progress")
+			return observability.Page{}, errors.New("sparse rotated scan did not make cursor progress")
 		}
 		cursor = page.Cursor
 	}
-	t.Fatal("rotated timeline exceeded its fixed scan budget")
-	return nil
+	return observability.Page{}, errors.New("rotated timeline exceeded its fixed scan budget")
 }
 
-func assertRotationRecoveryEvents(t *testing.T, reader *observability.Reader, job servicectl.Job) {
+func assertRotationRecoveryEvents(t *testing.T, reader *observability.Reader, baseline observability.Coverage, job servicectl.Job) {
 	t.Helper()
 	refs := observability.ProjectEntityRefs(observability.Context{Job: observability.KnownRef("job", job.ID), Cache: observability.KnownRef("cache", job.CacheUUID), Repo: observability.KnownRef("repo", job.RepoID)})
-	admitted, provider, committed, terminal := false, false, false, false
-	for _, event := range rotationJobEvents(t, reader, refs.Job) {
-		if event.BootID != reader.Collector.BootID() || event.CorrelationRef == "" || event.CacheRef != refs.Cache || event.RepoRef != refs.Repo {
-			t.Fatal("post-rotation actual work lost its causal identity")
-		}
-		admitted = admitted || event.Code == observability.JobAdmitted
-		provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch" && event.Outcome == "succeeded"
-		committed = committed || event.Code == observability.SyncCommitted && event.Collection == "issues" && event.Outcome == "succeeded"
-		terminal = terminal || event.Code == observability.JobTerminal && event.Outcome == "succeeded"
-	}
-	if !admitted || !provider || !committed || !terminal {
-		t.Fatal("post-rotation work lacks actual admission, provider, commit or terminal evidence")
+	page := rotationEventPage(t, reader, observability.Filter{JobRef: refs.Job})
+	if err := qualifyJobEvidence(page, baseline, reader.Collector.BootID(), *refs, servicectl.JobStatusSucceeded, ""); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -311,7 +374,7 @@ func assertRotationInventory(t *testing.T, dir string, private ...string) {
 		if err != nil || strings.HasSuffix(entry.Name(), ".jsonl") && !strings.HasSuffix(string(data), "\n") {
 			t.Fatal("rotated file has an incomplete retained boundary")
 		}
-		for _, sentinel := range append(private, "synthetic-private-source-body", "synthetic-private-provider-body", "synthetic-private-credential") {
+		for _, sentinel := range append(private, "synthetic-private-source-body", "synthetic-private-rotation-recovery-body", "synthetic-private-provider-body", "synthetic-private-credential", "synthetic-private-rotation-writer") {
 			if strings.Contains(string(data), sentinel) {
 				t.Fatal("private source or provider content entered retained files")
 			}

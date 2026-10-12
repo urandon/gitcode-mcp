@@ -55,7 +55,9 @@ type Collector struct {
 	maintenanceTransitions atomic.Uint64
 	config                 Config
 	// A deterministic private storage seam for fault tests, not a public hook.
-	open func(string) (*storage, []Event, bool, error)
+	open                  func(string) (*storage, []Event, bool, error)
+	qualificationRequests chan *qualificationWindow
+	qualificationOwner    atomic.Pointer[qualificationWindow]
 }
 
 var entropyFallback atomic.Uint64
@@ -96,8 +98,15 @@ func (c *Collector) MaintenanceTransitionCorrelation() Ref {
 }
 
 func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)) *Collector {
+	return newCollectorWithQualification(cfg, open, false)
+}
+
+func newCollectorWithQualification(cfg Config, open func(string) (*storage, []Event, bool, error), qualification bool) *Collector {
 	c := &Collector{queue: make(chan pending, MaxEvents), stop: make(chan struct{}), done: make(chan struct{}), boot: randomID(), config: cfg, open: open,
 		coverage: Coverage{State: "initializing", OutputState: "migration_required"}}
+	if qualification {
+		c.qualificationRequests = make(chan *qualificationWindow, 1)
+	}
 	if cfg.ManagedOutput {
 		c.coverage.OutputState = "managed"
 	}
@@ -343,6 +352,8 @@ func (c *Collector) run() {
 	}
 	for {
 		select {
+		case request := <-c.qualificationRequests:
+			c.runQualificationWindow(request)
 		case p := <-c.queue:
 			c.write(s, p)
 			c.mu.Lock()
