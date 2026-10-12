@@ -1,8 +1,9 @@
 # Local authority contracts
 
-Status: L1 contracts for #180 / epic #179. This is not an enabled local project
-runtime. Storage, single-writer ownership, recovery, CLI/MCP workflows, Admin,
-backup and feature acceptance remain #181–#186. Current `authority.v1`
+Status: L1 contracts (#180) and the L2 tracker domain/store (#181), epic #179.
+This is not an enabled local project runtime. Git knowledge, runtime ownership
+integration, recovery, CLI/MCP workflows, Admin, backup and integrated feature
+acceptance remain #182–#186. Current `authority.v1`
 negotiation reports `available: false`, an empty implemented-method list and
 `authority_unavailable`. It never starts a daemon or promotes a cache.
 
@@ -18,7 +19,7 @@ Unknown unrelated legacy settings retain their existing compatibility behavior.
 Project and entity identities are canonical lowercase random version-4 UUIDs.
 The human project slug is not identity. `ISSUE-N`, `COMMENT-N`, `LABEL-N`,
 `MILESTONE-N`, `DOC-N` and `LINK-N` are transactional, never-reused display
-aliases; allocation/immutability is the authoritative store's L2 responsibility.
+aliases; the L2 authority store allocates and preserves them transactionally.
 Citations bind project UUID, entity UUID, kind and immutable positive revision.
 UTC timestamps are metadata, not CAS ordering. Project sequence is authoritative.
 
@@ -175,9 +176,10 @@ authority checks, not proof from syntactically valid input.
 Receipt: project UUID, generated operation UUID, exact citation, project sequence,
 hashed caller key/intent, `evidence: local_commit_confirmed`, replay flag and
 projection state. Same-key/same-intent returns the durable original receipt;
-changed intent conflicts. L1 creates no confirmed receipt. L2/L3 must qualify
-FULL SQLite acknowledgement and ordered exact Git intent/object/pin/binding/ref
-barriers before producing success. Client cancellation never proves rollback.
+changed intent conflicts. L1 creates no confirmed receipt. L2 confirms tracker
+transactions only after FULL SQLite and publication barriers; L3 must additionally
+qualify ordered exact Git intent/object/pin/binding/ref barriers for documents.
+Client cancellation never proves rollback.
 
 Fixed errors include authority_invalid_contract, authority_unsupported,
 authority_unavailable, authority_not_found, authority_policy_denied,
@@ -205,3 +207,82 @@ handoff; a loopback browser test cannot fulfill strict-mode acceptance. Explicit
 loopback control supplies protected local entity/history/document views and
 plan/confirm actions. Storage/init/restore/migration remain CLI-only. #185 owns
 the complete UI cohort; #186 gates integrated recovery and release.
+
+## Durable tracker layer (L2)
+
+`internal/localauthority` is a shared, separately versioned authoritative store,
+not an adapter over `internal/cache`. Its dedicated database application/schema
+identity, manifest UUID and random store-instance UUID are checked before writer
+admission. Explicit initialization never replaces an existing database. Existing
+open never initializes, promotes a cache or silently migrates. Newer/older or
+foreign/damaged schemas fail closed; bytes and identity are preserved for the
+CLI-only migration/backup/recovery cohort (#186).
+
+The machine registry is global to the current OS user across every runtime
+profile, not configurable per project/daemon. Kernel leases use project UUID.
+The durable private binding includes the canonical storage coordinate hash,
+store instance and physical database identity. A second process, clone, or
+same-path file replacement cannot acquire a writer. Closing a lease does not
+truncate/unlink its binding. Relocation/restore requires the explicit verified
+rebind contract in #186. There is no distributed multi-host lease promise.
+Initialization and runtime policy/cohosting admission remain trusted CLI and
+coordinator responsibilities (#183/#184); this library alone does not enroll a
+project or start a runtime.
+
+Writer qualification requires a private owned regular database, WAL,
+`synchronous=FULL`, foreign keys and the configured full-sync pragmas on every
+connection, plus checked file/directory persistence primitives. The initial
+qualified filesystem set is local APFS/HFS on Darwin and ext-family/XFS/Btrfs on
+Linux. Other filesystems/platforms refuse writes; there is no weaker fallback.
+Darwin file barriers use `F_FULLFSYNC`. SQLite's FULL commit is followed by
+database/WAL file and directory publication barriers before acknowledgement.
+This assumes the filesystem/hardware honors OS barriers; process fault tests
+are not physical power-loss certification. The broader platform, Git barrier,
+restore and power-loss models remain explicit integrated gates in #182/#186.
+See [SQLite synchronous semantics](https://www.sqlite.org/pragma.html#pragma_synchronous)
+and [WAL's same-host/local-filesystem boundary](https://www.sqlite.org/wal.html).
+
+One transaction settles a generated entity UUID, immutable revision, never-reused
+display alias, current typed relationship, receipt, content-free audit and project
+sequence/generation. Actor identity is asserted local metadata, not remote
+authentication. Protected revision metadata carries actor/time; audit carries
+only project-scoped hashes and fixed operation/opaque identity fields. Caller
+keys are never persisted as text. Canonical typed payloads remove JSON field
+order/whitespace from intent identity; actor and expected revision remain part
+of the fingerprint. Same-key/same-intent replay preserves the original outcome,
+even after later edits/restart; changed intent conflicts. Cancellation or lost
+acknowledgement means retain the original caller key, never invent a new one.
+
+Publication failure fences new writes as `recovery_required`/`quiesced`; the
+kernel lease is still held. Same-key confirmed replay or verified reopen can
+requalify persistence without another entity mutation. The original receipt is
+immutable and projection state stays `pending`; actual indexed generation and
+coverage are separate L4 observations. Store status reports manifest policy,
+not process/network isolation certification.
+
+Issues close/reopen; comments retain their exact original issue citation;
+labels/milestones archive; links create/update/tombstone without erasing history.
+All referenced immutable revisions must exist and current targets must be live.
+Label assignments are issue-to-label and unique; milestone membership is singular
+per issue. `evidence_for` is comment/document-to-issue; `blocks` is issue-to-issue
+and rejects cycles under a finite traversal budget. `relates_to` connects distinct
+non-link entities. Tombstoned links cannot be resurrected; new relationships get
+new UUIDs/aliases. No irreversible purge/reset API exists. Document mutations are
+unsupported here: SQLite must never gain Markdown bytes while L3 is absent.
+
+Canonical get/list/history/receipt/metadata reads use the authority directly.
+List/history cursors fence project, kind, operation, entity and sequence snapshot;
+count and encoded-byte limits preserve continuation instead of dropping trailing
+entities. Inspection validates one consistent read snapshot, not several samples
+mixed across concurrent commits. Projection reset/corruption cannot delete or
+block canonical entity history. Initial manifests are immutable intake; future
+generation-fenced transport/search policy changes must be separately recorded,
+not an arbitrary manifest overwrite.
+
+Backend fixed failures additionally distinguish `authority_read_only`,
+`authority_corrupt`, `authority_durability_unavailable`, `authority_capacity`,
+`authority_storage_unavailable` and `authority_commit_uncertain`. Driver errors,
+private coordinates and payloads are never reflected. These are not newly
+advertised MCP tools: #183/#184 own runtime admission, negotiated error/capability
+compatibility and workflow rollout; #185 owns protected actor/history/conflict/
+degraded UI; #186 owns verified backups, identity-preserving rebind and migrations.
