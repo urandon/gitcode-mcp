@@ -227,6 +227,21 @@ func TestObservabilityInvalidationRateAfterDelayedPublication(t *testing.T) {
 	done := make(chan struct{})
 	c.events.mu.Lock()
 	locked := true
+	waitEntered := make(chan time.Duration, 1)
+	releaseWait := make(chan struct{})
+	wait := func(ctx context.Context, interval time.Duration) bool {
+		select {
+		case waitEntered <- interval:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case <-releaseWait:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	defer func() {
 		if locked {
 			c.events.mu.Unlock()
@@ -238,16 +253,21 @@ func TestObservabilityInvalidationRateAfterDelayedPublication(t *testing.T) {
 			t.Error("observation poller did not join")
 		}
 	}()
-	go func() { defer close(done); c.pollObservability(ctx) }()
+	go func() { defer close(done); c.pollObservabilityWithWait(ctx, wait) }()
 	// Wait for the real publication boundary, rather than assuming a goroutine
 	// has been scheduled. Stack data is inspected locally and never reported.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
+		select {
+		case <-waitEntered:
+			t.Fatal("invalidation wait began before held publication completed")
+		default:
+		}
 		buf := make([]byte, 1<<20)
 		n := runtime.Stack(buf, true)
 		blocked := false
 		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
-			if strings.Contains(stack, ".pollObservability(") && strings.Contains(stack, "(*eventLog).append(") {
+			if strings.Contains(stack, ".pollObservabilityWithWait(") && strings.Contains(stack, "(*eventLog).append(") {
 				blocked = true
 			}
 		}
@@ -259,25 +279,53 @@ func TestObservabilityInvalidationRateAfterDelayedPublication(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// Let a fixed-period tick accumulate while the first revision is waiting.
-	time.Sleep(1100 * time.Millisecond)
+	// The held append has not reached the wait. A changed revision must not
+	// bypass the one explicitly released post-publication interval.
 	if !metrics.SampleAt(at, map[string]observability.ProbeValue{"runtime_heap": observability.Available(42)}) {
 		t.Fatal("changed revision fixture unavailable")
 	}
 	c.events.mu.Unlock()
 	locked = false
-	deadline = time.Now().Add(3 * time.Second)
-	for {
-		events, _, _, _ := c.events.replay(0)
-		if len(events) >= 2 {
-			if events[1].OccurredAt.Sub(events[0].OccurredAt) < time.Second {
-				t.Fatal("observation invalidations exceeded the actual one-per-second emission bound")
+	assertWait := func() {
+		t.Helper()
+		select {
+		case interval := <-waitEntered:
+			if interval != time.Second {
+				t.Fatal("invalidation did not request the exact one-second wait")
 			}
-			return
+		case <-time.After(3 * time.Second):
+			t.Fatal("published invalidation did not enter its bounded wait")
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("changed revision was not eventually published")
-		}
-		time.Sleep(time.Millisecond)
+	}
+	assertWait()
+	first, _, _, _ := c.events.replay(0)
+	if len(first) != 1 || first[0].Kind != "observability_changed" || first[0].EntityType != "observability" || first[0].OccurredAt.Location() != time.UTC {
+		t.Fatal("first compact UTC invalidation was not published before waiting")
+	}
+	select {
+	case releaseWait <- struct{}{}:
+	case <-time.After(3 * time.Second):
+		t.Fatal("invalidation wait was not controllable")
+	}
+	assertWait()
+	second, _, _, _ := c.events.replay(0)
+	if len(second) != 2 || second[1].Kind != "observability_changed" || second[1].EntityType != "observability" || second[1].OccurredAt.Location() != time.UTC || second[1].Revision == first[0].Revision {
+		t.Fatal("one released wait did not publish exactly the changed compact revision")
+	}
+}
+
+func TestObservabilityDefaultWaitHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitObservabilityInterval(ctx, time.Second) {
+		t.Fatal("cancelled observation wait resumed publication")
+	}
+}
+
+func TestObservabilityDefaultWaitUsesTimer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if !waitObservabilityInterval(ctx, 0) {
+		t.Fatal("elapsed observation timer did not resume polling")
 	}
 }

@@ -204,6 +204,11 @@ preserves original events without replaying job/provider/commit throughput.
 Registered observability polling emits no self-events; unsupported/user-prefix
 paths remain observable ordinary requests. Synthetic control, cookie, body,
 header, request-id and URL sentinels must be absent from retained evidence.
+Admin invalidation ordering holds the actual append boundary and controls an
+internal post-publication wait. It asserts exact one-second wait intent, one
+compact UTC event per released interval and owned cancellation/joining, without
+subtracting adjustable UTC timestamps. The product default remains a fresh
+cancellable timer after publication; no fixed-ticker burst or timing tolerance.
 Shared observation qualification uses actual private TCP IPC plus CLI, stdio,
 normal/minimal HTTP/SSE, and authenticated Admin routes. Tests reject malformed
 arguments before connection/retained reads, hold actual snapshot locks, cancel
