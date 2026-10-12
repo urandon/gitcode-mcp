@@ -3,16 +3,50 @@ package observability
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const qualificationWindowLimit = 10 * time.Second
+
+const (
+	qualificationRequested uint32 = iota
+	qualificationActive
+	qualificationReleased
+	qualificationAutomatic
+)
 
 type qualificationWindow struct {
 	ctx    context.Context
 	ready  chan struct{}
 	resume chan struct{}
 	once   sync.Once
+	state  atomic.Uint32
+}
+
+// endAutomatically shares the same terminal-state CAS as controlled release.
+// Clearing owner alone is not a release result: the caller can race that cleanup.
+func (w *qualificationWindow) endAutomatically() {
+	w.state.CompareAndSwap(qualificationRequested, qualificationAutomatic)
+	w.state.CompareAndSwap(qualificationActive, qualificationAutomatic)
+}
+
+func (w *qualificationWindow) release(cancel context.CancelFunc, stop <-chan struct{}, beforeTransition func()) bool {
+	if w.ctx.Err() != nil {
+		w.endAutomatically()
+	}
+	select {
+	case <-stop:
+		w.endAutomatically()
+	default:
+	}
+	// A private deterministic interleaving seam; the real closure passes nil.
+	if beforeTransition != nil {
+		beforeTransition()
+	}
+	controlled := w.state.CompareAndSwap(qualificationActive, qualificationReleased)
+	w.once.Do(func() { close(w.resume); cancel() })
+	return controlled
 }
 
 // NewQualificationCollector opts an internal integration fixture into a
@@ -46,11 +80,10 @@ func (c *Collector) pauseWriterForQualification(ctx context.Context, limit time.
 		return nil, QueryError{Code: "observation_busy", Reason: "qualification_window_active"}
 	}
 	resume := func() bool {
-		active := request.ctx.Err() == nil && c.qualificationOwner.Load() == request
-		request.once.Do(func() { close(request.resume); cancel() })
-		return active
+		return request.release(cancel, c.stop, nil)
 	}
 	fail := func(err error) (func() bool, error) {
+		request.endAutomatically()
 		resume()
 		c.qualificationOwner.CompareAndSwap(request, nil)
 		return nil, err
@@ -88,16 +121,24 @@ func (c *Collector) pauseWriterForQualification(ctx context.Context, limit time.
 }
 
 func (c *Collector) runQualificationWindow(request *qualificationWindow) {
-	defer c.qualificationOwner.CompareAndSwap(request, nil)
+	defer func() {
+		request.endAutomatically()
+		c.qualificationOwner.CompareAndSwap(request, nil)
+	}()
 	if request.ctx.Err() != nil {
 		return
 	}
 	// Called only by the serial writer loop after all earlier write/bookkeeping
 	// sections have returned. No lock is held across acknowledgement or wait.
+	if !request.state.CompareAndSwap(qualificationRequested, qualificationActive) {
+		return
+	}
 	close(request.ready)
 	select {
 	case <-request.resume:
 	case <-request.ctx.Done():
+		request.endAutomatically()
 	case <-c.stop:
+		request.endAutomatically()
 	}
 }

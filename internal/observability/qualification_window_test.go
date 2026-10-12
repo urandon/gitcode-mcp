@@ -184,3 +184,80 @@ func TestQualificationWindowCancellationBeforeAcknowledgement(t *testing.T) {
 	}
 	resume()
 }
+
+func TestQualificationWindowAutomaticReleaseWinsCallerOverlap(t *testing.T) {
+	for _, ending := range []string{"deadline", "close"} {
+		t.Run(ending, func(t *testing.T) {
+			c := qualificationCollector(t)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			resume, err := c.PauseWriterForQualification(ctx)
+			if err != nil {
+				t.Fatal("qualification window unavailable")
+			}
+			defer resume()
+			request := c.qualificationOwner.Load()
+			if request == nil || request.state.Load() != qualificationActive {
+				t.Fatal("writer did not acknowledge the active state")
+			}
+			if !c.Emit(JobAdmitted, qualificationAdmission()) {
+				t.Fatal("actual one-shot queue admission unavailable")
+			}
+			checked, continueRelease := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(continueRelease) }) }
+			defer unblock()
+			result := make(chan bool, 1)
+			go func() {
+				result <- request.release(func() {}, c.stop, func() {
+					close(checked)
+					<-continueRelease
+				})
+			}()
+			select {
+			case <-checked:
+			case <-time.After(3 * time.Second):
+				t.Fatal("release precondition did not join")
+			}
+			if ending == "close" {
+				flush(t, c, true)
+			} else {
+				<-ctx.Done()
+				await(t, func() bool { return c.qualificationOwner.Load() == nil })
+			}
+			if request.state.Load() != qualificationAutomatic {
+				t.Fatal("automatic writer release did not win the terminal transition")
+			}
+			unblock()
+			select {
+			case controlled := <-result:
+				if controlled || resume() {
+					t.Fatal("late overlapping caller falsely reported controlled release")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("overlapping release did not join")
+			}
+			flush(t, c, true)
+			page, err := c.Query(Filter{Code: JobAdmitted}, "", 50)
+			if err != nil || len(page.Events) != 1 || request.state.Load() != qualificationAutomatic {
+				t.Fatal("automatic winner lost actual entry or changed terminal cause")
+			}
+		})
+	}
+}
+
+func TestQualificationWindowControlledReleaseWinsLaterStop(t *testing.T) {
+	c := qualificationCollector(t)
+	resume, err := c.PauseWriterForQualification(context.Background())
+	if err != nil {
+		t.Fatal("qualification window unavailable")
+	}
+	request := c.qualificationOwner.Load()
+	if request == nil || !resume() {
+		t.Fatal("controlled release did not win")
+	}
+	flush(t, c, true)
+	if request.state.Load() != qualificationReleased || resume() {
+		t.Fatal("later writer stop changed the release winner")
+	}
+}

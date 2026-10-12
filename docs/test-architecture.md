@@ -238,6 +238,8 @@ join and writer release. Close drains/persists those actual entries. Normal
 constructors and all product config/transports leave the window disabled.
 Default-disabled, exclusivity, queue-limit, pre-ack cancellation, deadline,
 shutdown and idempotent resume controls qualify this test scheduling boundary;
+caller release and automatic expiry/stop share one atomic terminal transition,
+with deterministic overlap fixtures proving each winner remains immutable;
 neither fabricated causal events nor producer wait/retry is permitted.
 Entrypoint fault
 fixtures cover missing/damaged/old/future/cache-parent state and actual adapter
