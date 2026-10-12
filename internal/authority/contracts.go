@@ -147,16 +147,23 @@ func (p NetworkPolicy) Label() string {
 // RuntimeProfile is attested runtime state, never a per-request override.
 // Actual process/network factory qualification is owned by the runtime cohort.
 type RuntimeProfile struct {
-	Protocol         string
-	SchemaMin        int
-	SchemaMax        int
-	Strict           bool
-	TCP              bool
-	UDP              bool
-	DNS              bool
-	Admin            bool
-	RemoteProjects   bool
-	LoopbackProjects bool
+	Protocol           string
+	SchemaMin          int
+	SchemaMax          int
+	Strict             bool
+	TCP                bool
+	UDP                bool
+	DNS                bool
+	Admin              bool
+	RemoteProjects     bool
+	LoopbackProjects   bool
+	PrivateIPC         bool
+	LoopbackTCPOnly    bool
+	ExternalNetwork    bool
+	EmbeddingProvider  bool
+	PreProvisioned     bool
+	CredentialResolver bool
+	ProviderSetup      bool
 }
 
 func Preflight(p NetworkPolicy, r RuntimeProfile) error {
@@ -165,6 +172,17 @@ func Preflight(p NetworkPolicy, r RuntimeProfile) error {
 	}
 	if r.Protocol != Protocol || r.SchemaMin < 1 || r.SchemaMax < r.SchemaMin || r.SchemaMin > Schema || r.SchemaMax < Schema {
 		return Error{Unsupported}
+	}
+	if !r.PrivateIPC || r.UDP || r.DNS || r.ExternalNetwork || r.CredentialResolver || r.ProviderSetup || r.RemoteProjects {
+		return Error{PolicyDenied}
+	}
+	admin := p.ControlTransport == "loopback_admin"
+	embeddings := p.DataEgress == "loopback_embeddings"
+	if r.Admin != admin || r.EmbeddingProvider != embeddings || r.PreProvisioned != embeddings {
+		return Error{PolicyDenied}
+	}
+	if r.TCP != (admin || embeddings) || r.LoopbackTCPOnly != r.TCP {
+		return Error{PolicyDenied}
 	}
 	if p.Label() == "zero_network" {
 		if !r.Strict || r.TCP || r.UDP || r.DNS || r.Admin || r.RemoteProjects || r.LoopbackProjects {

@@ -17,6 +17,13 @@ import (
 const authorityResponseBytes = 512 << 10
 const authorityCallBudget = 10 * time.Second
 
+type authorityRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
+}
+
 func authorityMethod(method string) bool { return strings.HasPrefix(method, "AuthorityV1.") }
 
 func authorityParams(method string, raw []byte) (any, error) {
@@ -168,8 +175,8 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			}
 		}()
 		deadline, _ := ctx.Deadline()
-		if conn.SetDeadline(deadline) != nil {
-			return authority.Error{Code: authority.Unavailable}
+		if err := conn.SetDeadline(deadline); err != nil {
+			return authoritySocketError(ctx, err)
 		}
 		if _, err := io.Copy(conn, bytes.NewReader(append(encoded, '\n'))); err != nil {
 			return authoritySocketError(ctx, err)
@@ -198,7 +205,7 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 	if err != nil || len(data) > authorityResponseBytes {
 		return authority.Error{Code: authority.InvalidContract}
 	}
-	var reply observationRPCResponse
+	var reply authorityRPCResponse
 	if authority.DecodeJSON(data, &reply) != nil || reply.JSONRPC != jsonrpcVersion || string(reply.ID) != strconv.FormatInt(id, 10) || reply.Error != nil && len(reply.Result) > 0 {
 		return authority.Error{Code: authority.InvalidContract}
 	}

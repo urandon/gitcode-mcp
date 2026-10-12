@@ -87,7 +87,7 @@ func TestStrictLocalManifestRefusesMixedUnknownDuplicateAndAliases(t *testing.T)
 
 func TestPolicyPreflightFailClosed(t *testing.T) {
 	p := NetworkPolicy{"deny", "ipc_only"}
-	good := RuntimeProfile{Protocol: Protocol, SchemaMin: 1, SchemaMax: 1, Strict: true}
+	good := RuntimeProfile{Protocol: Protocol, SchemaMin: 1, SchemaMax: 1, Strict: true, PrivateIPC: true}
 	if err := Preflight(p, good); err != nil {
 		t.Fatal("pure strict admission contract rejected")
 	}

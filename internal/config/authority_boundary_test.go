@@ -47,3 +47,12 @@ func TestLocalProjectIntentCannotHideInYAMLMerge(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalProjectCaseAliasCannotFallThroughRemoteConfig(t *testing.T) {
+	if _, _, err := parseYAMLConfig([]byte("Project: {authority: local_authoritative}\n"), ""); err == nil {
+		t.Fatal("case alias selected remote defaults")
+	}
+	if err := rejectProjectJSON([]byte(`{"PROJECT":{"authority":"local_authoritative"}}`)); err == nil {
+		t.Fatal("case alias selected remote JSON defaults")
+	}
+}

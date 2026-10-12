@@ -98,8 +98,13 @@ across runtime profiles. A strict project never starts another daemon implicitly
 Local authority control requests use private Unix IPC (or future qualified
 named pipes), not TCP even when separate loopback UI/embedding is permitted.
 
-The L1 `Preflight` validator describes these admission requirements. It does
-not itself disable a process's sockets or certify a runtime. L4/L7 must qualify
+The L1 `Preflight` validator requires private IPC, matching Admin/provider
+capabilities and loopback-only TCP when requested. All profiles forbid UDP/DNS,
+external-network factories, remote cohosting, credential resolution and provider
+setup. Deny profiles have no embedding factory; embedding profiles require a
+pre-provisioned capability. An installed binary alone is not that runtime
+capability. Preflight does not itself disable a process's sockets or certify a
+runtime. L4/L7 must qualify
 policy-disabled factories and isolated black-box startup/operation tests,
 including inherited proxies, providers, tokens and DNS. Windows private-pipe
 implementation/qualification is not implied by a Unix fixture or `mem` test.
@@ -143,7 +148,12 @@ Mutation DTO: `intent`, `operation`, `payload`. Intent requires project UUID,
 whitespace/control characters). Create forbids caller-chosen entity UUID or
 revision; updates/tombstones require entity UUID and positive expected revision.
 Payloads are full replacements, not ambiguous partial patches. JSON null does
-not mean an omitted typed scalar. Store adapters still enforce lifecycle,
+not mean an omitted typed scalar. Every field without `omitempty` is required,
+including explicit empty body/description/due-date and false archive/replay flags.
+Typed result decoding also validates UUID/citation namespaces, positive sequence,
+display alias/kind, concrete payload shape, local commit evidence/digests and
+projection state; a syntactically decoded empty object is not a valid receipt.
+Store adapters still enforce lifecycle,
 relationship integrity and immutable history before any transaction.
 
 | Entity | Typed payload fields | Lifecycle |

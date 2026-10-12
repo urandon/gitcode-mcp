@@ -35,6 +35,9 @@ func DecodeJSON(data []byte, target any) error {
 	if err := d.Decode(target); err != nil {
 		return Error{InvalidContract}
 	}
+	if validated, ok := target.(interface{ Validate() error }); ok {
+		return validated.Validate()
+	}
 	return nil
 }
 
@@ -85,13 +88,24 @@ func jsonValue(d *json.Decoder, depth int, schema reflect.Type) error {
 	switch delim {
 	case '{':
 		var fields map[string]reflect.Type
+		required := map[string]bool{}
 		if schema != nil && schema.Kind() == reflect.Struct {
 			fields = map[string]reflect.Type{}
 			for i := 0; i < schema.NumField(); i++ {
 				f := schema.Field(i)
-				name := strings.Split(f.Tag.Get("json"), ",")[0]
+				tag := strings.Split(f.Tag.Get("json"), ",")
+				name := tag[0]
 				if name != "" && name != "-" {
 					fields[name] = f.Type
+					optional := false
+					for _, option := range tag[1:] {
+						if option == "omitempty" {
+							optional = true
+						}
+					}
+					if !optional {
+						required[name] = true
+					}
 				}
 			}
 		} else if schema != nil && schema.Kind() != reflect.Interface {
@@ -118,6 +132,11 @@ func jsonValue(d *json.Decoder, depth int, schema reflect.Type) error {
 			}
 			if err := jsonValue(d, depth+1, child); err != nil {
 				return err
+			}
+		}
+		for key := range required {
+			if !keys[key] {
+				return Error{InvalidContract}
 			}
 		}
 	case '[':

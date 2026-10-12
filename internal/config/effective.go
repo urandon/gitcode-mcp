@@ -594,7 +594,7 @@ func projectYAMLKeys(n *yaml.Node, depth int) bool {
 		return false
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		switch n.Content[i].Value {
+		switch strings.ToLower(n.Content[i].Value) {
 		case "project", "local_projects", "authority":
 			return true
 		case "<<":

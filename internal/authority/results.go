@@ -1,6 +1,15 @@
 package authority
 
-import "encoding/json"
+import (
+	"encoding/hex"
+	"encoding/json"
+	"regexp"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+var displayAlias = regexp.MustCompile(`^(ISSUE|COMMENT|LABEL|MILESTONE|DOC|LINK)-([1-9][0-9]*)$`)
 
 // Result contracts are consumed by the storage/runtime/workflow cohorts. L1
 // never constructs a confirmed receipt or advertises these workflows available.
@@ -18,12 +27,68 @@ type ReadResult struct {
 	NextCursor string       `json:"next_cursor,omitempty"`
 }
 
+func (v EntityView) Validate() error {
+	if v.Citation.Validate() != nil || v.ProjectSequence == 0 {
+		return Error{InvalidContract}
+	}
+	match := displayAlias.FindStringSubmatch(v.DisplayAlias)
+	prefix := map[EntityKind]string{Issue: "ISSUE", Comment: "COMMENT", Label: "LABEL", Milestone: "MILESTONE", Document: "DOC", Link: "LINK"}
+	if len(match) != 3 || match[1] != prefix[v.Citation.Kind] {
+		return Error{InvalidContract}
+	}
+	if _, err := strconv.ParseUint(match[2], 10, 64); err != nil {
+		return Error{InvalidContract}
+	}
+	if v.Tombstone {
+		if v.Citation.Kind != Document && v.Citation.Kind != Link {
+			return Error{InvalidContract}
+		}
+		return DecodeJSON(v.Payload, &struct{}{})
+	}
+	// The same concrete full-replacement entity payload schemas apply on reads.
+	// This validates shape/reference namespace, not an unperformed transaction.
+	return (MutationRequest{Intent: WriteIntent{ProjectID: v.Citation.ProjectID, WriteMode: "local", IdempotencyKey: "schema-validation"}, Operation: string(v.Citation.Kind) + ".create", Payload: v.Payload}).Validate()
+}
+
+func (r ReadResult) Validate() error {
+	if !r.ProjectID.Valid() || r.Entities == nil || len(r.Entities) > 100 || !utf8.ValidString(r.NextCursor) || len(r.NextCursor) > 512 || len(r.Entities) == 0 && r.NextCursor != "" {
+		return Error{InvalidContract}
+	}
+	seen := map[Citation]bool{}
+	for _, v := range r.Entities {
+		if v.Validate() != nil || v.Citation.ProjectID != r.ProjectID || seen[v.Citation] {
+			return Error{InvalidContract}
+		}
+		seen[v.Citation] = true
+	}
+	return nil
+}
+
 type DocumentLocator struct {
 	Citation   Citation `json:"citation"`
 	CommitOID  string   `json:"commit_oid"`
 	BlobOID    string   `json:"blob_oid"`
 	SHA256     string   `json:"sha256"`
 	ByteLength int64    `json:"byte_length"`
+}
+
+func digestValid(s string, lengths ...int) bool {
+	validLength := false
+	for _, length := range lengths {
+		validLength = validLength || len(s) == length
+	}
+	if !validLength || s != strings.ToLower(s) {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+func (d DocumentLocator) Validate() error {
+	if d.Citation.Validate() != nil || d.Citation.Kind != Document || !digestValid(d.CommitOID, 40, 64) || !digestValid(d.BlobOID, 40, 64) || len(d.CommitOID) != len(d.BlobOID) || !digestValid(d.SHA256, 64) || d.ByteLength < 1 || d.ByteLength > 256<<10 {
+		return Error{InvalidContract}
+	}
+	return nil
 }
 
 type MutationReceipt struct {
@@ -38,6 +103,18 @@ type MutationReceipt struct {
 	ProjectionState    string   `json:"projection_state"`
 }
 
+func (r MutationReceipt) Validate() error {
+	if !r.ProjectID.Valid() || !r.OperationID.Valid() || r.Citation.Validate() != nil || r.Citation.ProjectID != r.ProjectID || r.ProjectSequence == 0 || !digestValid(r.IdempotencyKeyHash, 64) || !digestValid(r.IntentHash, 64) || r.Evidence != "local_commit_confirmed" {
+		return Error{InvalidContract}
+	}
+	switch r.ProjectionState {
+	case "pending", "ready", "degraded":
+	default:
+		return Error{InvalidContract}
+	}
+	return nil
+}
+
 type ProjectStatus struct {
 	ProjectID           UUID   `json:"project_id"`
 	Authority           Kind   `json:"authority"`
@@ -47,6 +124,28 @@ type ProjectStatus struct {
 	WriterState         string `json:"writer_state"`
 	AuthorityGeneration uint64 `json:"authority_generation"`
 	IndexedGeneration   uint64 `json:"indexed_generation"`
+}
+
+func (s ProjectStatus) Validate() error {
+	if !s.ProjectID.Valid() || s.Authority != Local || s.Generation == 0 || s.IndexedGeneration > s.AuthorityGeneration {
+		return Error{InvalidContract}
+	}
+	switch s.Readiness {
+	case "uninitialized", "ready", "read_only", "restoring", "recovery_required", "archived":
+	default:
+		return Error{InvalidContract}
+	}
+	switch s.WriterState {
+	case "unavailable", "owned", "conflict", "quiesced":
+	default:
+		return Error{InvalidContract}
+	}
+	switch s.NetworkState {
+	case "zero_network", "loopback_control_only", "loopback_provider_network":
+	default:
+		return Error{InvalidContract}
+	}
+	return nil
 }
 
 type OperationContract struct {

@@ -271,8 +271,9 @@ func rejectProjectJSON(data []byte) error {
 	if err := json.Unmarshal(data, &keys); err != nil {
 		return nil
 	}
-	for _, key := range []string{"project", "local_projects", "authority"} {
-		if _, ok := keys[key]; ok {
+	for key := range keys {
+		switch strings.ToLower(key) {
+		case "project", "local_projects", "authority":
 			return authority.Error{Code: authority.InitializationRequired}
 		}
 	}
