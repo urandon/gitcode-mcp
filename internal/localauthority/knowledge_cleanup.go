@@ -82,12 +82,18 @@ func (s *Store) DocumentOperationStatus(ctx context.Context, project authority.U
 		return zero, s.documentSQLError(err)
 	}
 	state := operationState(o, project)
-	if o.Phase == "settled" && o.PinCleanup == "retained" {
-		k, err := loadKnowledgeSetup(ctx, s.db, project, s.instance, s.directory)
+	if o.Phase == "settled" {
+		// A SQL cleanup flag is not proof that the owned Git namespace is
+		// still clear. Inspect physical binding and exact final/lock inventory
+		// even after cleanup; foreign evidence must not become normal advice.
+		g, err := s.readyKnowledgeRepository(ctx)
 		if err != nil {
 			return zero, s.documentSQLError(err)
 		}
-		pin, err := s.knowledgeRepository(k).readRef(filepath.Join("pins", string(o.ID)))
+		if o.PinCleanup == "cleared" {
+			return state, nil
+		}
+		pin, err := g.readRef(filepath.Join("pins", string(o.ID)))
 		if err != nil {
 			return zero, err
 		}

@@ -3,7 +3,9 @@ package localauthority
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/authority"
@@ -108,4 +110,63 @@ func TestKnowledgePendingPinCannotBeEvicted(t *testing.T) {
 	_, err = s.MutateDocument(ctx, other, testActor)
 	requireKnowledgeError(t, err, DocumentPending)
 	createIssue(t, s, "synthetic-tracker-during-document-pending")
+}
+
+func TestKnowledgeOperationStatusRefusesSettledForeignPinEvidence(t *testing.T) {
+	for _, scenario := range []string{"retained-equal-pair", "retained-conflicting-pair", "retained-lock-only", "cleared-final", "cleared-lock", "cleared-equal-pair", "cleared-conflicting-pair"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, _, _ := readyDocumentStore(t)
+			ctx := context.Background()
+			key := "synthetic-status-foreign-pin"
+			result, err := s.MutateDocument(ctx, documentRequest(t, "document.create", key, authority.EmptyKnowledgeRef, authority.Citation{}, "# Immutable status fixture"), testActor)
+			if err != nil {
+				t.Fatal("test original document failed")
+			}
+			cleared := strings.HasPrefix(scenario, "cleared-")
+			if cleared {
+				if _, err := s.CleanupDocumentPin(ctx, testProject, key); err != nil {
+					t.Fatal("test original pin cleanup failed")
+				}
+			}
+			pinPath := filepath.Join(s.directory, knowledgeDirectoryName, "refs", "pins", string(result.Receipt.OperationID))
+			originalBytes := []byte(result.Result.Locator.CommitOID + "\n")
+			final := !strings.HasSuffix(scenario, "lock-only") && scenario != "cleared-lock"
+			lock := scenario != "cleared-final"
+			if scenario == "retained-lock-only" {
+				if os.Rename(pinPath, filepath.Join(s.directory, "preserved-status-pin")) != nil {
+					t.Fatal("test pin relocation failed")
+				}
+			}
+			if cleared && final {
+				if os.WriteFile(pinPath, originalBytes, 0600) != nil {
+					t.Fatal("test final pin recreation failed")
+				}
+			}
+			lockBytes := originalBytes
+			if strings.Contains(scenario, "conflicting") {
+				lockBytes = []byte(strings.Repeat("a", 64) + "\n")
+			}
+			if lock {
+				if os.WriteFile(pinPath+".lock", lockBytes, 0600) != nil {
+					t.Fatal("test lock recreation failed")
+				}
+			}
+			_, err = s.DocumentOperationStatus(ctx, testProject, key)
+			requireKnowledgeError(t, err, KnowledgeCorrupt)
+			state, err := s.KnowledgeStatus(ctx, testProject)
+			if err != nil || state.Validate() != nil || state.Code != string(KnowledgeCorrupt) || state.Remediation != "operator_recovery" {
+				t.Fatal("operation/global status disagreed about foreign pin evidence")
+			}
+			if final {
+				if bytes, err := os.ReadFile(pinPath); err != nil || string(bytes) != string(originalBytes) {
+					t.Fatal("read-only status rewrote finalized evidence")
+				}
+			}
+			if lock {
+				if bytes, err := os.ReadFile(pinPath + ".lock"); err != nil || string(bytes) != string(lockBytes) {
+					t.Fatal("read-only status rewrote lock evidence")
+				}
+			}
+		})
+	}
 }
