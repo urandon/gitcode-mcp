@@ -209,7 +209,16 @@ normal/minimal HTTP/SSE, and authenticated Admin routes. Tests reject malformed
 arguments before connection/retained reads, hold actual snapshot locks, cancel
 silent established peers, fence whole-filter cursors, and compare serialized
 DTOs including full sampled 60-minute metric windows above 64 KiB. IPC pipeline
-framing and shutdown-handler joining are explicit invariants. Entrypoint fault
+framing and shutdown-handler joining are explicit invariants. Recovery
+fixtures distinguish a missing commit observation from a failed durable commit:
+the O5 recovery cohort still requires correlated admission/provider/terminal
+events and actual job/cache/health success. A missing commit event is acceptable
+only on a complete retained page with partial observation-contention coverage
+and increased dropped/loss counters since that recovery phase began. Earlier
+loss, unrelated loss reasons, unknown/ready coverage, truncation and sibling or
+prior-boot events cannot substitute for evidence. Held-reader-lock fixtures
+confirm that one deferred commit rejection is counted once, never retried, and
+survives collector restart. Entrypoint fault
 fixtures cover missing/damaged/old/future/cache-parent state and actual adapter
 construction failure: discovery and observation do not create/migrate the cache
 or resolve credentials. Later explicit live writes use offline HTTP fixtures to

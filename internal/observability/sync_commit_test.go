@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSyncCommitBufferOneTurnScopeAndSeal(t *testing.T) {
@@ -53,10 +54,13 @@ func TestSyncCommitBufferOneTurnScopeAndSeal(t *testing.T) {
 }
 
 func TestSyncCommitBufferRaceAndContentionNeverRetry(t *testing.T) {
-	c := New(Config{Directory: testDirectory(t), ManagedOutput: true})
+	path := testDirectory(t)
+	c := New(Config{Directory: path, ManagedOutput: true})
+	defer flush(t, c, true)
 	ready(t, c)
 	ctx, buffer := DeferSyncCommit(WithObservation(context.Background(), c, Context{Job: KnownRef("job", "fixture"), Correlation: KnownRef("correlation", "fixture")}))
 	before := c.admissionDrops.Load()
+	baseline := c.Coverage()
 	ConfirmSyncCommit(ctx, "issues")
 	c.mu.Lock()
 	var workers sync.WaitGroup
@@ -64,15 +68,31 @@ func TestSyncCommitBufferRaceAndContentionNeverRetry(t *testing.T) {
 		workers.Add(1)
 		go func() { defer workers.Done(); buffer.Flush(); ConfirmSyncCommit(ctx, "issues") }()
 	}
-	workers.Wait() // would deadlock if observation waited for a reader
-	c.mu.Unlock()
+	done := make(chan struct{})
+	go func() { workers.Wait(); close(done) }()
+	select {
+	case <-done:
+		c.mu.Unlock()
+	case <-time.After(time.Second):
+		c.mu.Unlock()
+		<-done
+		t.Fatal("confirmed commit observation waited for a reader")
+	}
 	if c.admissionDrops.Load()-before != 1 {
 		t.Fatal("one rejected confirmation was retried or hidden")
 	}
 	buffer.Flush()
 	flush(t, c, true)
 	page, err := c.Query(Filter{Code: SyncCommitted}, "", 20)
-	if err != nil || len(page.Events) != 0 || page.Coverage.State != "partial" {
+	if err != nil || len(page.Events) != 0 || page.Coverage.State != "partial" || page.Coverage.Reason != "observation_contention" || page.Coverage.Dropped != baseline.Dropped+1 || page.Coverage.LossEpoch != baseline.LossEpoch+1 {
 		t.Fatal("contention loss fabricated a retained commit")
+	}
+	restarted := New(Config{Directory: path, ManagedOutput: true})
+	defer flush(t, restarted, true)
+	ready(t, restarted)
+	flush(t, restarted, true)
+	retained, err := restarted.Query(Filter{Code: SyncCommitted}, "", 20)
+	if err != nil || len(retained.Events) != 0 || retained.Coverage.State != "partial" || retained.Coverage.Dropped != page.Coverage.Dropped || retained.Coverage.LossEpoch != page.Coverage.LossEpoch {
+		t.Fatal("restart erased, retried or recounted a rejected commit observation")
 	}
 }

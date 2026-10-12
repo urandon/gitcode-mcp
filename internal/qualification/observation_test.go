@@ -213,6 +213,10 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			if first.Status != servicectl.JobStatusSucceeded || calls.Load() != 1 {
 				t.Fatal("baseline confirmed sync failed")
 			}
+			var evidenceBaseline observability.Coverage
+			if collector != nil {
+				evidenceBaseline = collector.Coverage()
+			}
 			forbidden.Store(true)
 			failed := start("qualification-failed")
 			budget := 5 * time.Second
@@ -285,7 +289,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			if !found {
 				t.Fatal("failure diagnosis lost provider cause or prior confirmed collection success")
 			}
-			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParitySince(t, reader, src, &calls, mode == "retained", evidenceBaseline, failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			// New job owner reloads the durable snapshot, not event-derived state.
 			jobs = servicectl.NewJobManager(jobsPath)
 			if jobs.LoadAndMarkInterrupted() != nil {
@@ -296,7 +300,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 				t.Fatal("restart changed retained failure authority")
 			}
 			reader.Health = maintenance.ExecutionHealthContext
-			assertTransportParity(t, reader, src, &calls, mode == "retained", failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParitySince(t, reader, src, &calls, mode == "retained", evidenceBaseline, failed, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			collector = qualifyCollector(t, mode, filepath.Join(root, "events"))
 			if mode == "retained" {
 				if collector.BootID() == previousBoot {
@@ -313,6 +317,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			}
 			jobs.SetObservation(collector)
 			if collector != nil {
+				evidenceBaseline = collector.Coverage()
 				metrics = observability.NewMetrics(collector.BootID(), time.Now().UTC())
 				jobs.SetMetrics(metrics)
 			}
@@ -362,7 +367,7 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 			if mode == "storage_unavailable" && collector.Coverage().State != "partial" {
 				t.Fatal("storage failure disappeared into execution success")
 			}
-			assertTransportParity(t, reader, src, &calls, mode == "retained", recovering, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
+			assertTransportParitySince(t, reader, src, &calls, mode == "retained", evidenceBaseline, recovering, tc.terminal, root, provider.URL, identity.UUID, binding.RepoID)
 			cached, err := store.GetSourceScoped(ctx, binding.RepoID, "ISSUE-1")
 			if err != nil || cached.Body != "synthetic-private-source-body" {
 				t.Fatal("telemetry mode changed durable cache truth")
@@ -372,6 +377,11 @@ func TestO5ActualFailureWriterWaitRecoveryAcrossTransports(t *testing.T) {
 }
 
 func assertTransportParity(t *testing.T, reader *observability.Reader, src isolatedSource, calls *atomic.Int64, requireEvents bool, expectedJob servicectl.Job, failureClass string, private ...string) {
+	t.Helper()
+	assertTransportParitySince(t, reader, src, calls, requireEvents, observability.Coverage{}, expectedJob, failureClass, private...)
+}
+
+func assertTransportParitySince(t *testing.T, reader *observability.Reader, src isolatedSource, calls *atomic.Int64, requireEvents bool, baseline observability.Coverage, expectedJob servicectl.Job, failureClass string, private ...string) {
 	t.Helper()
 	// The caller establishes a stable execution/ledger phase and observation
 	// time (joined terminal owner, or a retained provider-directed wait), so
@@ -499,25 +509,8 @@ func assertTransportParity(t *testing.T, reader *observability.Reader, src isola
 			// A recovered incident retains the original failed job ref. Bind
 			// the recovery chain to the actual StartSync result, never a sibling
 			// succeeded terminal from retained history.
-			jobRef, outcome := expectedRefs.Job, expectedJob.Status
-			admitted, terminal, provider, committed := false, false, false, false
-			for _, event := range page.Events {
-				if event.JobRef == "" || event.JobRef != jobRef {
-					continue
-				}
-				if event.BootID != reader.Collector.BootID() || event.CorrelationRef == "" || event.RepoRef != expectedRefs.Repo || event.CacheRef != expectedRefs.Cache {
-					t.Fatal("actual job event lost causal identity")
-				}
-				admitted = admitted || event.Code == observability.JobAdmitted
-				if event.Code == observability.JobTerminal && outcome == servicectl.JobStatusFailed && event.FailureClass != failureClass {
-					t.Fatal("actual terminal lost its finite provider failure class")
-				}
-				terminal = terminal || event.Code == observability.JobTerminal && event.Outcome == outcome
-				provider = provider || event.Code == observability.ProviderAttempt && event.Phase == "fetch"
-				committed = committed || event.Code == observability.SyncCommitted && event.Collection == "issues" && event.Outcome == "succeeded"
-			}
-			if !admitted || !terminal || !provider || outcome == servicectl.JobStatusSucceeded && !committed {
-				t.Fatalf("actual correlated evidence missing: admission=%t provider=%t terminal=%t outcome=%s", admitted, provider, terminal, outcome)
+			if err := qualifyJobEvidence(page, baseline, reader.Collector.BootID(), *expectedRefs, expectedJob.Status, failureClass); err != nil {
+				t.Fatal(err)
 			}
 		}
 		tests = append(tests, struct {
