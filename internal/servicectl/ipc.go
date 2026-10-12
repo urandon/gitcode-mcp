@@ -526,6 +526,9 @@ func (c *RPCClient) Call(ctx context.Context, method string, params any, result 
 	if observationMethod(method) {
 		return c.callObservation(ctx, method, params, result)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	network := c.Network
 	if network == "" {
 		network = "unix"
@@ -546,6 +549,21 @@ func (c *RPCClient) Call(ctx context.Context, method string, params any, result 
 		return err
 	}
 	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return rpcCallerError(ctx, err)
+		}
+	}
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+		close(closed)
+	})
+	defer func() {
+		if !stop() {
+			<-closed
+		}
+	}()
 	id := c.nextID.Add(1)
 	req := RPCRequest{JSONRPC: jsonrpcVersion, ID: id, Method: method}
 	if params != nil {
@@ -555,11 +573,17 @@ func (c *RPCClient) Call(ctx context.Context, method string, params any, result 
 		}
 		req.Params = data
 	}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return rpcCallerError(ctx, err)
 	}
 	var resp RPCResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return rpcCallerError(ctx, err)
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if resp.Error != nil {
@@ -576,6 +600,19 @@ func (c *RPCClient) Call(ctx context.Context, method string, params any, result 
 		return err
 	}
 	return json.Unmarshal(data, result)
+}
+
+// A socket deadline may fire just before the context timer publishes Err.
+// Preserve caller cancellation identity without reclassifying unrelated I/O.
+func rpcCallerError(ctx context.Context, err error) error {
+	if cause := ctx.Err(); cause != nil {
+		return cause
+	}
+	var timeout net.Error
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) && errors.As(err, &timeout) && timeout.Timeout() {
+		return context.DeadlineExceeded
+	}
+	return err
 }
 
 func (c *RPCClient) callMemory(ctx context.Context, address, method string, params any, result any) error {
