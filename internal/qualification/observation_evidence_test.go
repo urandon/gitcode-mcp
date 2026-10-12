@@ -2,6 +2,7 @@ package qualification
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/observability"
@@ -33,7 +34,17 @@ func qualifyJobEvidence(page observability.Page, baseline observability.Coverage
 		committed = committed || event.Code == observability.SyncCommitted && event.Collection == "issues" && event.Outcome == "succeeded"
 	}
 	if !admitted || !terminal || !provider {
-		return errors.New("actual correlated admission/provider/terminal evidence missing")
+		var missing []string
+		if !admitted {
+			missing = append(missing, "admission")
+		}
+		if !provider {
+			missing = append(missing, "provider")
+		}
+		if !terminal {
+			missing = append(missing, "terminal")
+		}
+		return errors.New("actual correlated evidence missing: " + strings.Join(missing, ","))
 	}
 	if outcome == servicectl.JobStatusSucceeded && !committed {
 		coverage := page.Coverage

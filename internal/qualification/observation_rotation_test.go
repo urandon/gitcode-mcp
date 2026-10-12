@@ -166,7 +166,9 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), failed, *baseline.SyncCollections[0].LastSuccessAt, "active")
 	assertTransportParity(t, reader, src, &calls, false, failed, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
 
-	fresh := qualifyCollector(t, "retained", ledger)
+	fresh := observability.NewQualificationCollector(observability.Config{Directory: ledger, ManagedOutput: true})
+	t.Cleanup(func() { closeCollector(t, fresh) })
+	eventually(t, func() bool { return fresh.Coverage().State != "initializing" })
 	freshMetrics := observability.NewMetrics(fresh.BootID(), time.Now().UTC())
 	if !freshMetrics.AttachCollector(fresh) || dropMetric(t, freshMetrics) != 0 {
 		t.Fatal("rotated ledger reload replayed admission-drop metrics")
@@ -220,6 +222,13 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 	assertRotationIncident(t, mustActiveSummary(t, ctx, reader), retained, *baseline.SyncCollections[0].LastSuccessAt, "active")
 	assertTransportParity(t, reader, src, &calls, false, retained, "forbidden", root, provider.URL, identity.UUID, binding.RepoID)
 	recoveryCoverage := fresh.Coverage()
+	resumeWriter, err := fresh.PauseWriterForQualification(ctx)
+	if err != nil {
+		t.Fatal("rotation qualification writer boundary unavailable")
+	}
+	defer resumeWriter()
+	// No collector reads occur until the real recovery worker has joined and
+	// the writer resumes. Emit remains one-shot and uses the bounded real queue.
 	release, err := reloaded.BeginDirectCacheWriter(identity.UUID, "synthetic-private-rotation-writer")
 	if err != nil {
 		t.Fatal("rotation recovery writer fixture unavailable")
@@ -251,6 +260,9 @@ func TestO5ActualJobDiagnosisSurvivesWholeFootprintRotation(t *testing.T) {
 	}
 	if len(job.SyncCollections) != 1 || job.SyncCollections[0].Collection != "issues" || job.SyncCollections[0].Outcome != servicectl.SyncCollectionSuccess || job.SyncCollections[0].Committed != 1 || job.SyncCollections[0].LastSuccessAt == nil || !job.SyncCollections[0].LastSuccessAt.After(*failed.FinishedAt) {
 		t.Fatal("rotation recovery lost durable collection commit evidence")
+	}
+	if !resumeWriter() {
+		t.Fatal("rotation qualification window expired before worker completion")
 	}
 	closeCollector(t, fresh)
 	assertRotationInventory(t, ledger, root, provider.URL, identity.UUID, binding.RepoID)

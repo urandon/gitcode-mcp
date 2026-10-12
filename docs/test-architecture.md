@@ -230,6 +230,15 @@ sparse pagination preserves the final page's coverage and never treats an empty
 continuation as completion. Recovery independently proves distinct provider
 bytes, the same waiting-to-committed stage, one committed issues collection and
 new commit/success timestamps; retained events cannot manufacture that proof.
+Its strict mandatory chain is admitted through an explicit qualification-only
+collector factory/window: the serial writer acknowledges an idle boundary, then
+pauses without a mutex for at most ten seconds. Real one-shot Emit calls still
+use the same bounded queue; the fixture makes no observation reads until worker
+join and writer release. Close drains/persists those actual entries. Normal
+constructors and all product config/transports leave the window disabled.
+Default-disabled, exclusivity, queue-limit, pre-ack cancellation, deadline,
+shutdown and idempotent resume controls qualify this test scheduling boundary;
+neither fabricated causal events nor producer wait/retry is permitted.
 Entrypoint fault
 fixtures cover missing/damaged/old/future/cache-parent state and actual adapter
 construction failure: discovery and observation do not create/migrate the cache
