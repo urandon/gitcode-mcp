@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,12 @@ import (
 // The history bound is a refusal, not permission to evict authoritative data.
 const maxKnowledgeLooseObjects = 65536
 const maxKnowledgeCompressedBytes = maxKnowledgeTreeBytes + 1024
+
+type knowledgeCapacityError struct{ category string }
+
+func (e knowledgeCapacityError) Error() string          { return (Error{Capacity}).Error() }
+func (e knowledgeCapacityError) DiagnosticCode() string { return string(Capacity) }
+func (e knowledgeCapacityError) Unwrap() error          { return Error{Capacity} }
 
 type knowledgeRepository struct {
 	directory string // trusted local coordinate, never serialized
@@ -122,6 +129,14 @@ func exactKnowledgeNames(path string, expected ...string) error {
 // hooks, replacement refs, worktrees, symbolic links and hard-linked files.
 // It inspects bounded names/metadata; object bytes are verified by exact OID.
 func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
+	return g.verifyJournalLayout(nil)
+}
+
+// A narrowly scoped original journal proof can account for a paired lock.
+// Ordinary layout/read/setup callers never receive that permission. The proof
+// must name the exact durable candidate and is checked against actual objects,
+// not inferred from equal OIDs or the current head.
+func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (objects, pins int, err error) {
 	if err = g.verifyPhysical(); err != nil {
 		return
 	}
@@ -157,11 +172,23 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 		}
 	}
 	if headNames["knowledge"] && headNames["knowledge.lock"] {
-		err = Error{KnowledgeCorrupt}
-		return
+		if original == nil || original.Phase != "bound" || g.verifyDocumentEvidence(*original) != nil {
+			err = Error{KnowledgeCorrupt}
+			return
+		}
+		current, e := g.readRef(filepath.Join("heads", "knowledge"))
+		lock, le := g.readRef(filepath.Join("heads", "knowledge.lock"))
+		if e != nil || le != nil || lock != original.commitOID() || current != original.Metadata.ExpectedRefOID && current != lock {
+			err = Error{KnowledgeCorrupt}
+			return
+		}
 	}
 	entries, err = knowledgeNames(filepath.Join(g.directory, "refs", "pins"), maxRetainedKnowledgePins*2)
 	if err != nil {
+		var e Error
+		if errors.As(err, &e) && e.Code == Capacity {
+			err = knowledgeCapacityError{"retained_pins"}
+		}
 		return
 	}
 	seenPins := map[string]bool{}
@@ -175,8 +202,16 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 			// A paired final/lock is ambiguous evidence, even if both OIDs
 			// match. It is not one ordinary retained pin. Only an original
 			// journal-owned recovery transition may later interpret the pair.
-			err = Error{KnowledgeCorrupt}
-			return
+			if original == nil || name != string(original.ID) || original.Phase == "settled" || g.verifyDocumentEvidence(*original) != nil {
+				err = Error{KnowledgeCorrupt}
+				return
+			}
+			final, e := g.readRef(filepath.Join("pins", name))
+			lock, le := g.readRef(filepath.Join("pins", name+".lock"))
+			if e != nil || le != nil || final != original.commitOID() || lock != final {
+				err = Error{KnowledgeCorrupt}
+				return
+			}
 		}
 		seenPins[name] = true
 		if _, err = g.readRef(filepath.Join("pins", entry.Name())); err != nil {
@@ -185,7 +220,7 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 	}
 	pins = len(seenPins)
 	if pins > maxRetainedKnowledgePins {
-		err = Error{Capacity}
+		err = knowledgeCapacityError{"retained_pins"}
 		return
 	}
 	entries, err = knowledgeNames(filepath.Join(g.directory, "objects"), 256)
@@ -206,6 +241,10 @@ func (g knowledgeRepository) verifyLayout() (objects, pins int, err error) {
 		var files []os.DirEntry
 		files, err = knowledgeNames(filepath.Join(g.directory, "objects", name), maxKnowledgeLooseObjects-objects)
 		if err != nil {
+			var e Error
+			if errors.As(err, &e) && e.Code == Capacity {
+				err = knowledgeCapacityError{"loose_objects"}
+			}
 			return
 		}
 		for _, file := range files {

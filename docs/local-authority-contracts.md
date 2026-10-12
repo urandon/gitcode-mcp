@@ -1,10 +1,10 @@
 # Local authority contracts
 
-Status: L1 contracts (#180) and the L2 tracker domain/store (#181), epic #179.
-This is not an enabled local project runtime. The L3 document contract and owned
-Git primitives are being implemented, but full Git knowledge, runtime ownership
-integration, recovery, CLI/MCP workflows, Admin, backup and integrated feature
-acceptance remain #182–#186. Current `authority.v1`
+Status: L1 contracts (#180), L2 tracker domain/store (#181) and the L3 shared
+document/Git backend (#182), epic #179. This is not an enabled local project
+runtime. Runtime ownership integration, operator recovery,
+CLI/MCP workflows, Admin, backup and integrated feature acceptance remain
+#183–#186. Current `authority.v1`
 negotiation reports `available: false`, an empty implemented-method list and
 `authority_unavailable`. It never starts a daemon or promotes a cache.
 
@@ -224,8 +224,8 @@ closed; bytes and identity are preserved for the
 CLI-only migration/backup/recovery cohort (#186).
 
 The v2 catalog alone does not initialize Git or enable document workflows. Its
-populated setup/journal admission and integrity are part of the remaining L3
-implementation; current negotiation remains contracts-only. There is no automatic
+populated setup/journal admission and integrity are explicit shared service
+operations; current negotiation remains contracts-only. There is no automatic
 v1-to-v2 migration, and the existing cache schema is unrelated to this store.
 
 The machine registry is global to the current OS user across every runtime
@@ -296,8 +296,90 @@ edges are admitted, so supported mutations cannot build a graph whose restart
 validation exceeds the same bound. A coherently oversized external graph returns
 `authority_capacity`, not silent trimming or an acyclicity guess. `relates_to` connects distinct
 non-link entities. Tombstoned links cannot be resurrected; new relationships get
-new UUIDs/aliases. No irreversible purge/reset API exists. Document mutations are
-unsupported here: SQLite must never gain Markdown bytes while L3 is absent.
+new UUIDs/aliases. No irreversible purge/reset API exists. The generic tracker
+mutation envelope still rejects document writes: document admission uses the
+separate exact-ref contract below, never Markdown persisted in SQL.
+
+## Owned Git knowledge layer (L3)
+
+`SetupKnowledge` is an explicit trusted service operation, not a side effect of
+read, open, document mutation or runtime enrollment. Its original caller key
+reserves a knowledge-instance UUID and binds project/tracker identity, canonical
+coordinate digest, physical directory identity and exact SHA256 Git config.
+Uninitialized v2 reports setup-required; v1 reports migration-required without
+creating Git or changing its catalog. A known bound partial setup resumes only
+its original identity. A directory published before durable physical binding
+remains initialization-pending and requires the operator-recovery cohort; its
+shape/name is not proof authorizing adoption. Unknown directories are preserved.
+
+The private bare store owns a fixed layout, loose SHA256 objects and a single
+controlled history ref. It never runs Git subprocesses/helpers, loads inherited
+Git configuration, follows alternates, fetches, invokes hooks/filters, accesses
+credentials or changes a worktree. Symlinks, hard links, foreign/packed state,
+unsupported filesystems and same-path physical replacements refuse document
+writes. Native Git is used only as an offline test oracle.
+
+`MutateDocument` accepts strict document contract schema1: required project UUID,
+`write_mode: local`, original key, operation/payload and exact lowercase64hex
+`expected_ref_oid`. All-zero64 means explicit unborn ref, not an inferred CAS.
+Create omits entity/revision; update/tombstone require existing UUID and positive
+revision. Live payload replaces title and exact validated UTF8 Markdown;
+tombstone payload is exactly `{}`. Legacy generic requests do not acquire these
+effects, and the contracts-only transport still advertises no implementation.
+
+New-key ref/revision/lifecycle/capacity checks precede any reservation, alias,
+object or pin. An existing original key instead takes precedence over today's
+CAS: exact intent resumes/replays the original identity; changed intent conflicts.
+A different pending operation owns the lane and blocks new document admission,
+not unrelated tracker writes. Planned OIDs and content-free canonical metadata
+are durably reserved with the generated operation/entity UUID and display alias.
+Pending creates count toward never-reused alias integrity. Only actual object
+and deterministic pin barriers permit the subsequent SQL binding phase; only
+that exact binding permits ref CAS/publication and FULL receipt settlement.
+
+Algorithm1 constructs canonical Git objects from exact bytes, lexically sorted
+UUID-derived document paths and the exact reserved parent. Commits have a fixed
+synthetic identity, epoch timestamp and operation-UUID-only message. Caller keys,
+actors, titles, prompts and filesystem coordinates are not commit metadata.
+Paired final/lock refs are refused by ordinary primitives. Original-key recovery
+may account for a pair only with immutable SQL operation identity, exact candidate
+objects and original pin/ref proof. Equal OIDs alone never clear the fence.
+
+SQLite persists canonical titles, locators, digests/lengths, CAS fields, journal
+phases/generations, attribution, immutable receipts and content-free audit only.
+Document Markdown/chunks are never stored in the database or WAL. Protected
+get/list/history hydrates the exact saved commit/blob, not current HEAD; intact
+old revisions remain readable during a verified original pending update.
+The distinct result contains the unchanged generic receipt, ordered OS barrier
+capability and either a live exact locator or tombstone evidence, never both.
+Replay after subsequent edits/restart returns that original immutable result.
+
+Limits are 4096 active documents, 64 retained operation pins, 65536 loose objects,
+256 KiB per Markdown blob, bounded canonical trees/commits, and the existing
+512 KiB encoded response/request limits. New admission refuses before effects;
+no history, pending operation or pin is evicted to make room. Explicit
+`CleanupDocumentPin` handles one original settled operation: it proves controlled
+ancestry protects the candidate, requalifies barriers, removes only its pin and
+durably records cleanup. Interrupted cleanup resumes the same key; retained or
+partially cleaned pin status is separate from the immutable receipt. It does not
+delete document objects/history or alter project sequence.
+
+`KnowledgeStatus` observes setup readiness, the exact verified current ref OID
+for a deliberate new intent, and an optional opaque pending operation. It never
+refreshes CAS inside a submitted write. `DocumentOperationStatus` reports finite original phase/pin/remediation
+without key text or coordinates. Git-only corruption fences documents while
+intact tracker data remains available. SQL logical corruption fences the global
+writer and cannot be cleared by replaying an unrelated receipt. SQL barrier
+uncertainty retains the original key until verified reopen/requalification;
+cancellation never proves rollback. Fixed errors distinguish ordinary stale CAS,
+setup/migration, pending lane, original recovery, corruption, capacity and
+durability uncertainty. Backup/rebind/migration/operator recovery and exposed
+CLI/MCP/Admin workflows remain the downstream cohorts, not implicit repair.
+
+Ordered OS barriers assume the qualified filesystem/hardware honors them.
+Abrupt-process-exit fixtures exercise each admission/object/pin/binding/ref/SQL
+boundary for create, update and tombstone. They do not certify physical power-loss behavior
+or replace the exact-SHA independent review and head/resulting-main CI gates.
 
 Canonical get/list/history/receipt/metadata reads use the authority directly.
 List/history cursors fence project, kind, operation, entity and sequence snapshot;

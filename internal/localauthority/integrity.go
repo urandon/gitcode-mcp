@@ -78,8 +78,7 @@ func checkLogicalRows(ctx context.Context, tx *sql.Tx, project authority.UUID) e
 			return e
 		}
 		if v.Citation.Kind == authority.Document {
-			_ = rows.Close()
-			return Error{Corrupt}
+			continue // metadata/citation checked by scanView and journal cross-check.
 		}
 		if err := checkHistoricalReferences(ctx, tx, v); err != nil {
 			_ = rows.Close()

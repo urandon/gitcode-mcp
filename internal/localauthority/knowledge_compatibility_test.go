@@ -205,3 +205,22 @@ func TestKnowledgeCompatibilityFreshVersionIsIndependent(t *testing.T) {
 		t.Fatal("uninitialized knowledge blocked intact tracker")
 	}
 }
+
+func TestKnowledgeDocumentAdmissionLegacyStopsWithoutMigrationEffects(t *testing.T) {
+	s, _, directory := legacyAuthorityFixture(t)
+	before, version := authorityCatalogDigest(t, s)
+	if version != 1 {
+		t.Fatal("test legacy version unavailable")
+	}
+	request := documentRequest(t, "document.create", "synthetic-legacy-doc", authority.EmptyKnowledgeRef, authority.Citation{}, "# No implicit migration")
+	_, err := s.MutateDocument(context.Background(), request, testActor)
+	requireKnowledgeError(t, err, KnowledgeMigrationRequired)
+	after, currentVersion := authorityCatalogDigest(t, s)
+	if before != after || currentVersion != 1 {
+		t.Fatal("document admission silently changed legacy catalog")
+	}
+	if _, err := os.Lstat(filepath.Join(directory, knowledgeDirectoryName)); !os.IsNotExist(err) {
+		t.Fatal("legacy document admission created knowledge storage")
+	}
+	createIssue(t, s, "synthetic-legacy-tracker-after-doc-refusal")
+}

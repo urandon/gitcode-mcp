@@ -25,7 +25,10 @@ type Store struct {
 	schema    int
 	directory string // private, never serialized
 	fenced    bool
-	closed    bool
+	// Logical corruption cannot be cleared by a receipt's physical OS barrier.
+	// A verified reopen must validate repaired authority before any fresh ack.
+	logicalFenced bool
+	closed        bool
 	// fault is test-only injection at transaction boundaries; no public option.
 	fault func(string) error
 }
@@ -295,7 +298,7 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if tx.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check) != nil || check != "ok" {
 		return Error{Corrupt}
 	}
-	if err := s.checkConsistency(ctx, tx); err != nil {
+	if err := s.checkConsistency(ctx, tx, version); err != nil {
 		return err
 	}
 	if err := checkLogicalRows(ctx, tx, m.ID); err != nil {
@@ -305,20 +308,17 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	s.instance = authority.UUID(instance)
 	s.schema = version
 	if version == 2 {
-		// Keep populated knowledge unavailable until the next L3 increment
-		// supplies strict journal/metadata integrity and explicit setup. The
-		// empty v2 catalog cannot activate unimplemented document workflows.
-		for _, table := range []string{"knowledge_setup", "document_operations"} {
-			var count int
-			if tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count) != nil || count != 0 {
-				return Error{Corrupt}
-			}
+		if err := checkKnowledgeSetup(ctx, tx, m.ID, authority.UUID(instance), s.directory); err != nil {
+			return err
+		}
+		if err := checkDocumentOperations(ctx, tx, m.ID, authority.UUID(instance), s.directory); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
+func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx, version int) error {
 	var count, sequence, generation int64
 	if tx.QueryRowContext(ctx, "SELECT count(*),sequence,generation FROM project").Scan(&count, &sequence, &generation) != nil || count != 1 || sequence < 0 || generation != sequence+1 {
 		return Error{Corrupt}
@@ -338,14 +338,18 @@ func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
 	if tx.QueryRowContext(ctx, `SELECT count(*) FROM entities e WHERE e.current_revision<>(SELECT max(r.revision) FROM revisions r WHERE r.entity_id=e.entity_id)`).Scan(&count) != nil || count != 0 {
 		return Error{Corrupt}
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+coalesce((SELECT max(e.alias_number) FROM entities e WHERE e.kind=a.kind),0)`).Scan(&count) != nil || count != 0 {
-		return Error{Corrupt}
-	}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM aliases").Scan(&count) != nil || count != 6 {
 		return Error{Corrupt}
 	}
-	if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+(SELECT count(*) FROM entities e WHERE e.kind=a.kind)`).Scan(&count) != nil || count != 0 {
-		return Error{Corrupt}
+	if version == 1 {
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+coalesce((SELECT max(e.alias_number) FROM entities e WHERE e.kind=a.kind),0)`).Scan(&count) != nil || count != 0 {
+			return Error{Corrupt}
+		}
+		if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+(SELECT count(*) FROM entities e WHERE e.kind=a.kind)`).Scan(&count) != nil || count != 0 {
+			return Error{Corrupt}
+		}
+	} else if err := checkReservedAliases(ctx, tx); err != nil {
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
