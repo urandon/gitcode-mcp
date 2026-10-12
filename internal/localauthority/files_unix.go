@@ -37,13 +37,22 @@ func openPrivateFile(path string) (*os.File, error) {
 func openExistingFile(path string) (*os.File, error) { return openSecureFile(path, unix.O_RDONLY) }
 
 func openSecureFile(path string, flags int) (*os.File, error) {
+	return openSecureFileLinks(path, flags, 1)
+}
+
+// Only the initialization protocol validates a known two-name publication.
+func openInitializationFile(path string) (*os.File, error) {
+	return openSecureFileLinks(path, unix.O_RDONLY, 2)
+}
+
+func openSecureFileLinks(path string, flags int, maxLinks uint64) (*os.File, error) {
 	fd, err := unix.Open(path, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, Error{DurabilityUnavailable}
 	}
 	f := os.NewFile(uintptr(fd), "authority-owner")
 	var stat unix.Stat_t
-	if err = unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 {
+	if err = unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink < 1 || uint64(stat.Nlink) > maxLinks || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0077 != 0 {
 		_ = f.Close()
 		return nil, Error{DurabilityUnavailable}
 	}

@@ -49,27 +49,25 @@ type lease struct {
 // The binding is never removed on release. A clone or relocated authority
 // requires an explicit identity-preserving restore/rebind contract (L7).
 func (r *Registry) acquire(ctx context.Context, id, instance authority.UUID, directory string) (*lease, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
 	if r == nil || !id.Valid() || !instance.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
-	f, err := openPrivateFile(filepath.Join(r.root, string(id)+".owner"))
+	l, err := r.lockProject(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if err = lockExclusive(f); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	l := &lease{file: f, registry: r.root}
+	f := l.file
 	success := false
 	defer func() {
 		if !success {
 			_ = l.close()
 		}
 	}()
+	if _, err := os.Lstat(filepath.Join(r.root, string(id)+".init")); err == nil {
+		return nil, Error{InitializationPending}
+	} else if !os.IsNotExist(err) {
+		return nil, Error{Corrupt}
+	}
 	digest := sha256.Sum256([]byte(directory))
 	want := string(id) + "\n" + hex.EncodeToString(digest[:]) + "\n" + string(instance) + "\n"
 	l.binding = want
@@ -95,6 +93,26 @@ func (r *Registry) acquire(ctx context.Context, id, instance authority.UUID, dir
 	}
 	success = true
 	return l, nil
+}
+
+// An unpublished lock is not an identity reservation. Only the initialization
+// publication protocol may turn it into a durable final binding.
+func (r *Registry) lockProject(ctx context.Context, id authority.UUID) (*lease, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if r == nil || !id.Valid() {
+		return nil, authority.Error{Code: authority.InvalidContract}
+	}
+	f, err := openPrivateFile(filepath.Join(r.root, string(id)+".owner"))
+	if err != nil {
+		return nil, err
+	}
+	if err = lockExclusive(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return &lease{file: f, registry: r.root}, nil
 }
 
 func (l *lease) bindPhysical(path string) error {

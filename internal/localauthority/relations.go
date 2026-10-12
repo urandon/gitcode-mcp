@@ -71,7 +71,7 @@ func validateRelationships(ctx context.Context, tx *sql.Tx, id authority.UUID, m
 	case "link.create", "link.update":
 		var p authority.LinkPayload
 		_ = json.Unmarshal(m.Payload, &p)
-		if p.From.EntityID == p.To.EntityID || p.From.Kind == authority.Link || p.To.Kind == authority.Link {
+		if !validRelationShape(p) {
 			return authority.Error{Code: authority.InvalidContract}
 		}
 		if err := reference(ctx, tx, p.From); err != nil {
@@ -141,4 +141,24 @@ func validateRelationships(ctx context.Context, tx *sql.Tx, id authority.UUID, m
 		}
 	}
 	return nil
+}
+
+func validRelationShape(p authority.LinkPayload) bool {
+	if p.From.EntityID == p.To.EntityID || p.From.Kind == authority.Link || p.To.Kind == authority.Link {
+		return false
+	}
+	switch p.Relation {
+	case "relates_to":
+		return true
+	case "blocks":
+		return p.From.Kind == authority.Issue && p.To.Kind == authority.Issue
+	case "label":
+		return p.From.Kind == authority.Issue && p.To.Kind == authority.Label
+	case "milestone":
+		return p.From.Kind == authority.Issue && p.To.Kind == authority.Milestone
+	case "evidence_for":
+		return p.To.Kind == authority.Issue && (p.From.Kind == authority.Comment || p.From.Kind == authority.Document)
+	default:
+		return false
+	}
 }

@@ -19,6 +19,19 @@ func TestAuthorityProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(11)
 	}
+	if os.Getenv("GCM_AUTHORITY_TEST_INIT") == "1" {
+		s, err := initialize(context.Background(), r, os.Getenv("GCM_AUTHORITY_TEST_DIRECTORY"), testManifest(), func(at string) error {
+			if at == os.Getenv("GCM_AUTHORITY_TEST_PHASE") {
+				os.Exit(77)
+			}
+			return nil
+		})
+		if err != nil {
+			os.Exit(16)
+		}
+		_ = s.Close()
+		os.Exit(15)
+	}
 	s, err := OpenWriter(context.Background(), r, os.Getenv("GCM_AUTHORITY_TEST_DIRECTORY"), testProject)
 	if os.Getenv("GCM_AUTHORITY_TEST_PHASE") == "writer_conflict" {
 		var typed authority.Error

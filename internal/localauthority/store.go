@@ -35,9 +35,9 @@ type Inspection struct {
 	Durability   string         `json:"durability"`
 }
 
-// Initialize is an explicit domain action called only after the later CLI
-// confirmation/enrollment gate. It never replaces an existing database.
-func Initialize(ctx context.Context, registry *Registry, directory string, m authority.Manifest) (*Store, error) {
+// prepareEmpty never publishes project ownership or the final database name.
+// Its staging directory is unique to one unacknowledged initialization.
+func prepareEmpty(ctx context.Context, directory string, m authority.Manifest, instance authority.UUID, fault func(string) error) (*Store, error) {
 	if m.Validate() != nil || !m.ID.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
@@ -48,15 +48,7 @@ func Initialize(ctx context.Context, registry *Registry, directory string, m aut
 	if err = qualifyFilesystem(path); err != nil {
 		return nil, err
 	}
-	instance, err := authority.NewUUID()
-	if err != nil {
-		return nil, err
-	}
-	owner, err := registry.acquire(ctx, m.ID, instance, path)
-	if err != nil {
-		return nil, err
-	}
-	s := &Store{lease: owner, manifest: m, instance: instance, directory: path}
+	s := &Store{manifest: m, instance: instance, directory: path, fault: fault}
 	ok := false
 	defer func() {
 		if !ok {
@@ -73,7 +65,7 @@ func Initialize(ctx context.Context, registry *Registry, directory string, m aut
 		return nil, err
 	}
 	_ = f.Close()
-	if err = owner.bindPhysical(dbPath); err != nil {
+	if err = s.inject("init_file"); err != nil {
 		return nil, err
 	}
 	s.db, err = openDB(ctx, dbPath, false)
@@ -110,12 +102,22 @@ func Initialize(ctx context.Context, registry *Registry, directory string, m aut
 	if _, err = tx.ExecContext(ctx, "PRAGMA application_id=1195593025; PRAGMA user_version=1"); err != nil {
 		return nil, storageError(ctx)
 	}
+	if err = s.inject("init_schema"); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, storageError(ctx)
 	}
+	if err = s.inject("init_commit"); err != nil {
+		return nil, err
+	}
 	// Persist the dedicated header identity before any later read-only probe.
-	if _, err = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(FULL)"); err != nil {
+	var busy, pages, checkpointed int
+	if err = s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(FULL)").Scan(&busy, &pages, &checkpointed); err != nil || busy != 0 || pages != checkpointed {
 		return nil, Error{DurabilityUnavailable}
+	}
+	if err = s.inject("init_checkpoint"); err != nil {
+		return nil, err
 	}
 	if err = syncDirectory(path); err != nil {
 		return nil, err
@@ -130,6 +132,14 @@ func Initialize(ctx context.Context, registry *Registry, directory string, m aut
 // OpenWriter does not initialize, migrate, or select authority by cache config.
 // The expected UUID is mandatory; a globally bound physical clone is refused.
 func OpenWriter(ctx context.Context, registry *Registry, directory string, expected authority.UUID) (*Store, error) {
+	if registry == nil || !expected.Valid() {
+		return nil, authority.Error{Code: authority.InvalidContract}
+	}
+	if _, err := os.Lstat(initPath(registry, expected)); err == nil {
+		return nil, Error{InitializationPending}
+	} else if !os.IsNotExist(err) {
+		return nil, Error{Corrupt}
+	}
 	s, err := OpenReadOnly(ctx, directory, expected)
 	if err != nil {
 		return nil, err
@@ -249,6 +259,9 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if version != schemaVersion {
 		return authority.Error{Code: authority.Unsupported}
 	}
+	if err := checkSchema(ctx, tx); err != nil {
+		return err
+	}
 	var id, instance, manifest string
 	if tx.QueryRowContext(ctx, "SELECT project_id,instance_id,CASE WHEN length(CAST(manifest AS BLOB))<=4096 THEN manifest END FROM project WHERE singleton=1").Scan(&id, &instance, &manifest) != nil {
 		return Error{Corrupt}
@@ -285,6 +298,13 @@ func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
 			return Error{Corrupt}
 		}
 	}
+	var first, last int64
+	if tx.QueryRowContext(ctx, "SELECT coalesce(min(sequence),0),coalesce(max(sequence),0) FROM revisions").Scan(&first, &last) != nil || last != sequence || sequence > 0 && first != 1 {
+		return Error{Corrupt}
+	}
+	if tx.QueryRowContext(ctx, `SELECT count(*) FROM (SELECT entity_id FROM revisions GROUP BY entity_id HAVING min(revision)<>1 OR max(revision)<>count(*))`).Scan(&count) != nil || count != 0 {
+		return Error{Corrupt}
+	}
 	if tx.QueryRowContext(ctx, `SELECT count(*) FROM entities e WHERE e.current_revision<>(SELECT max(r.revision) FROM revisions r WHERE r.entity_id=e.entity_id)`).Scan(&count) != nil || count != 0 {
 		return Error{Corrupt}
 	}
@@ -292,6 +312,9 @@ func (s *Store) checkConsistency(ctx context.Context, tx *sql.Tx) error {
 		return Error{Corrupt}
 	}
 	if tx.QueryRowContext(ctx, "SELECT count(*) FROM aliases").Scan(&count) != nil || count != 6 {
+		return Error{Corrupt}
+	}
+	if tx.QueryRowContext(ctx, `SELECT count(*) FROM aliases a WHERE a.next_number<>1+(SELECT count(*) FROM entities e WHERE e.kind=a.kind)`).Scan(&count) != nil || count != 0 {
 		return Error{Corrupt}
 	}
 	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
@@ -328,6 +351,9 @@ func verifyHeader(path string) error {
 // Acknowledgement includes publication of database/WAL inode names as well as
 // the SQLite FULL commit. Replay/reopen re-qualifies a previously uncertain ack.
 func (s *Store) publishBarrier() error {
+	if err := s.verifyPhysicalBinding(); err != nil {
+		return err
+	}
 	for _, name := range []string{"tracker.db", "tracker.db-wal"} {
 		phase := "database_sync"
 		if name == "tracker.db-wal" {
@@ -345,6 +371,13 @@ func (s *Store) publishBarrier() error {
 			return Error{DurabilityUnavailable}
 		}
 		err = syncFile(f)
+		if err == nil && name == "tracker.db" && s.lease != nil {
+			physical, e := physicalIdentity(f)
+			body, e2 := readOwner(s.lease)
+			if e != nil || e2 != nil || string(body) != ownerIdentity(s.manifest.ID, s.instance, s.directory, physical) {
+				err = Error{Corrupt}
+			}
+		}
 		_ = f.Close()
 		if err != nil {
 			return err
@@ -354,6 +387,27 @@ func (s *Store) publishBarrier() error {
 		return err
 	}
 	return syncDirectory(s.directory)
+}
+
+func (s *Store) verifyPhysicalBinding() error {
+	if s.lease == nil {
+		return nil
+	} // Unpublished initialization staging only.
+	canonical, err := privateDirectory(s.directory)
+	if err != nil || canonical != s.directory {
+		return Error{Corrupt}
+	}
+	f, err := openExistingFile(filepath.Join(s.directory, "tracker.db"))
+	if err != nil {
+		return err
+	}
+	physical, err := physicalIdentity(f)
+	_ = f.Close()
+	body, e := readOwner(s.lease)
+	if err != nil || e != nil || string(body) != ownerIdentity(s.manifest.ID, s.instance, s.directory, physical) {
+		return Error{Corrupt}
+	}
+	return nil
 }
 
 func (s *Store) Close() error {

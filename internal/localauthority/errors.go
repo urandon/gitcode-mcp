@@ -13,6 +13,7 @@ const (
 	Capacity              Code = "authority_capacity"
 	StorageUnavailable    Code = "authority_storage_unavailable"
 	CommitUncertain       Code = "authority_commit_uncertain"
+	InitializationPending Code = "authority_initialization_pending"
 )
 
 // Error is deliberately content-free; SQL, paths, keys and payloads are private.
@@ -31,6 +32,8 @@ func (e Error) Error() string {
 		return "local authority operation exceeds capacity"
 	case CommitUncertain:
 		return "local authority commit acknowledgement is uncertain; retain the original caller key"
+	case InitializationPending:
+		return "local authority initialization is pending; retry the original initialization intent"
 	default:
 		return "local authority storage is unavailable"
 	}

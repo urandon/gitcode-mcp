@@ -106,6 +106,10 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 	if m.Intent.ProjectID != s.manifest.ID {
 		return zero, authority.Error{Code: authority.NoAuthority}
 	}
+	if err = s.verifyPhysicalBinding(); err != nil {
+		s.fenced = true
+		return zero, err
+	}
 	if err = verifyWriter(ctx, s.db); err != nil {
 		return zero, err
 	}

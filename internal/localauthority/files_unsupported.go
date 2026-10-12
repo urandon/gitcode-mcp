@@ -9,7 +9,8 @@ func directoryOwner(string) error { return nil } // Inspection only; writers ref
 func physicalIdentity(*os.File) (string, error) { return "", Error{DurabilityUnavailable} }
 
 // No unqualified fallback lease or persistence acknowledgement.
-func openPrivateFile(string) (*os.File, error) { return nil, Error{DurabilityUnavailable} }
+func openPrivateFile(string) (*os.File, error)        { return nil, Error{DurabilityUnavailable} }
+func openInitializationFile(string) (*os.File, error) { return nil, Error{DurabilityUnavailable} }
 func openExistingFile(path string) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {

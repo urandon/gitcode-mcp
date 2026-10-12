@@ -229,6 +229,22 @@ Initialization and runtime policy/cohosting admission remain trusted CLI and
 coordinator responsibilities (#183/#184); this library alone does not enroll a
 project or start a runtime.
 
+Initialization holds a non-published project lease while preparing a uniquely
+named private empty store. Schema/manifest/instance validation, checkpoint,
+close and store/directory barriers precede a bounded pending-init journal.
+The journal records only version/UUIDs and manifest/directory/physical/content
+digests. Exclusive final-name publication never overwrites an existing file;
+known temporary aliases are removed only after identical physical/content
+validation and durable final-name preservation. Final ownership is bound and
+synced only to that verified store. Ordinary writer admission returns
+`authority_initialization_pending` until explicit same-manifest retry settles
+the publication. Retry preserves a journaled instance, including lost final
+acknowledgement, and never promotes an unknown store. Unknown/orphan staging
+files remain untouched; staging allocation and directory scanning are bounded.
+The broader orphan/rebind/backup recovery workflow remains #186. Runtime #183
+and CLI/MCP/Admin #184/#185 must expose this finite remediation instead of
+silently guessing an identity or hiding the pending fence.
+
 Writer qualification requires a private owned regular database, WAL,
 `synchronous=FULL`, foreign keys and the configured full-sync pragmas on every
 connection, plus checked file/directory persistence primitives. The initial
@@ -275,13 +291,20 @@ List/history cursors fence project, kind, operation, entity and sequence snapsho
 count and encoded-byte limits preserve continuation instead of dropping trailing
 entities. Inspection validates one consistent read snapshot, not several samples
 mixed across concurrent commits. Projection reset/corruption cannot delete or
-block canonical entity history. Initial manifests are immutable intake; future
+block canonical entity history. Admission checks exact schema/constraint/trigger
+guards, contiguous sequence/revision/alias domains, canonical revision/receipt
+values, audit-to-receipt/revision/actor/time bindings and active relation parity
+with current non-tombstoned links in that same bounded snapshot. Audit fields
+are bounded and validated before returning them. Structurally valid but
+logically inconsistent SQLite is not writable authority; no implicit repair
+or projection-based reconstruction is attempted. Initial manifests are immutable intake; future
 generation-fenced transport/search policy changes must be separately recorded,
 not an arbitrary manifest overwrite.
 
 Backend fixed failures additionally distinguish `authority_read_only`,
 `authority_corrupt`, `authority_durability_unavailable`, `authority_capacity`,
-`authority_storage_unavailable` and `authority_commit_uncertain`. Driver errors,
+`authority_storage_unavailable`, `authority_commit_uncertain` and
+`authority_initialization_pending`. Driver errors,
 private coordinates and payloads are never reflected. These are not newly
 advertised MCP tools: #183/#184 own runtime admission, negotiated error/capability
 compatibility and workflow rollout; #185 owns protected actor/history/conflict/

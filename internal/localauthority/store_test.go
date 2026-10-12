@@ -120,3 +120,21 @@ func TestForeignDatabaseCannotBecomeAuthority(t *testing.T) {
 		t.Fatal("foreign rejection created sidecars")
 	}
 }
+
+func TestLiveWriterPhysicalReplacementCannotAcknowledgeMutation(t *testing.T) {
+	s, _, dir := testStore(t)
+	createIssue(t, s, "synthetic-before-replacement")
+	path := filepath.Join(dir, "tracker.db")
+	body, err := os.ReadFile(path)
+	if err != nil || os.Rename(path, path+".retained") != nil || os.WriteFile(path, body, 0600) != nil {
+		t.Fatal("live replacement fixture unavailable")
+	}
+	_, err = s.Mutate(context.Background(), request(t, "issue.create", "synthetic-after-replacement", authority.IssuePayload{Title: "Synthetic", Body: "", State: "open"}), testActor)
+	var typed Error
+	if !errors.As(err, &typed) || typed.Code != Corrupt {
+		t.Fatal("live writer acknowledged a replaced physical authority")
+	}
+	if !s.fenced {
+		t.Fatal("physical identity mismatch did not fence writer")
+	}
+}
