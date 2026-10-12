@@ -25,14 +25,16 @@ func (n NegotiationRequest) Validate() error {
 }
 
 type Negotiation struct {
-	Protocol  string   `json:"protocol"`
-	SchemaMin int      `json:"schema_min"`
-	SchemaMax int      `json:"schema_max"`
-	Authority Kind     `json:"authority"`
-	Available bool     `json:"available"`
-	Methods   []string `json:"methods"`
-	Reason    Code     `json:"reason"`
-	Handoff   string   `json:"handoff"`
+	Protocol          string   `json:"protocol"`
+	SchemaMin         int      `json:"schema_min"`
+	SchemaMax         int      `json:"schema_max"`
+	Authority         Kind     `json:"authority"`
+	Available         bool     `json:"available"`
+	Methods           []string `json:"methods"`
+	Reason            Code     `json:"reason"`
+	Handoff           string   `json:"handoff"`
+	DocumentSchemaMin int      `json:"document_schema_min,omitempty"`
+	DocumentSchemaMax int      `json:"document_schema_max,omitempty"`
 }
 
 // ContractsOnly is honest negotiation until storage, single-writer runtime and

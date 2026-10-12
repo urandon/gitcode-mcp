@@ -212,12 +212,10 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 	if reply.Error != nil {
 		// Old daemons or unknown codes are unsupported, never raw peer errors.
 		code := authority.Code(reply.Error.DiagnosticCode)
-		switch code {
-		case authority.InvalidContract, authority.Unavailable, authority.Unsupported, authority.NoAuthority, authority.PolicyDenied, authority.Conflict, authority.RevisionConflict, authority.InitializationRequired:
+		if authority.KnownCode(code) {
 			return authority.Error{Code: code}
-		default:
-			return authority.Error{Code: authority.Unsupported}
 		}
+		return authority.Error{Code: authority.Unsupported}
 	}
 	return authority.DecodeJSON(reply.Result, result)
 }

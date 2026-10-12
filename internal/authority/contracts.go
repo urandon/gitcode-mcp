@@ -54,6 +54,34 @@ func (e Error) Error() string {
 		return "local authority revision conflicts"
 	case InitializationRequired:
 		return "project intent requires explicit local initialization; remote fallback is forbidden"
+	case ReadOnly:
+		return "local authority is read-only"
+	case Corrupt:
+		return "local authority integrity check failed"
+	case DurabilityUnavailable:
+		return "local authority durability is unavailable"
+	case Capacity:
+		return "local authority operation exceeds capacity"
+	case StorageUnavailable:
+		return "local authority storage is unavailable"
+	case CommitUncertain:
+		return "local authority commit acknowledgement is uncertain; retain the original caller key"
+	case InitializationPending:
+		return "local authority initialization is pending; retry the original initialization intent"
+	case RefConflict:
+		return "knowledge reference changed; read current state before a new intent"
+	case KnowledgeMigrationRequired:
+		return "knowledge authority requires an explicit verified schema migration"
+	case KnowledgeSetupRequired:
+		return "knowledge authority requires explicit setup"
+	case KnowledgeInitializationPending:
+		return "knowledge initialization is pending; retain the original setup intent"
+	case DocumentPending:
+		return "another document operation is pending; resolve its original intent"
+	case DocumentRecoveryRequired:
+		return "document operation requires recovery; retain the original caller key"
+	case KnowledgeCorrupt:
+		return "knowledge authority integrity check failed; preserve original operation evidence"
 	default:
 		return "invalid local authority contract"
 	}

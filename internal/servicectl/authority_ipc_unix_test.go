@@ -119,7 +119,10 @@ func TestAuthoritySilentPrivateSocketCancellationJoins(t *testing.T) {
 }
 
 func TestAuthorityPrivateSocketRetainsDeclaredErrorIdentity(t *testing.T) {
-	for _, code := range []authority.Code{authority.InvalidContract, authority.Unavailable, authority.Unsupported, authority.NoAuthority, authority.PolicyDenied, authority.Conflict, authority.RevisionConflict, authority.InitializationRequired, "synthetic-private"} {
+	for _, code := range []authority.Code{authority.InvalidContract, authority.Unavailable, authority.Unsupported, authority.NoAuthority, authority.PolicyDenied, authority.Conflict, authority.RevisionConflict, authority.InitializationRequired,
+		authority.ReadOnly, authority.Corrupt, authority.DurabilityUnavailable, authority.Capacity, authority.StorageUnavailable, authority.CommitUncertain,
+		authority.InitializationPending, authority.RefConflict, authority.KnowledgeMigrationRequired, authority.KnowledgeSetupRequired,
+		authority.KnowledgeInitializationPending, authority.DocumentPending, authority.DocumentRecoveryRequired, authority.KnowledgeCorrupt, "synthetic-private"} {
 		t.Run(string(code), func(t *testing.T) {
 			dir, err := shortWorkspaceTemp(t, "a1-")
 			if err != nil {
