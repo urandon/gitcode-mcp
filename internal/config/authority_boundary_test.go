@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +36,23 @@ func TestLocalProjectIntentCannotFallThroughRemoteConfig(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLocalProjectCannotHideBeyondMergeScanDepth(t *testing.T) {
+	var input strings.Builder
+	input.WriteString("root0: &root0 {project: {authority: local_authoritative}}\n")
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&input, "root%d: &root%d {<<: *root%d}\n", i, i, i-1)
+	}
+	input.WriteString("<<: *root12\n")
+	if _, _, err := parseYAMLConfig([]byte(input.String()), ""); err == nil {
+		t.Fatal("finite deep YAML merge selected remote defaults")
+	}
+	remote := strings.Replace(input.String(), "project: {authority: local_authoritative}", "format: json", 1)
+	cfg, _, err := parseYAMLConfig([]byte(remote), "")
+	if err != nil || cfg.Format == nil || *cfg.Format != "json" {
+		t.Fatal("valid deep legacy merge compatibility changed")
 	}
 }
 

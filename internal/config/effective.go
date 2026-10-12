@@ -547,7 +547,12 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return invalid()
 	}
-	if projectYAMLKeys(document.Content[0], 0) {
+	scanBudget := 16384
+	project, scanErr := projectYAMLKeys(document.Content[0], 0, &scanBudget)
+	if scanErr != nil {
+		return invalid()
+	}
+	if project {
 		return fileConfig{}, CredentialConfig{}, authority.Error{Code: authority.InitializationRequired}
 	}
 	var decoded yamlFileConfig
@@ -572,38 +577,41 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 
 // Follow only YAML merge sources, never unrelated metadata. A reserved intent
 // key inherited through an anchor must not bypass the remote-mode boundary.
-func projectYAMLKeys(n *yaml.Node, depth int) bool {
+func projectYAMLKeys(n *yaml.Node, depth int, budget *int) (bool, error) {
 	if n == nil {
-		return false
+		return false, nil
 	}
-	if depth > 16 {
-		return false // Legacy parser reports cyclic/deep merges as malformed.
+	(*budget)--
+	if depth > 64 || *budget < 0 {
+		return false, errors.New("configuration merge traversal limit")
 	}
 	if n.Kind == yaml.AliasNode {
-		return projectYAMLKeys(n.Alias, depth+1)
+		return projectYAMLKeys(n.Alias, depth+1, budget)
 	}
 	if n.Kind == yaml.SequenceNode {
 		for _, child := range n.Content {
-			if projectYAMLKeys(child, depth+1) {
-				return true
+			found, err := projectYAMLKeys(child, depth+1, budget)
+			if found || err != nil {
+				return found, err
 			}
 		}
-		return false
+		return false, nil
 	}
 	if n.Kind != yaml.MappingNode {
-		return false
+		return false, nil
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		switch strings.ToLower(n.Content[i].Value) {
 		case "project", "local_projects", "authority":
-			return true
+			return true, nil
 		case "<<":
-			if projectYAMLKeys(n.Content[i+1], depth+1) {
-				return true
+			found, err := projectYAMLKeys(n.Content[i+1], depth+1, budget)
+			if found || err != nil {
+				return found, err
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // yamlStringList accepts standard block/flow sequences and the historical
