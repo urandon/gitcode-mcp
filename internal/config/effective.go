@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 
+	"gitcode-mcp/internal/authority"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -498,6 +500,9 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	}
 	if loc.Format == "json" || strings.HasSuffix(loc.Path, ".json") {
 		var cfg fileConfig
+		if err := rejectProjectJSON(data); err != nil {
+			return fileConfig{}, CredentialConfig{}, err
+		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s: %w", loc.Path, err)
 		}
@@ -542,6 +547,9 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return invalid()
 	}
+	if projectYAMLKeys(document.Content[0], 0) {
+		return fileConfig{}, CredentialConfig{}, authority.Error{Code: authority.InitializationRequired}
+	}
 	var decoded yamlFileConfig
 	budget := 16384
 	root, err := legacyYAMLScalars(document.Content[0], reflect.TypeOf(decoded), 0, &budget)
@@ -560,6 +568,42 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		cred = *cfg.Credential
 	}
 	return cfg, cred, nil
+}
+
+// Follow only YAML merge sources, never unrelated metadata. A reserved intent
+// key inherited through an anchor must not bypass the remote-mode boundary.
+func projectYAMLKeys(n *yaml.Node, depth int) bool {
+	if n == nil {
+		return false
+	}
+	if depth > 16 {
+		return false // Legacy parser reports cyclic/deep merges as malformed.
+	}
+	if n.Kind == yaml.AliasNode {
+		return projectYAMLKeys(n.Alias, depth+1)
+	}
+	if n.Kind == yaml.SequenceNode {
+		for _, child := range n.Content {
+			if projectYAMLKeys(child, depth+1) {
+				return true
+			}
+		}
+		return false
+	}
+	if n.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		switch n.Content[i].Value {
+		case "project", "local_projects", "authority":
+			return true
+		case "<<":
+			if projectYAMLKeys(n.Content[i+1], depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // yamlStringList accepts standard block/flow sequences and the historical

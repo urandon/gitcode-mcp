@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/authority"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/feedback"
 )
@@ -254,10 +255,28 @@ func readConfigFile(src Source, path string, explicit bool) (fileConfig, error) 
 		return fileConfig{}, fmt.Errorf("config: cannot read config file %s: %w", path, err)
 	}
 	var cfg fileConfig
+	if err := rejectProjectJSON(data); err != nil {
+		return fileConfig{}, err
+	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fileConfig{}, fmt.Errorf("config: malformed config file %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// Local project files are a separate explicit intent contract. Legacy remote
+// loaders must not ignore them and silently construct remote/cache defaults.
+func rejectProjectJSON(data []byte) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil
+	}
+	for _, key := range []string{"project", "local_projects", "authority"} {
+		if _, ok := keys[key]; ok {
+			return authority.Error{Code: authority.InitializationRequired}
+		}
+	}
+	return nil
 }
 
 func mergeFile(cfg Config, file fileConfig) (Config, error) {
