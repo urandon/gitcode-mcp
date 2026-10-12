@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/authority"
 	"gitcode-mcp/internal/observability"
 )
 
@@ -189,6 +190,13 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 				resp = s.handleRequest(readCtx, req)
 				cancel()
 			}
+		} else if authorityMethod(req.Method) {
+			_ = conn.SetWriteDeadline(readDeadline)
+			if strictAuthorityEnvelope(raw) != nil {
+				resp = RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32602, Message: "invalid local authority contract", DiagnosticCode: string(authority.InvalidContract)}}
+			} else {
+				resp = s.handleRequest(ctx, req)
+			}
 		} else {
 			resp = s.handleRequest(ctx, req)
 		}
@@ -231,6 +239,9 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 }
 
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if authorityMethod(method) {
+		return s.dispatchAuthority(ctx, method, params)
+	}
 	if observationMethod(method) {
 		return s.dispatchObservation(ctx, method, params)
 	}
@@ -523,6 +534,9 @@ func decodeJobID(params json.RawMessage) (string, error) {
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params any, result any) error {
+	if authorityMethod(method) {
+		return c.callAuthority(ctx, method, params, result)
+	}
 	if observationMethod(method) {
 		return c.callObservation(ctx, method, params, result)
 	}
