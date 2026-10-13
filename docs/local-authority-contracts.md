@@ -217,6 +217,39 @@ platforms, real foreign-user processes and OS-level absence of TCP/UDP/DNS from
 exec remain mandatory, separate acceptance gates. Tokens, PIDs, code hashes
 and local coordinates never enter diagnostic or fixture output.
 
+An additional explicit Darwin test fixture compares a body-free Mach channel
+against hostile inline, out-of-line memory and out-of-line port-array records.
+It compiles a sanitized C fixture with the installed native compiler and SDK;
+default tests never run that compiler or native protocol. The receive capacity
+is exactly a 24-byte header plus the requested 52-byte audit trailer, not the
+padded C allocation size. The kernel rejects any body before descriptor copyout
+and consumes the rejected message without retaining it. Rejection/error trailers
+are never origin evidence. Positive controls use eight fixed synthetic words,
+per-record actual sender identity, contiguous kernel sequence and a header reply
+right; receiver right counts and owned queue/process cleanup are checked.
+
+```sh
+GITCODE_MCP_NATIVE_AUTHORITY_MACH=1 go test -race ./internal/nativelaunch -run '^TestNativeDarwinHeaderOnlyMachBounds$' -count=3 -timeout=120s
+```
+
+This is a test-only primitive, not a production Mach adapter, authenticated digest
+bundle, local authority launcher or grant/adopter. The C fixture is never linked
+into the product. A missing compiler/SDK or failed explicitly requested native
+control fails this gate rather than silently skipping. Full digest/descriptor
+binding, image/lineage/lifetime, foreign-user and pre-exec network-isolation
+qualification still precede any native capability or product rollout.
+
+Private transcript tests bind the once-serialized packet with SHA-256 over the
+domain `gitcode-mcp/native-r10` plus a NUL byte, five big-endian uint32 fields
+(version1, direction, stage, payload byte length, rights count), then the exact
+packet bytes. This is not a MAC or a schema/authentication validator. Eight
+big-endian digest words retain every signed Mach message-id bit pattern. A
+one-shot private assembler compares the entire pinned synthetic/kernel token,
+contiguous fresh-queue sequence and full digest; pending/truncated input never
+settles, and cancellation or mismatch permanently refuses. Neither supplied
+tokens nor these pure helpers establish native provenance. They have no caller
+outside the staged package; actual packet/FD binding remains qualification work.
+
 Negotiation request:
 
 ```json
