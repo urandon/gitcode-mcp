@@ -82,6 +82,14 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src config.Source) int {
+	if len(args) > 0 && args[0] == servicectl.AuthorityRuntimeSelector {
+		if len(args) != 1 {
+			return 78
+		}
+		// Strict native entry precedes parsing, redaction/config/account lookup,
+		// provider/credential construction and every ordinary transport route.
+		return servicectl.RunInheritedAuthority(context.Background())
+	}
 	opts, rest, err := parseStartupArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))

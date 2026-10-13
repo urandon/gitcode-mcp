@@ -19,6 +19,7 @@ type PreparedRegistry struct {
 	identity  string
 	writers   int
 	closed    bool
+	scope     map[authority.UUID]launchProject // non-nil only for transferred immutable cohort
 }
 
 type runtimeRegistry struct {
@@ -99,6 +100,19 @@ func (p *PreparedRegistry) OpenWriter(ctx context.Context, directory string, pro
 	if p.closed || p.registry == nil || p.directory == nil {
 		return nil, authority.Error{Code: authority.InitializationRequired}
 	}
+	if p.scope != nil {
+		expected, ok := p.scope[project]
+		if !ok || expected.Directory != directory {
+			return nil, authority.Error{Code: authority.NoAuthority}
+		}
+		actual, err := inspectLaunchProject(ctx, p.directory, ProjectBinding{project, directory})
+		if err != nil {
+			return nil, err
+		}
+		if actual != expected {
+			return nil, authority.Error{Code: authority.Conflict}
+		}
+	}
 	runtime := &runtimeRegistry{directory: p.directory, identity: p.identity}
 	if err := runtime.verify(p.registry.root); err != nil {
 		return nil, err
@@ -136,10 +150,17 @@ func (p *PreparedRegistry) OpenWriter(ctx context.Context, directory string, pro
 	if err != nil {
 		return nil, err
 	}
+	if expected, scoped := p.scope[project]; scoped && (expected.Physical != directoryIdentity || expected.Database != physical) {
+		return nil, authority.Error{Code: authority.Conflict}
+	}
 	registry := &Registry{root: p.registry.root, runtime: runtime}
 	s, err := OpenWriter(ctx, registry, root, project)
 	if err != nil {
 		return nil, err
+	}
+	if expected, scoped := p.scope[project]; scoped && (expected.Instance != s.instance || expected.Manifest != manifestHash(s.manifest)) {
+		_ = s.Close()
+		return nil, authority.Error{Code: authority.Conflict}
 	}
 	verify := func() error {
 		if err := runtime.verify(registry.root); err != nil {

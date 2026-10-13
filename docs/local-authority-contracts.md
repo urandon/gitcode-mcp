@@ -536,3 +536,58 @@ not as a production path selector. This is not the native launcher, transferred
 capability/restart, foreign-user, zero-network or complete L4 acceptance receipt.
 Those qualifications and bounded recovery/projection jobs, restricted embedding
 profiles and opaque lifecycle observations remain mandatory before #183 closure.
+
+### Fixed-channel native launch (L4 in progress)
+
+Explicit trusted setup can derive a single-use native preparation from the
+opaque registry capability. It captures the entire existing cohort: UUID,
+instance, canonical directory, retained directory/database identity and
+immutable manifest digest. Every full owner record is inspected read-only;
+missing/partial state refuses, with no initialization or binding upgrade.
+Only the authenticated transient bootstrap frame contains coordinates.
+
+The same-executable launcher transfers exactly three fixed roles: registry
+directory, private Unix listener and connected private Unix bootstrap channel.
+The early internal child entry has no public path/FD/profile/config selectors.
+It audits the bounded native descriptor census and role types/owners before
+ordinary configuration, redaction, account/provider/credential construction or
+output. Unrelated descriptors, aliased incompatible roles and sockets used as
+stdio refuse. Child environment is empty and stdio inert in the launcher.
+Darwin inventory/listener inspection uses native process fdinfo; unsupported
+Darwin non-cgo admission refuses instead of falling back. Linux uses bounded
+self-fd inventory and native socket options. No arbitrary extra kernel object
+or unavailable descriptor census is silently accepted.
+
+The child issues a fresh challenge. A closed length-framed message binds it to
+protocol, strict profile, fresh launch generation, registry identity and the
+complete cohort. Each frame is at most 64 KiB and bootstrap work has a 10-second
+or earlier caller budget. Receiver requalifies the entire physical/full cohort
+before opening any writer; transferred preparation cannot widen its project
+scope or silently follow physical/manifest changes. These checks authenticate
+delegation between cooperating local users, not executable/image attestation
+or a claim that UID alone proves a canonical registry namespace.
+
+Activation is explicit READY -> ACTIVATE -> ACTIVE. Serving is not permitted
+before activation succeeds. Close seals active or activating admission even
+with an already expired join budget; a runtime closed while waiting ACTIVATE
+cannot acknowledge ACTIVE. Parent drops its copy of the child bootstrap
+endpoint immediately after exec so refused/exited children cannot masquerade
+as silent peers. Startup failure closes copies, terminates and actually waits
+for the child. A single Wait owner retains supervision after a bounded Close
+timeout; graceful shutdown is followed by bounded forced termination/join when
+needed. Unknown/failed owned shutdown returns a finite nonzero phase, not clean
+success. Error text contains fixed phase names only, never OS/parser bodies.
+
+Native fixtures execute the production fixed-role entry in the same-binary
+launcher and separately build the actual product offline. They verify real
+private control writes, canonical read-only coexistence, single-writer refusal,
+fresh restart/exact replay, abrupt process exit and specific malformed/aliased/
+unrelated/INET-stdio role refusals. Hostile inherited config/home/proxy/cache
+sentinels do not provision stores. These are lifecycle/admission evidence, NOT
+complete executable-startup network/credential/descendant observation or real
+foreign-user qualification. Calibrated native observation (including package
+initialization) and post-transition foreign-user connections remain separate
+mandatory gates. No SIP weakening, setup fallback or fake-factory-only proof
+may substitute for unavailable qualification. Projection/recovery jobs,
+restricted real embeddings, opaque observations and L5/L6/L7 rollout remain
+outstanding work, not implied by this backend launch API.
