@@ -504,6 +504,63 @@ Orphan stages are bounded and preserved, never adopted by recency or used to
 reconstruct authority. Explicit corrupt-catalog repair/reset and durable job
 reconciliation remain in the index lifecycle cohort, not an implicit read.
 
+### Owned content-catalog index jobs
+
+The coordinator owns a separate bounded index-intent ledger. Opening a missing
+ledger does not provision it; only explicit local admission creates its fixed
+private namespace. An existing namespace without valid final state is uncertain,
+not first boot. Its caller-key/fingerprint hashes, original canonical as-of
+sequence, tracker/manifest identity, base catalog digest, epoch/generation and
+build UUID survive restart independently of the disposable catalog. No source
+text, actor/key bytes, locator paths or provider body enter this ledger.
+
+Content-catalog jobs currently certify metadata only, not semantic vectors.
+Their shared coordinator methods are not yet advertised by private IPC or
+CLI/MCP/Admin. The runtime rollout and those protected-response cohorts remain
+mandatory. Semantic readiness cannot be inferred from a successful catalog job.
+
+There are at most 128 retained jobs, one active job per project, eight attempts,
+a 512 KiB final ledger, four preserved stages and 2 MiB staged bytes. Capacity
+does not silently discard caller-key or cancellation evidence. Ordinary
+observation never admits, retries or repairs a job. Closed state transitions
+are queued, running, cancelling, succeeded, cancelled, failed and interrupted;
+cancel/retry requires the exact expected job generation and explicit local
+intent. Retry clears active cancellation but retains its original generation.
+An inactive job cannot be retried while another job is active: this is a normal
+conflict, not damaged metadata. A definitively rejected pre-rename cancellation
+cannot stop a running attempt; only acknowledged intent or rename ambiguity
+provides cancellation authority for that exact attempt.
+
+A joined worker traverses at most 128 canonical candidates per turn and releases
+the project lane between turns. Fixed as-of intake remains unchanged across
+intervening writes. Real lock-release epochs, not polling or provider retries,
+drive contention waits. Each turn has the coordinator call deadline and an
+attempt has a five-minute budget. Restart rebuilds transient partial metadata
+from the original selection; it never retargets it to newer source content.
+The completed builder also waits for publication-lock release and rechecks
+durable cancellation before retry; stale-base CAS is a distinct conflict.
+
+Final completion requires exact catalog bytes, build UUID, namespace, source
+sequence, epoch/generation and immutable source binding. A proved publication
+wins over late cancellation; an uncertain rename cannot become a fabricated
+failure or another publication. Reopen synchronizes file, namespace and parent
+before reconciling retained intent. Earlier outcomes are reconciled before newer
+jobs can advance the catalog. Failed ledger acknowledgement fences only its
+job controls, including a definitive pre-rename terminal-save failure after
+the joined catalog effect. Intact canonical reads, receipts and lexical retrieval remain
+available. Shutdown joins admitted workers and controls before releasing the
+project writer. Explicit corrupt-catalog reset, integrated protected IPC,
+opaque observation and real restricted embedding qualification remain L4 work.
+Every failed joined-terminal exit, including ledger/proof contention deadline,
+sets a nonblocking owner-local uncertainty seal. Subsequent admission/readback
+and in-flight ledger acknowledgement honor that seal without taking the held
+lock that prevented completion; only qualified owner reopen clears it.
+
+Canonical Store identity is initialized before owner publication and thereafter
+only compared during SQL revalidation. Content-free filesystem guards may read
+that immutable identity without taking the source SQL mutex; manifest changes
+are corruption, never permission to replace the admitted policy at runtime.
+
 ### Existing-only runtime ownership preparation
 
 Trusted explicit setup may prepare an opaque, non-serialized registry

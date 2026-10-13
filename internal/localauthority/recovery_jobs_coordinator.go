@@ -31,6 +31,11 @@ func (c *Coordinator) activateRecoveryWorkers() error {
 	}
 	c.jobsStarted = true
 	for _, p := range c.order {
+		if p.indexJobs != nil && p.projection != nil {
+			c.jobWorkers.Add(1)
+			go c.indexWorker(p)
+			p.indexJobs.signal()
+		}
 		if p.jobs == nil {
 			continue
 		}

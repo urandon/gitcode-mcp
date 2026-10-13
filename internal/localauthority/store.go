@@ -304,9 +304,23 @@ func (s *Store) verifyIdentity(ctx context.Context, expected authority.UUID) err
 	if err := checkLogicalRows(ctx, tx, m.ID); err != nil {
 		return err
 	}
-	s.manifest = m
-	s.instance = authority.UUID(instance)
-	s.schema = version
+	// Identity is admitted once, before this Store is published. Runtime
+	// validation checks it, rather than rewriting equal fields concurrently
+	// with content-free filesystem guards used by independent job controls.
+	// A changed manifest is not permission to relax an admitted runtime policy.
+	if s.manifest.ID.Valid() {
+		if manifestHash(s.manifest) != manifestHash(m) {
+			return Error{Corrupt}
+		}
+	} else {
+		s.manifest = m
+	}
+	if s.instance == "" {
+		s.instance = authority.UUID(instance)
+	}
+	if s.schema == 0 {
+		s.schema = version
+	}
 	if version == 2 {
 		if err := checkKnowledgeSetup(ctx, tx, m.ID, authority.UUID(instance), s.directory); err != nil {
 			return err

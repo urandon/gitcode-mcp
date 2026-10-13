@@ -25,6 +25,16 @@ type projectionIndex struct {
 	barrierFault                    func(string) error // private pre-sync failure seam
 }
 
+type projectionContention struct{ changed <-chan struct{} }
+
+func (projectionContention) Error() string { return "projection waits for an owned lock" }
+func (projectionContention) Unwrap() error { return authority.Error{Code: authority.Conflict} }
+
+type projectionGenerationChanged struct{}
+
+func (projectionGenerationChanged) Error() string { return "projection base generation changed" }
+func (projectionGenerationChanged) Unwrap() error { return authority.Error{Code: authority.Conflict} }
+
 func openProjection(ctx context.Context, s *Store) (*projectionIndex, error) {
 	return openProjectionWithBarrierFault(ctx, s, nil)
 }
@@ -223,8 +233,9 @@ func (p *projectionIndex) newBuilder(ctx context.Context, sequence uint64) (*pro
 	if sequence > math.MaxInt64 {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
+	ownerChanged := p.mu.changed()
 	if !p.mu.TryLock() {
-		return nil, authority.Error{Code: authority.Conflict}
+		return nil, projectionContention{ownerChanged}
 	}
 	defer p.mu.Unlock()
 	if p.closed {
@@ -358,15 +369,20 @@ func (p *projectionIndex) publish(ctx context.Context, b *projectionBuilder) (er
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if b == nil || !b.mu.TryLock() {
+	if b == nil {
 		return authority.Error{Code: authority.Conflict}
+	}
+	builderChanged := b.mu.changed()
+	if !b.mu.TryLock() {
+		return projectionContention{builderChanged}
 	}
 	defer b.mu.Unlock()
 	if b.owner != p || !b.done || b.failed || !b.catalog.valid() {
 		return Error{ProjectionCorrupt}
 	}
+	ownerChanged := p.mu.changed()
 	if !p.mu.TryLock() {
-		return authority.Error{Code: authority.Conflict}
+		return projectionContention{ownerChanged}
 	}
 	defer p.mu.Unlock()
 	if p.closed {
@@ -376,7 +392,7 @@ func (p *projectionIndex) publish(ctx context.Context, b *projectionBuilder) (er
 		return Error{p.fence}
 	}
 	if b.baseHash != p.fileHash {
-		return authority.Error{Code: authority.Conflict}
+		return projectionGenerationChanged{}
 	}
 	if err = p.verifyExpected(); err != nil {
 		p.fence = ProjectionCorrupt

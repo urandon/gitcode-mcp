@@ -23,7 +23,16 @@ type coordinatedProject struct {
 	turn                      releaseMutex
 	jobs                      *recoveryQueue
 	jobsError                 Code
-	activeRecovery            authority.UUID // guarded by coordinator admission mutex
+	projection                *projectionIndex
+	projectionError           Code
+	indexJobs                 *indexQueue
+	indexJobsError            Code
+	activeIndex               authority.UUID
+	indexCancel               context.CancelFunc
+	indexAttemptGeneration    uint64
+	indexTurnFault            func(string) error // private deterministic fixture, never configured
+	indexProofBudget          time.Duration      // private short-deadline fixture; zero uses production call budget
+	activeRecovery            authority.UUID     // guarded by coordinator admission mutex
 	recoveryCancel            context.CancelFunc
 	recoveryAttemptGeneration uint64
 }
@@ -118,6 +127,12 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 				if p.jobs != nil {
 					_ = p.jobs.close()
 				}
+				if p.indexJobs != nil {
+					_ = p.indexJobs.close()
+				}
+				if p.projection != nil {
+					_ = p.projection.close()
+				}
 				_ = p.store.Close()
 			}
 		}
@@ -145,6 +160,14 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 		p.jobs = jobs
 		if err != nil {
 			p.jobsError = recoveryJobErrorCode(err)
+		}
+		p.projection, err = openProjection(bootstrap, p.store)
+		if err != nil {
+			p.projectionError = indexStorageErrorCode(err, ProjectionUncertain)
+		}
+		p.indexJobs, err = openIndexQueue(bootstrap, p.store)
+		if err != nil {
+			p.indexJobsError = indexStorageErrorCode(err, IndexJobsUncertain)
 		}
 	}
 	if bootstrap.Err() != nil {
@@ -174,6 +197,16 @@ func (c *Coordinator) shutdown() {
 	for _, p := range c.order {
 		if p.jobs != nil {
 			if err := p.jobs.close(); err != nil && c.closeErr == nil {
+				c.closeErr = err
+			}
+		}
+		if p.indexJobs != nil {
+			if err := p.indexJobs.close(); err != nil && c.closeErr == nil {
+				c.closeErr = err
+			}
+		}
+		if p.projection != nil {
+			if err := p.projection.close(); err != nil && c.closeErr == nil {
 				c.closeErr = err
 			}
 		}

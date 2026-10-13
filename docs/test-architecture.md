@@ -150,6 +150,30 @@ ordinary transport decoder must still refuse it. Actual child FIFO controls
 prove final/stage type refusal cannot block, alongside symlink/hardlink/unknown
 inventory and namespace/inode/content replacement controls. These domain tests
 do not certify integrated index jobs, real hybrid vectors or native isolation.
+
+Index-job tests use actual prepared authority, ledger publication and coordinator
+workers. They qualify original caller identity, generation-fenced cancellation,
+explicit retry, exact completed-build reconciliation, fixed as-of traversal with
+a real source edit between two owned turns, and writer retention while a stalled
+worker prevents shutdown join. Restart metadata qualification precedes dispatch
+so deterministic DTO assertions do not race legitimate admission conflicts.
+Before/after publication faults and every failed/cancelled reopen barrier retain
+canonical reads/receipts and original ledger bytes. Actual child FIFO, unsafe
+file/inventory and same-content inode/namespace replacements fail closed.
+Missing final state and orphan capacity never silently initialize empty history.
+Actual active-worker controls distinguish rejected cancellation from post-rename
+ambiguity. Terminal-save failures before rename fence and reconcile the exact
+completed catalog; inactive retry against another active job preserves bytes
+and reports normal conflict. Completed-builder publication contention waits
+without another attempt. Concurrent source identity revalidation and metadata
+guards are race-qualified; valid-but-changed manifest policy cannot replace the
+immutable admitted identity.
+Actual completed-catalog controls hold ledger or projection locks beyond a
+short private proof deadline: terminal exit remains bounded, controls seal
+uncertainty without blocking, source/catalog remain intact, and verified reopen
+reconciles the original build without another attempt.
+These controls do not certify protected IPC rollout, corrupt reset, semantic
+vectors, safe observation or full native network isolation.
 Independent record-count/wire-size/page-continuation controls and fixed typed
 job errors preserve protected scope without echoing arbitrary peer content.
 Malformed peer controls also reject false action acknowledgements, regressed

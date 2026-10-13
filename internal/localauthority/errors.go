@@ -27,6 +27,8 @@ const (
 	JobRetryLimit                  Code = "authority_recovery_job_retry_limit"
 	ProjectionCorrupt              Code = "authority_projection_corrupt"
 	ProjectionUncertain            Code = "authority_projection_uncertain"
+	IndexJobsCorrupt               Code = "authority_index_jobs_corrupt"
+	IndexJobsUncertain             Code = "authority_index_jobs_uncertain"
 )
 
 // Error is deliberately content-free; SQL, paths, keys and payloads are private.
@@ -73,6 +75,10 @@ func (e Error) Error() string {
 		return "derived projection is invalid; canonical authority remains separate"
 	case ProjectionUncertain:
 		return "derived projection publication is uncertain; verified owner reopen is required"
+	case IndexJobsCorrupt:
+		return "local index job metadata is invalid; preserve it for explicit recovery"
+	case IndexJobsUncertain:
+		return "local index job publication is uncertain; verified owner reopen is required"
 	default:
 		return "local authority storage is unavailable"
 	}
