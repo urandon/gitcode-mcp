@@ -2,6 +2,7 @@ package localauthority
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,6 +64,42 @@ func TestRecoveryJobStoreNamespaceOwnershipAndStageCaps(t *testing.T) {
 	count, _, err = q.stages(context.Background())
 	if err != nil || count != MaxRecoveryJobStages {
 		t.Fatal("stage capacity deleted uncertain evidence")
+	}
+}
+
+func TestRecoveryJobStoreRejectsImpossibleSnapshotGenerations(t *testing.T) {
+	for _, change := range []string{"initial-nonempty", "job-not-before-snapshot", "admission-not-before-transitions"} {
+		t.Run(change, func(t *testing.T) {
+			q, o := recoveryQueueFixture(t)
+			next := recoveryQueuedState(t, q, o)
+			if q.publish(context.Background(), next) != nil || q.close() != nil {
+				t.Fatal("canonical generation fixture publication failed")
+			}
+			switch change {
+			case "initial-nonempty":
+				next.Generation = 1
+				next.Jobs[0].AdmittedGeneration = 1
+			case "job-not-before-snapshot":
+				next.Jobs[0].View.Generation = next.Generation
+			case "admission-not-before-transitions":
+				next.Generation = 4
+				next.Jobs[0].AdmittedGeneration = 4
+				next.Jobs[0].View.Generation = 2
+			}
+			state, _ := json.Marshal(next)
+			body, _ := json.Marshal(recoveryJobEnvelope{State: next, Digest: hash(state)})
+			path := filepath.Join(q.store.directory, recoveryJobsDirectory, "state.json")
+			if os.WriteFile(path, body, 0600) != nil {
+				t.Fatal("synthetic generation corruption fixture failed")
+			}
+			_, err := newRecoveryQueue(context.Background(), q.store, nil)
+			requireKnowledgeError(t, err, JobsCorrupt)
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != string(body) {
+				t.Fatal("generation refusal erased original metadata evidence")
+			}
+			createIssue(t, q.store, "synthetic-tracker-after-job-generation-refusal")
+		})
 	}
 }
 

@@ -119,7 +119,7 @@ func TestDedicatedAuthorityActualPrivateRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var caps authority.Negotiation
-	if f.client.Call(ctx, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps) != nil || !caps.Available || len(caps.Methods) != 5 {
+	if f.client.Call(ctx, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps) != nil || !caps.Available || len(caps.Methods) != 10 {
 		t.Fatal("dedicated core did not negotiate actual methods")
 	}
 	m := nativeMutation("synthetic-native-create", "Real canonical issue")

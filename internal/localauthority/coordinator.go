@@ -292,13 +292,15 @@ func (c *Coordinator) MutateDocument(ctx context.Context, req authority.Document
 	if err := req.Validate(); err != nil {
 		return authority.DocumentMutationResult{}, err
 	}
+	admitted := false
 	result, err := coordinated(c, ctx, req.Intent.ProjectID, func(ctx context.Context, s *Store) (authority.DocumentMutationResult, error) {
+		admitted = true
 		return s.MutateDocument(ctx, req, actor)
 	})
 	// Only explicit external document writes wake proof reconciliation of
 	// already admitted jobs, including ambiguous source outcomes. Reads and
 	// the worker's own turn releases must not generate a self-waking loop.
-	if c != nil {
+	if admitted && c != nil {
 		if p := c.projects[req.Intent.ProjectID]; p != nil && p.jobs != nil {
 			p.jobs.signal()
 		}

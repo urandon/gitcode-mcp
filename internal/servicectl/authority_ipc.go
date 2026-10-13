@@ -68,6 +68,30 @@ func authorityParams(method string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return r, r.Validate()
+	case "AuthorityV1.EnqueueRecovery":
+		var r localauthority.RecoveryJobRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.RecoveryJob":
+		var r localauthority.RecoveryJobLookup
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.RecoveryJobs":
+		var r localauthority.RecoveryJobsRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery":
+		var r localauthority.RecoveryJobAction
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}
@@ -145,7 +169,7 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 		}
 		if result != nil {
 			body, _ := json.Marshal(validated)
-			return authority.DecodeJSON(body, result)
+			return replaceAuthorityResult(body, result)
 		}
 		return nil
 	}
@@ -158,7 +182,7 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 	}
 	if result != nil {
 		data, _ := json.Marshal(caps)
-		if err := authority.DecodeJSON(data, result); err != nil {
+		if err := replaceAuthorityResult(data, result); err != nil {
 			return err
 		}
 	}
@@ -259,12 +283,30 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			switch storage := localauthority.Code(reply.Error.DiagnosticCode); storage {
 			case localauthority.ReadOnly, localauthority.Corrupt, localauthority.DurabilityUnavailable, localauthority.Capacity, localauthority.StorageUnavailable, localauthority.CommitUncertain, localauthority.InitializationPending, localauthority.RefConflict, localauthority.KnowledgeMigrationRequired, localauthority.KnowledgeSetupRequired, localauthority.KnowledgeInitializationPending, localauthority.DocumentPending, localauthority.DocumentRecoveryRequired, localauthority.KnowledgeCorrupt:
 				return localauthority.Error{Code: storage}
+			case localauthority.JobsCorrupt, localauthority.JobsUncertain, localauthority.JobNotFound, localauthority.JobRetryLimit:
+				return localauthority.Error{Code: storage}
 			default:
 				return authority.Error{Code: authority.Unsupported}
 			}
 		}
 	}
-	return authority.DecodeJSON(reply.Result, result)
+	return replaceAuthorityResult(reply.Result, result)
+}
+
+// Responses are complete snapshots, not merge patches into a caller's prior
+// result. Decode/validate a fresh value before replacing the destination: an
+// omitted optional code/cursor/receipt must not survive an earlier response.
+func replaceAuthorityResult(body []byte, result any) error {
+	v := reflect.ValueOf(result)
+	if !v.IsValid() || v.Kind() != reflect.Pointer || v.IsNil() {
+		return authority.Error{Code: authority.InvalidContract}
+	}
+	fresh := reflect.New(v.Elem().Type())
+	if err := authority.DecodeJSON(body, fresh.Interface()); err != nil {
+		return err
+	}
+	v.Elem().Set(fresh.Elem())
+	return nil
 }
 
 func authoritySocketError(ctx context.Context, err error) error {

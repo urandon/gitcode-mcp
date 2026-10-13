@@ -74,6 +74,43 @@ func authorityRuntimeResult(method string, params any, raw json.RawMessage) (any
 			}
 		}
 		return result, nil
+	case "AuthorityV1.EnqueueRecovery":
+		req := params.(localauthority.RecoveryJobRequest)
+		var result localauthority.RecoveryJobAdmission
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.OperationID != req.OperationID {
+			return nil, invalid
+		}
+		if result.Outcome == "queued" && result.Job.ObservedJournalGeneration < req.ObservedGeneration {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.RecoveryJob":
+		req := params.(localauthority.RecoveryJobLookup)
+		var result localauthority.RecoveryJobView
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.JobID != req.JobID {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery":
+		req := params.(localauthority.RecoveryJobAction)
+		var result localauthority.RecoveryJobView
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.JobID != req.JobID || result.Generation < req.ExpectedGeneration {
+			return nil, invalid
+		}
+		// Correct UUIDs are not confirmation of an unperformed action.
+		// Cancellation cannot leave queued/running permission acknowledged;
+		// retry must advance a generation unless it is already succeeded.
+		if method == "AuthorityV1.CancelRecovery" && (result.State == "queued" || result.State == "running") || method == "AuthorityV1.RetryRecovery" && result.Generation == req.ExpectedGeneration && result.State != "succeeded" {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.RecoveryJobs":
+		req := params.(localauthority.RecoveryJobsRequest)
+		var result localauthority.RecoveryJobsPage
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyRecoveryJobsPage(req, result) != nil {
+			return nil, invalid
+		}
+		return result, nil
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}

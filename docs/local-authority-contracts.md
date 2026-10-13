@@ -4,9 +4,11 @@ Status: L1 contracts (#180), L2 tracker domain/store (#181) and the L3 shared
 document/Git backend (#182), epic #179. This is not an enabled local project
 runtime. Runtime ownership integration, operator recovery,
 CLI/MCP workflows, Admin, backup and integrated feature acceptance remain
-#183–#186. Current `authority.v1`
+#183–#186. The ordinary daemon's `authority.v1`
 negotiation reports `available: false`, an empty implemented-method list and
 `authority_unavailable`. It never starts a daemon or promotes a cache.
+The separate trusted coordinator/private-IPC foundation described below is
+implemented within #183; this is not complete local-project feature rollout.
 
 ## Authority and identity
 
@@ -508,13 +510,67 @@ dispatch remote/service/Admin methods. The ordinary daemon remains unavailable
 for authority operations instead of falling through to this graph implicitly.
 
 The dedicated server negotiates implemented Read, Mutate, MutateDocument,
-KnowledgeStatus and Search methods. Concrete responses are validated even when
+KnowledgeStatus, Search, EnqueueRecovery, RecoveryJob, RecoveryJobs,
+CancelRecovery and RetryRecovery methods. Exact implemented-method inventory
+is required before an operation; contracts-only stays unavailable and an old,
+incomplete, reordered or unknown inventory is unsupported, never auto-started
+or routed to remote state. Concrete responses are validated even when
 a client discards them. Shared pure domain verification binds write confirmation
 to project, kind, original key, full canonical intent, stable local attribution,
 revision and document outcome/ref expectations; another well-formed receipt is
 not sufficient. Raw fault/driver/OS bodies and unknown codes never become error
 prose. Replies retain the total 512 KiB ceiling, including RPC envelope; protected
 results and continuation cursors reserve finite headroom inside that ceiling.
+Response DTOs are complete snapshots: the client validates a fresh object and
+only then replaces the caller's result. Omitted optional terminal codes,
+receipts or cursors cannot survive an older response; invalid replies cannot
+partially overwrite prior caller state.
+
+Recovery private-IPC method parameters:
+
+| Method (`AuthorityV1.` prefix) | Closed request fields |
+| --- | --- |
+| EnqueueRecovery | project_id, operation_id, observed_generation, write_mode |
+| RecoveryJob | project_id, job_id |
+| RecoveryJobs | project_id, limit, optional cursor |
+| CancelRecovery / RetryRecovery | project_id, job_id, expected_generation, write_mode |
+
+Writes require `write_mode=local`; generation and UUID validation precede
+transport. No source key, document bytes, actor override, object/path selector
+or destination is accepted. The dedicated server supplies fixed asserted
+local-user attribution to shared job control without replacing original source
+provenance. Get/action replies bind exact requested project/job UUIDs; action
+responses cannot regress the observed job generation. Admission distinguishes
+new queued intent, retained replay and original already-settled receipt proof.
+New queue responses cannot fabricate running history, and original proof must
+be a replayed document receipt. Job success retains the non-replayed original
+receipt as durable metadata, not a new source operation.
+Cancellation replies cannot acknowledge queued/running permission; retry must
+advance the observed generation unless it is an already-succeeded no-op.
+Historical retry replay may honestly return the later retained outcome. Fresh
+queue admission cannot regress the caller's observed journal generation;
+retained replay preserves its original observation instead of upgrading it.
+Job views enforce generation/attempt consistency and require an actual attempt
+for failed state; zero-attempt interrupted/cancelled/proof-success remains valid.
+
+Job pages enforce requested limit plus independent 64 KiB result size, ordered
+UUIDs, retained-count bounds and project/generation/last-job-bound continuation.
+Resumed pages must advance past the prior UUID and preserve snapshot generation
+and digest scope. Every page, including empty/final pages, echoes its validated
+`snapshot_digest`, `offset` and `retained` total. Cursor `seen` and `total` counts
+must agree with the actual last UUID ordinal and immutable snapshot. Offset plus
+returned rows conserves declared coverage: a nonterminal prefix has a next
+cursor, a terminal page reaches the retained total, and a resumed response
+cannot silently shrink that total. These are consistency checks, not
+cryptographic attestation of a peer's authority. Job-not-found,
+corrupt/uncertain job metadata and bounded
+attempt-limit errors retain fixed typed identities through IPC; arbitrary peer
+prose and unknown error codes cannot escape as local result text.
+Snapshot generation starts at one with zero jobs. A retained row's generation
+must precede the snapshot generation, and retained count cannot exceed prior
+snapshot transitions. Persisted records also bind their admission generation
+to the number of later job transitions; self-consistent JSON digests cannot
+make impossible lifecycle history valid on reopen.
 
 Search accepts `project_id`, `query`, optional `mode`/`kind`/`cursor` and required
 1–100 `limit`. An omitted mode resolves from the immutable manifest default;
@@ -534,7 +590,7 @@ untrusted selector rejection, silent-peer joining and receipt tamper controls.
 The test-only registry constructor is compiled only in augmented test builds,
 not as a production path selector. This is not the native launcher, transferred
 capability/restart, foreign-user, zero-network or complete L4 acceptance receipt.
-Those qualifications and bounded recovery/projection jobs, restricted embedding
+Those qualifications and bounded projection jobs, restricted embedding
 profiles and opaque lifecycle observations remain mandatory before #183 closure.
 
 ### Fixed-channel native launch (L4 in progress)
@@ -686,9 +742,9 @@ fences new admission, cancels and joins workers/active calls, then releases
 metadata descriptors, stores and UUID ownership. Native launch activates these
 workers only after its fixed-channel ACTIVE acknowledgement and final checks.
 
-These shared coordinator operations are not yet advertised private-IPC methods
-or public CLI/MCP/Admin controls. Private-IPC integration remains within #183;
-CLI/MCP #184 and Admin #185 remain explicit rollout dependencies. Backup and
+These shared coordinator operations are now exposed through the dedicated
+protected private IPC, not public CLI/MCP/Admin controls. CLI/MCP #184 and Admin
+#185 remain explicit rollout dependencies. Backup and
 restore #186 must preserve source journal/pins/objects and durable job intent,
 including cancellations; uncertain cancellation history cannot be reset by
 restoring an older metadata snapshot. The persistent search/index lifecycle,

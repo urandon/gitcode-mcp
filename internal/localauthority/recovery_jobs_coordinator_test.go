@@ -17,7 +17,12 @@ import (
 // are enabled separately; tests explicitly invoke the worker under its turn.
 func recoveryCoordinatorFixture(t *testing.T, cut string) (*Coordinator, *PreparedRegistry, string, documentOperation, authority.DocumentMutationRequest) {
 	t.Helper()
-	s, registry, directory, req, operation := selectedRecoveryFixture(t, "update", cut, 1)
+	return recoveryCoordinatorActorFixture(t, cut, testActor)
+}
+
+func recoveryCoordinatorActorFixture(t *testing.T, cut string, actor Actor) (*Coordinator, *PreparedRegistry, string, documentOperation, authority.DocumentMutationRequest) {
+	t.Helper()
+	s, registry, directory, req, operation := selectedRecoveryActorFixture(t, "update", cut, 1, actor)
 	if s.Close() != nil {
 		t.Fatal("original recovery owner did not close")
 	}
@@ -177,6 +182,22 @@ func TestRecoveryJobWorkerReconcilesLaterCallerWithoutRetry(t *testing.T) {
 			t.Fatal("idle worker missed original caller settlement")
 		case <-time.After(time.Millisecond):
 		}
+	}
+}
+
+func TestRecoveryJobDeniedDocumentTurnDoesNotWakeProofScans(t *testing.T) {
+	c, _, _, _, req := recoveryCoordinatorFixture(t, "knowledge_document_bound")
+	p := c.projects[testProject]
+	p.turn.Lock()
+	defer p.turn.Unlock()
+	_, err := c.MutateDocument(context.Background(), req, testActor)
+	if !authorityConflict(err) {
+		t.Fatal("contended external document request did not refuse admission")
+	}
+	select {
+	case <-p.jobs.wake:
+		t.Fatal("denied source admission reactivated idle recovery proof scans")
+	default:
 	}
 }
 
@@ -438,7 +459,7 @@ func TestRecoveryJobsPageCursorPinsGenerationAndDigest(t *testing.T) {
 	q := c.projects[testProject].jobs
 	// Cursor bytes are built from the same closed protected contract; a valid
 	// historical cursor cannot silently continue through a changed snapshot.
-	cur := recoveryJobsCursor{testProject, q.state.Generation, q.fileHash, o.ID}
+	cur := recoveryJobsCursor{testProject, q.state.Generation, q.fileHash, o.ID, 1, 1}
 	body, _ := json.Marshal(cur)
 	encoded := base64.RawURLEncoding.EncodeToString(body)
 	page, err := c.RecoveryJobs(context.Background(), RecoveryJobsRequest{testProject, 1, encoded})

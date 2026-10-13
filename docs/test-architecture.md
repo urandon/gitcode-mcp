@@ -119,6 +119,26 @@ uncertain evidence and prove that intact tracker operations remain available.
 Pages are observation-only, clone receipts and reject changed generation/digest
 cursors. These offline tests are not full native launch/network qualification.
 
+The recovery private-IPC cohort also exercises actual Unix admission, durable
+queued cancellation, retained replay, generation-CAS retry, real background
+recovery and original-source receipt replay. Augmented test-only fixtures defer
+workers around deterministic queued controls; no production fault/path
+constructor is exported. Malformed peer fixtures prove that old/incomplete
+capabilities prevent operation dispatch and that forged, unrelated or extra
+selector responses are rejected even with a discarded result destination.
+Result snapshots replace, rather than patch, a caller's previous object;
+omitted fields clear and invalid responses leave the original object intact.
+Independent record-count/wire-size/page-continuation controls and fixed typed
+job errors preserve protected scope without echoing arbitrary peer content.
+Malformed peer controls also reject false action acknowledgements, regressed
+fresh admission, impossible generation/attempt history, truncated fresh pages,
+wrong-digest final pages and resumed totals that silently shrink. Snapshot
+digest/offset/seen/total claims are verified on every page, including empty or
+terminal responses; they do not constitute cryptographic peer attestation.
+Page/job versus snapshot-generation controls and metadata reopen controls also
+reject impossible but otherwise bounded/digest-consistent history, preserving
+the tampered sidecar and keeping intact tracker operations available.
+
 Repository-document fixtures live under `testdata/repository-docs/` and contain
 only public-safe committed policy/document examples. Tests create temporary Git
 repositories for revision, rename, and tracked-worktree behavior and inspect
@@ -241,8 +261,15 @@ normal/minimal HTTP/SSE, and authenticated Admin routes. Tests reject malformed
 arguments before connection/retained reads, hold actual snapshot locks, cancel
 silent established peers, fence whole-filter cursors, and compare serialized
 DTOs including full sampled 60-minute metric windows above 64 KiB. IPC pipeline
-framing and shutdown-handler joining are explicit invariants. Recovery
-fixtures distinguish a missing commit observation from a failed durable commit:
+framing and shutdown-handler joining are explicit invariants.
+Collector startup is joined through the existing opted-in qualification writer
+idle acknowledgement before exact cross-transport snapshots are taken. Coverage
+leaving initializing is not that boundary: the fresh Boot append follows loaded
+coverage, including on a same-ledger partial restart. A private append barrier
+regression proves that ready coverage with only prior-boot events cannot satisfy
+the acknowledgement. Disabled, storage-unavailable and sealed controls remain;
+no product constructor opts into this scheduling seam.
+Recovery fixtures distinguish a missing commit observation from a failed durable commit:
 the O5 recovery cohort still requires correlated admission/provider/terminal
 events and actual job/cache/health success. A missing commit event is acceptable
 only on a complete retained page with partial observation-contention coverage

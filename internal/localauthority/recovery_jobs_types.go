@@ -18,6 +18,18 @@ const (
 	MaxRecoveryJobPageBytes     = 64 << 10
 )
 
+type RecoveryJobLookup struct {
+	ProjectID authority.UUID `json:"project_id"`
+	JobID     authority.UUID `json:"job_id"`
+}
+
+func (r RecoveryJobLookup) Validate() error {
+	if !r.ProjectID.Valid() || !r.JobID.Valid() {
+		return authority.Error{Code: authority.InvalidContract}
+	}
+	return nil
+}
+
 // The canonical operation UUID is the recovery idempotency identity. It cannot
 // reserve another document operation, substitute a source key, or retarget Git.
 type RecoveryJobRequest struct {
@@ -93,6 +105,9 @@ func (v RecoveryJobView) Validate() error {
 	if v.State != "succeeded" && (v.Receipt != nil || v.Reconciled) {
 		return authority.Error{Code: authority.InvalidContract}
 	}
+	if v.Generation < uint64(v.Attempts)+1 || v.State != "queued" && v.Generation < 2 || v.State == "failed" && v.Attempts < 1 {
+		return authority.Error{Code: authority.InvalidContract}
+	}
 	switch v.State {
 	case "queued":
 		if v.Code != "" || v.Attempts >= MaxRecoveryJobAttempts {
@@ -103,7 +118,7 @@ func (v RecoveryJobView) Validate() error {
 			return authority.Error{Code: authority.InvalidContract}
 		}
 	case "succeeded":
-		if v.Code != "" || v.Receipt == nil || v.Receipt.Validate() != nil || v.Receipt.ProjectID != v.ProjectID || v.Receipt.OperationID != v.JobID || v.Receipt.Citation.Kind != authority.Document || v.Attempts == 0 && !v.Reconciled {
+		if v.Code != "" || v.Receipt == nil || v.Receipt.Validate() != nil || v.Receipt.Replayed || v.Receipt.ProjectID != v.ProjectID || v.Receipt.OperationID != v.JobID || v.Receipt.Citation.Kind != authority.Document || v.Attempts == 0 && !v.Reconciled {
 			return authority.Error{Code: authority.InvalidContract}
 		}
 	case "cancelled":
@@ -133,6 +148,9 @@ type recoveryJobRecord struct {
 func (r recoveryJobRecord) valid(snapshot uint64, project authority.UUID) bool {
 	v := r.View
 	if v.Validate() != nil || v.ProjectID != project || !validDigest(r.IntentHash) || !validDigest(r.ActorHash) || r.ActionActorHash != "" && !validDigest(r.ActionActorHash) || r.AdmittedGeneration < 1 || r.AdmittedGeneration > snapshot || r.CancelFrom >= v.Generation || r.RetryFrom >= v.Generation {
+		return false
+	}
+	if v.Generation >= snapshot || v.Generation > snapshot-r.AdmittedGeneration+1 {
 		return false
 	}
 	if (v.State == "cancelling" || v.State == "cancelled") && r.CancelFrom == 0 {
@@ -170,6 +188,9 @@ type recoveryJobSnapshot struct {
 
 func (s recoveryJobSnapshot) valid() bool {
 	if s.Schema != 1 || !s.ProjectID.Valid() || !s.TrackerInstance.Valid() || !validDigest(s.ManifestHash) || s.Generation < 1 || s.Generation > math.MaxInt64 || s.Jobs == nil || len(s.Jobs) > MaxRecoveryJobs {
+		return false
+	}
+	if uint64(len(s.Jobs)) >= s.Generation {
 		return false
 	}
 	var last authority.UUID

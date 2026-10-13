@@ -16,11 +16,16 @@ import (
 
 func selectedRecoveryFixture(t *testing.T, mode, cut string, occurrence int) (*Store, *Registry, string, authority.DocumentMutationRequest, documentOperation) {
 	t.Helper()
+	return selectedRecoveryActorFixture(t, mode, cut, occurrence, testActor)
+}
+
+func selectedRecoveryActorFixture(t *testing.T, mode, cut string, occurrence int, actor Actor) (*Store, *Registry, string, authority.DocumentMutationRequest, documentOperation) {
+	t.Helper()
 	s, registry, directory := readyDocumentStore(t)
 	ctx := context.Background()
 	ref, citation := authority.EmptyKnowledgeRef, authority.Citation{}
 	if mode != "create" {
-		first, err := s.MutateDocument(ctx, documentRequest(t, "document.create", "synthetic-selected-parent", ref, citation, "# Original parent"), testActor)
+		first, err := s.MutateDocument(ctx, documentRequest(t, "document.create", "synthetic-selected-parent", ref, citation, "# Original parent"), actor)
 		if err != nil {
 			t.Fatal("selected recovery parent unavailable")
 		}
@@ -37,7 +42,7 @@ func selectedRecoveryFixture(t *testing.T, mode, cut string, occurrence int) (*S
 		}
 		return nil
 	}
-	if _, err := s.MutateDocument(ctx, req, testActor); !errors.Is(err, stop) {
+	if _, err := s.MutateDocument(ctx, req, actor); !errors.Is(err, stop) {
 		t.Fatal("selected recovery missed original barrier")
 	}
 	s.fault = nil

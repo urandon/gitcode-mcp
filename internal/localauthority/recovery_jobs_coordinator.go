@@ -96,8 +96,11 @@ func (a RecoveryJobAdmission) Validate() error {
 		if a.Job == nil || a.Job.Validate() != nil || a.Job.ProjectID != a.ProjectID || a.Job.JobID != a.OperationID || a.Receipt != nil {
 			return authority.Error{Code: authority.InvalidContract}
 		}
+		if a.Outcome == "queued" && (a.Job.State != "queued" || a.Job.Generation != 1 || a.Job.Attempts != 0) {
+			return authority.Error{Code: authority.InvalidContract}
+		}
 	case "already_settled":
-		if a.Job != nil || a.Receipt == nil || a.Receipt.Validate() != nil || a.Receipt.ProjectID != a.ProjectID || a.Receipt.OperationID != a.OperationID || !a.Receipt.Replayed {
+		if a.Job != nil || a.Receipt == nil || a.Receipt.Validate() != nil || a.Receipt.ProjectID != a.ProjectID || a.Receipt.OperationID != a.OperationID || a.Receipt.Citation.Kind != authority.Document || !a.Receipt.Replayed {
 			return authority.Error{Code: authority.InvalidContract}
 		}
 	default:

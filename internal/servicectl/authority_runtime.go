@@ -31,7 +31,7 @@ func NewAuthorityServer(core *localauthority.Coordinator) (*AuthorityServer, err
 }
 
 func authorityRuntimeCapabilities() authority.Negotiation {
-	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search"}}
+	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery"}}
 }
 
 type authorityProjectRequest struct {
@@ -176,6 +176,17 @@ func (s *AuthorityServer) dispatch(ctx context.Context, method string, raw []byt
 		return s.core.KnowledgeStatus(ctx, params.(authorityProjectRequest).ProjectID)
 	case "AuthorityV1.Search":
 		return s.core.Search(ctx, params.(localauthority.SearchRequest))
+	case "AuthorityV1.EnqueueRecovery":
+		return s.core.EnqueueRecovery(ctx, params.(localauthority.RecoveryJobRequest), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.RecoveryJob":
+		req := params.(localauthority.RecoveryJobLookup)
+		return s.core.RecoveryJob(ctx, req.ProjectID, req.JobID)
+	case "AuthorityV1.RecoveryJobs":
+		return s.core.RecoveryJobs(ctx, params.(localauthority.RecoveryJobsRequest))
+	case "AuthorityV1.CancelRecovery":
+		return s.core.CancelRecovery(ctx, params.(localauthority.RecoveryJobAction), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.RetryRecovery":
+		return s.core.RetryRecovery(ctx, params.(localauthority.RecoveryJobAction), localauthority.Actor{ID: "local-user"})
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}
