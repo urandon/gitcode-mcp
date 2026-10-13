@@ -15,6 +15,7 @@ import (
 	"gitcode-mcp/internal/authority"
 	"gitcode-mcp/internal/localauthority"
 	"gitcode-mcp/internal/servicectl"
+	"golang.org/x/sys/unix"
 )
 
 // Native process fixtures execute the same binary and production fixed-role
@@ -69,6 +70,7 @@ func nativeProcess(t *testing.T, p *localauthority.PreparedRegistry, dir string)
 	if err != nil || os.Chmod(path, 0600) != nil {
 		t.Fatal("native launch listener failed")
 	}
+	assertNativeParentDescriptorHygiene(t)
 	process, err := servicectl.StartAuthorityRuntime(context.Background(), prepared, l)
 	if err != nil {
 		t.Fatalf("native same-binary launch refused: %v", err)
@@ -81,6 +83,40 @@ func nativeProcess(t *testing.T, p *localauthority.PreparedRegistry, dir string)
 		}
 	})
 	return process
+}
+
+// Diagnose ambient capabilities before exec, without exposing descriptor
+// numbers, locators, file contents, or kernel diagnostic bodies. This is a
+// bounded fixture assertion, not a substitute for child/native qualification.
+func assertNativeParentDescriptorHygiene(t *testing.T) {
+	t.Helper()
+	classes := map[string]int{}
+	for fd := 3; fd < 1024; fd++ {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC != 0 {
+			continue
+		}
+		name := "other"
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) == nil {
+			switch st.Mode & unix.S_IFMT {
+			case unix.S_IFREG:
+				name = "regular"
+			case unix.S_IFDIR:
+				name = "directory"
+			case unix.S_IFSOCK:
+				name = "socket"
+			case unix.S_IFCHR:
+				name = "character"
+			case unix.S_IFIFO:
+				name = "pipe"
+			}
+		}
+		classes[name]++
+	}
+	if len(classes) != 0 {
+		t.Fatalf("native launch parent has ambient non-close-on-exec resources: classes=%v", classes)
+	}
 }
 
 func TestNativeAuthorityProcessLaunchReplayRestartAndReadOnlyCoexistence(t *testing.T) {

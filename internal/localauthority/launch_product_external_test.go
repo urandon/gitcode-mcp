@@ -127,6 +127,7 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 		defer socket.Close()
 		cmd.Stdout = socket
 	}
+	assertNativeParentDescriptorHygiene(t)
 	if cmd.Start() != nil {
 		cancel()
 		t.Fatal("native product execution failed")
