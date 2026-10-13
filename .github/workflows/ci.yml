@@ -68,7 +68,11 @@ jobs:
         run: ./scripts/check-browser-ci-artifacts.sh
 
       - name: Run tests
-        run: go test ./...
+        # Hosted runners may retain non-CLOEXEC control pipes. Isolate the
+        # Go test host, not the native authority child/admission controls.
+        run: |
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+          python3 scripts/ci/run_go_tests.py
 
       - name: Qualify native user-systemd observation upgrade
         # ubuntu-latest is an ephemeral VM, not a container. Do not install or

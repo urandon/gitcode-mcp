@@ -71,6 +71,19 @@ go test ./...
 `go test ./...` must pass without network access, credentials, Keychain access,
 or an SSH agent.
 
+The CI Go gate runs the same fixed `go test ./...` command through
+`python3 scripts/ci/run_go_tests.py`. Python's `close_fds=True` isolates the Go
+test host from ambient hosted-runner descriptors while preserving standard
+input/output/error, environment, working directory, and nonzero exit status.
+Run its deterministic controls with
+`python3 -m unittest discover -s scripts/ci -p 'test_*.py'`. Deliberately inherited
+pipes are visible in the dirty control, absent in the clean child, and remain
+open and inheritable in the parent. Signal termination stays a nonzero failure.
+This boundary does not sanitize a product process or qualify native isolation:
+authority tests create their deliberate unrelated-descriptor and socket-role
+controls afterward, and production admission must still refuse them. A clean
+test host is not evidence for network, credential, or foreign-user isolation.
+
 ## Fixture Boundary
 
 Fixtures are code inputs, not evidence archives. Before adding or changing a
