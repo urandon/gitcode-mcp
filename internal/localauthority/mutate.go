@@ -10,7 +10,6 @@ import (
 	"math"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"gitcode-mcp/internal/authority"
 )
@@ -20,15 +19,7 @@ import (
 type Actor struct{ ID string }
 
 func (a Actor) valid() bool {
-	if !utf8.ValidString(a.ID) || len(a.ID) < 1 || len(a.ID) > 128 || strings.TrimSpace(a.ID) != a.ID {
-		return false
-	}
-	for _, r := range a.ID {
-		if r < 32 || r == 127 {
-			return false
-		}
-	}
-	return true
+	return authority.ValidActorID(a.ID)
 }
 
 func hash(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }

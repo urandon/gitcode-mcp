@@ -34,9 +34,10 @@ func KnownCode(code Code) bool {
 
 func knownRuntimeMethod(method string) bool {
 	switch method {
-	case "Read", "Mutate", "MutateDocument", "KnowledgeStatus",
+	case "Read", "Mutate", "MutateAttributed", "MutateDocument", "KnowledgeStatus",
 		"DocumentOperationStatus", "CleanupDocumentPin", "Search",
-		"ProjectionStatus", "ReconcileProjection", "CancelProjection":
+		"ProjectionStatus", "ReconcileProjection", "CancelProjection",
+		"RevisionMetadata", "Audit", "MutationReceipt":
 		return true
 	}
 	return false
@@ -63,7 +64,7 @@ func (n Negotiation) Validate() error {
 		}
 		return nil
 	}
-	if len(n.Methods) == 0 || len(n.Methods) > 10 || n.Reason != "" || n.Handoff != "" {
+	if len(n.Methods) == 0 || len(n.Methods) > 14 || n.Reason != "" || n.Handoff != "" {
 		return Error{Unsupported}
 	}
 	seen := make(map[string]bool, len(n.Methods))

@@ -136,8 +136,20 @@ for canonical nesting and physical aliases before the first writer opens.
 All existing project stores must validate and acquire their global UUID writers
 before private IPC is published; partial enrollment closes earlier writers and
 never initializes a missing store. This is still a contracts-only service:
-domain dispatch, projections, native launch qualification and product workflows
+typed transport dispatch, projections, native launch qualification and product workflows
 remain separate L4/L5 acceptance work, not available commands.
+
+The staged shared runtime dispatcher connects protected Store operations under
+context-aware project lanes. `MutateAttributed` carries asserted actor plus the
+unchanged tracker mutation request; document calls retain their separate schema.
+Metadata/audit and original-key receipt/status are observations, never replay or
+setup consent. Document status/cleanup responses bind the supplied original key
+with a project-scoped hash; audit responses carry the exact project envelope.
+Raw keys are not echoed. Cleanup requires explicit local intent and a settled
+original operation. Cancellation joins both handlers and active shared domain
+calls before releasing writer leases; lost acknowledgement retains the original
+receipt. Legacy RPC negotiation is still contracts-only: typed client/server
+integration and its actual private-IPC acceptance gates are not yet available.
 
 `internal/privateipc` owns the Darwin/Linux endpoint primitives: explicitly
 prepared canonical private directory, `0700` directory / `0600` socket and

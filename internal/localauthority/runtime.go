@@ -30,12 +30,15 @@ type RuntimeOptions struct {
 }
 
 type Runtime struct {
-	mu       sync.RWMutex
-	options  RuntimeOptions
-	started  bool
-	serving  bool
-	projects map[authority.UUID]*Store
-	registry *Registry
+	mu         sync.RWMutex
+	options    RuntimeOptions
+	started    bool
+	serving    bool
+	runContext context.Context
+	operations sync.WaitGroup
+	calls      chan struct{}
+	projects   map[authority.UUID]*runtimeProject
+	registry   *Registry
 }
 
 // NewRuntime is pure admission validation, before environment/config/factories
@@ -91,7 +94,7 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		entry.Manifest.Entities = append([]authority.EntityKind(nil), entry.Manifest.Entities...)
 		copyOptions.Projects[i] = entry
 	}
-	return &Runtime{options: copyOptions, registry: options.Registry}, nil
+	return &Runtime{options: copyOptions, registry: options.Registry, calls: make(chan struct{}, 32)}, nil
 }
 
 // Conservatively refuse nesting/case aliases before any filesystem effects.
@@ -250,8 +253,14 @@ func (r *Runtime) Serve(ctx context.Context, handler func(context.Context, net.C
 	runCtx, cancel := context.WithCancel(ctx)
 	var handlers sync.WaitGroup
 	r.mu.Lock()
-	r.projects = projects
+	r.projects = make(map[authority.UUID]*runtimeProject, len(projects))
+	for id, store := range projects {
+		lane := make(chan struct{}, 1)
+		lane <- struct{}{}
+		r.projects[id] = &runtimeProject{store: store, lane: lane}
+	}
 	r.serving = true
+	r.runContext = runCtx
 	r.mu.Unlock()
 	stopDone := make(chan struct{})
 	stop := context.AfterFunc(runCtx, func() { _ = listener.Close(); close(stopDone) })
@@ -265,8 +274,10 @@ func (r *Runtime) Serve(ctx context.Context, handler func(context.Context, net.C
 		r.serving = false
 		r.mu.Unlock()
 		handlers.Wait()
+		r.operations.Wait()
 		r.mu.Lock()
 		r.projects = nil
+		r.runContext = nil
 		r.mu.Unlock()
 	}()
 	slots := make(chan struct{}, 32)
