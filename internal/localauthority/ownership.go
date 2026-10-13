@@ -15,9 +15,16 @@ import (
 // Registry is a trusted machine-global ownership boundary, not a project or
 // daemon-profile setting. There is no exported constructor with an arbitrary
 // root. Tests inject one isolated machine root through the private constructor.
-type Registry struct{ root string }
+type Registry struct {
+	root     string
+	uid      int
+	physical string
+}
 
 func MachineRegistry() (*Registry, error) {
+	if os.Getuid() != os.Geteuid() {
+		return nil, authority.Error{Code: authority.PolicyDenied}
+	}
 	u, err := user.Current()
 	if err != nil || !filepath.IsAbs(u.HomeDir) {
 		return nil, Error{DurabilityUnavailable}
@@ -37,7 +44,38 @@ func newRegistry(root string) (*Registry, error) {
 	if err := qualifyFilesystem(path); err != nil {
 		return nil, err
 	}
-	return &Registry{root: path}, nil
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, Error{DurabilityUnavailable}
+	}
+	physical, err := physicalIdentity(f)
+	_ = f.Close()
+	if err != nil {
+		return nil, err
+	}
+	return &Registry{root: path, uid: os.Geteuid(), physical: physical}, nil
+}
+
+// checkCapability performs only local qualified filesystem inspection. It
+// neither resolves an account/home nor creates a registry or chooses a root.
+func (r *Registry) checkCapability() error {
+	if r == nil || r.root == "" || r.uid != os.Geteuid() || os.Getuid() != os.Geteuid() || !validDigest(r.physical) {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
+	path, err := privateDirectory(r.root)
+	if err != nil || path != r.root || qualifyFilesystem(path) != nil {
+		return Error{Corrupt}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Error{Corrupt}
+	}
+	physical, err := physicalIdentity(f)
+	_ = f.Close()
+	if err != nil || physical != r.physical {
+		return Error{Corrupt}
+	}
+	return nil
 }
 
 type lease struct {

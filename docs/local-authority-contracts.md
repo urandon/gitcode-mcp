@@ -121,6 +121,35 @@ Clients negotiate first and return `authority_unavailable` without sending an
 entity operation when the build reports no implemented authority methods.
 Missing/old daemons never trigger credentials, network setup or auto-start.
 
+The L4 bootstrap increment separates trusted machine preparation from execution.
+`Manager.Local` is selected before legacy configuration/environment processing;
+mixed legacy cache/Admin/credential options refuse. A prepared opaque registry
+capability binds equal real/effective UID and the qualified physical directory.
+Strict execution never lazily resolves an OS account/home or creates a registry.
+All existing project stores must validate and acquire their global UUID writers
+before private IPC is published; partial enrollment closes earlier writers and
+never initializes a missing store. This is still a contracts-only service:
+domain dispatch, projections, native launch qualification and product workflows
+remain separate L4/L5 acceptance work, not available commands.
+
+`internal/privateipc` owns the Darwin/Linux endpoint primitives: explicitly
+prepared canonical private directory, `0700` directory / `0600` socket and
+singleton owner file, same-effective-UID kernel peers in both directions, and
+retained physical inode bindings. No arbitrary passed listener becomes trusted.
+An unknown or live socket is never replaced. A stale socket requires its exact
+retained binding and a refused connection probe under the singleton lease.
+Read-only dial never creates, repairs or starts anything. Stopping admission is
+separate from releasing ownership: all accepted connections must close first.
+Namespace replacements survive shutdown instead of being unlinked.
+
+A prepared in-process registry object is not native process-entry/restart
+isolation proof. That gate requires a trusted launcher transferring qualified
+directory-descriptor provenance, child revalidation and OS-level no-network
+evidence. Arbitrary paths/environment/descriptors, `osusergo`, passwd guessing
+or a temporary per-profile registry are not substitutes. Native handoff, real
+foreign-user process qualification and complete loopback/provider behavior
+must not be reported passed from the current bootstrap fixtures.
+
 Negotiation request:
 
 ```json

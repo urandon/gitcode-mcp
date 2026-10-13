@@ -21,8 +21,10 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/adminui"
+	"gitcode-mcp/internal/authority"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/localauthority"
 	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/rag"
 )
@@ -88,6 +90,8 @@ type Status struct {
 }
 
 type Manager struct {
+	// Local is an explicitly validated isolated runtime, not legacy config.
+	Local              *localauthority.Runtime
 	observation        *observability.Collector
 	metrics            *observability.Metrics
 	observationUpgrade bool
@@ -472,6 +476,13 @@ func (m Manager) waitForStopped(ctx context.Context, paths Paths) (Status, error
 }
 
 func (m Manager) Run(ctx context.Context) error {
+	if m.Local != nil {
+		if m.Source != nil || m.CredentialReporter != nil || m.EffectiveConfig != nil || m.JobRetention != nil || m.SchemaMin != 0 || m.SchemaMax != 0 || m.RuntimeDir != "" || m.AdminBind != "" || m.AdminAutoStart || m.AdminAllowNonLoopback || m.AdminSessionTTL != 0 || m.AdminCachePath != "" || m.Offline || m.GOOS != "" || m.Runner != nil || m.OutputRunner != nil || m.StartupTimeout != 0 || m.StartupInterval != 0 || m.observation != nil || m.metrics != nil || m.observationUpgrade || m.maintenanceCacheInspector != nil || m.maintenanceCacheCanonicalizer != nil || m.maintenanceCacheInspectTimeout != 0 || m.syncStageRecovery != nil {
+			return authority.Error{Code: authority.PolicyDenied}
+		}
+		server := RPCServer{Local: m.Local, runtimeContext: ctx}
+		return m.Local.Serve(ctx, server.handleConn)
+	}
 	ctx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	paths, err := m.ResolvePaths()

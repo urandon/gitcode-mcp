@@ -14,6 +14,7 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/authority"
+	"gitcode-mcp/internal/localauthority"
 	"gitcode-mcp/internal/observability"
 )
 
@@ -81,6 +82,7 @@ type ServiceHealth struct {
 }
 
 type RPCServer struct {
+	Local               *localauthority.Runtime
 	runtimeContext      context.Context
 	observationHandlers *atomic.Int64
 	Manager             Manager
@@ -241,6 +243,9 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	if authorityMethod(method) {
 		return s.dispatchAuthority(ctx, method, params)
+	}
+	if s.Local != nil {
+		return nil, authority.Error{Code: authority.PolicyDenied}
 	}
 	if observationMethod(method) {
 		return s.dispatchObservation(ctx, method, params)
