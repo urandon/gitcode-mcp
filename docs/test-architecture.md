@@ -214,8 +214,15 @@ normal/minimal HTTP/SSE, and authenticated Admin routes. Tests reject malformed
 arguments before connection/retained reads, hold actual snapshot locks, cancel
 silent established peers, fence whole-filter cursors, and compare serialized
 DTOs including full sampled 60-minute metric windows above 64 KiB. IPC pipeline
-framing and shutdown-handler joining are explicit invariants. Recovery
-fixtures distinguish a missing commit observation from a failed durable commit:
+framing and shutdown-handler joining are explicit invariants.
+Collector startup is joined through the existing opted-in qualification writer
+idle acknowledgement before exact cross-transport snapshots are taken. Coverage
+leaving initializing is not that boundary: the fresh Boot append follows loaded
+coverage, including on a same-ledger partial restart. A private append barrier
+regression proves that ready coverage with only prior-boot events cannot satisfy
+the acknowledgement. Disabled, storage-unavailable and sealed controls remain;
+no product constructor opts into this scheduling seam.
+Recovery fixtures distinguish a missing commit observation from a failed durable commit:
 the O5 recovery cohort still requires correlated admission/provider/terminal
 events and actual job/cache/health success. A missing commit event is acceptable
 only on a complete retained page with partial observation-contention coverage
