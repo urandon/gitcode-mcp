@@ -110,7 +110,7 @@ func (r *ReceivedLaunch) Activate(lifetime, handshake context.Context) (*Coordin
 	r.parentStop = context.AfterFunc(lifetime, cancel)
 	stopAdmission := context.AfterFunc(ctx, cancel)
 	defer stopAdmission()
-	r.core, err = NewStrictCoordinator(admission, r.prepared, r.bindings)
+	r.core, err = newStrictCoordinator(admission, r.prepared, r.bindings, false)
 	if err != nil {
 		cancel()
 		r.parentStop()
@@ -136,6 +136,11 @@ func (r *ReceivedLaunch) Activate(lifetime, handshake context.Context) (*Coordin
 	}
 	if err != nil {
 		// Ownership remains in r until Close has actually joined the core.
+		cancel()
+		r.parentStop()
+		return nil, err
+	}
+	if err = r.core.activateRecoveryWorkers(); err != nil {
 		cancel()
 		r.parentStop()
 		return nil, err

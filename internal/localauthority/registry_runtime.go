@@ -192,6 +192,7 @@ func (p *PreparedRegistry) OpenWriter(ctx context.Context, directory string, pro
 	}
 	p.writers++
 	s.lease.runtimeGuard = verify
+	s.lease.runtimeDirectoryIdentity = directoryIdentity
 	s.lease.onClose = func() error {
 		var err error
 		if guard.Close() != nil {

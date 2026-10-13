@@ -21,6 +21,10 @@ const (
 	DocumentPending                Code = "authority_document_pending"
 	DocumentRecoveryRequired       Code = "authority_document_recovery_required"
 	KnowledgeCorrupt               Code = "authority_knowledge_corrupt"
+	JobsCorrupt                    Code = "authority_recovery_jobs_corrupt"
+	JobsUncertain                  Code = "authority_recovery_jobs_uncertain"
+	JobNotFound                    Code = "authority_recovery_job_not_found"
+	JobRetryLimit                  Code = "authority_recovery_job_retry_limit"
 )
 
 // Error is deliberately content-free; SQL, paths, keys and payloads are private.
@@ -55,6 +59,14 @@ func (e Error) Error() string {
 		return "document operation requires recovery; retain the original caller key"
 	case KnowledgeCorrupt:
 		return "knowledge authority integrity check failed; preserve original operation evidence"
+	case JobsCorrupt:
+		return "local recovery job metadata is invalid; preserve it for explicit recovery"
+	case JobsUncertain:
+		return "local recovery job publication is uncertain; verified owner reopen is required"
+	case JobNotFound:
+		return "local recovery job is not retained"
+	case JobRetryLimit:
+		return "local recovery job reached its bounded attempt limit"
 	default:
 		return "local authority storage is unavailable"
 	}

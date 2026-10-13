@@ -105,6 +105,20 @@ new production readiness condition.
 Captured research, migration notes, dogfood reports, and generated design
 packages belong in wiki pages or issue/PR comments when they are still useful.
 
+Local-authority recovery job fixtures separate durable metadata admission from
+actual source effects. They cover exact original receipt identity, cancellation
+without the worker-held effect turn, before/after-rename cancellation failure,
+stale attempt-generation signals, restart of queued/running/cancelling/cancelled
+intent, proof-only reconciliation after the original caller settles, and
+terminal metadata acknowledgement failure without another source operation.
+Actual background-worker controls verify reconciliation without manual retry;
+deterministic lock-release windows verify that waiters cannot miss a release.
+Bounded child-process FIFO controls reject both final and stage nonregular files
+without hanging startup. Metadata fault/type/inode/content controls preserve
+uncertain evidence and prove that intact tracker operations remain available.
+Pages are observation-only, clone receipts and reject changed generation/digest
+cursors. These offline tests are not full native launch/network qualification.
+
 Repository-document fixtures live under `testdata/repository-docs/` and contain
 only public-safe committed policy/document examples. Tests create temporary Git
 repositories for revision, rename, and tracked-worktree behavior and inspect

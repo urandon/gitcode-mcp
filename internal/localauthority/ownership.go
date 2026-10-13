@@ -43,12 +43,13 @@ func newRegistry(root string) (*Registry, error) {
 }
 
 type lease struct {
-	file         *os.File
-	binding      string
-	registry     string
-	existingOnly bool
-	runtimeGuard func() error
-	onClose      func() error
+	file                     *os.File
+	binding                  string
+	registry                 string
+	existingOnly             bool
+	runtimeGuard             func() error
+	runtimeDirectoryIdentity string // retained prepared root, never a caller selector
+	onClose                  func() error
 }
 
 // The binding is never removed on release. A clone or relocated authority

@@ -599,7 +599,8 @@ unique operation UUID, original intent hash and observed journal generation.
 It validates `1 <= observed <= canonical` and advances from the actual canonical
 phase; an older observation cannot downgrade a later binding or receipt. No
 caller key, Markdown, locator/path selector or substitute operation is accepted.
-This is not yet a public maintenance API or durable job queue.
+This primitive is not itself a public maintenance API. The separate coordinator
+job owner below gates durable explicit recovery intent.
 
 A reservation without the exact published operation pin remains
 `document_recovery_required`, including an owned lock-only or partial object
@@ -628,5 +629,68 @@ real-time and writer ownership is retained until the actual operation joins.
 Deterministic fault/reopen and abrupt-exit controls distinguish unprepared,
 pinned, bound, candidate-ref and settled states, including late cancellation,
 monotonic retry, foreign/missing evidence and no-write settled replay. These do
-not implement the still-required persistent job/index lifecycle, restricted real
+not implement the still-required persistent index lifecycle, restricted real
 embedding profile, opaque lifecycle observation or complete native qualification.
+
+### Durable selected recovery jobs (L4 in progress)
+
+The prepared coordinator owns a private metadata-only job namespace, separate
+from canonical tracker/document state. The job identity is the original
+operation UUID; admission accepts only project/operation UUIDs, an observed
+journal generation and explicit `write_mode=local`. It accepts no document
+bytes, source key, path, Git object selector or destination. Retained admission
+replay never upgrades original scope or resumes a cancelled/failed operation.
+An already-settled target without a retained job returns the original receipt
+as proof-only replay, not fabricated job history.
+
+At most 128 records, one active job per project and eight actual attempts per
+job are retained. Snapshot size is capped at 512 KiB; at most 32 unpublished
+stages and 16 MiB of stage evidence are preserved. Only proved successful
+records may be retired. Read pages independently cap results at 100 records
+and 64 KiB, with project/generation/digest-bound cursors rejecting stale state.
+Protected job responses contain fixed lifecycle codes, generations, timestamps
+and the original receipt, not actor text or source bytes.
+
+Publication validates immutable project/tracker/manifest binding and exact
+snapshot generation, file content and inode. Root-relative no-follow opens
+verify private ownership, regular-file type and single link; existing metadata
+opens are nonblocking so a FIFO replacement cannot strand coordinator startup.
+Exclusive stages become canonical only after file/directory barriers and final
+rename/readback. A post-rename ambiguous acknowledgement fences this job queue
+until verified owner reopen; it does not make an intact tracker unavailable.
+After an actual source call joins, failure to publish terminal job state also
+fences the queue, even before metadata rename. It cannot advertise a running
+attempt whose worker has exited. Owner reopen proves the canonical source
+receipt before updating metadata; it does not repeat a settled source effect.
+An existing namespace lacking final state is preserved as uncertain, never
+silently reinitialized. Interrupted initial namespace setup therefore needs an
+explicit operator-recovery decision in the #186 cohort.
+
+Cancellation and retry use explicit job-generation CAS. Cancellation metadata
+control does not take the worker-held project effect turn. Definitive failure
+before final publication does not cancel an authorized source effect; an
+acknowledged or rename-uncertain cancellation stops only its exact attempt
+generation. Cancel is not rollback: the actual source call joins before fresh
+canonical proof determines success, cancelled pending state or uncertainty.
+Cancelled/failed/interrupted records can become succeeded through original
+receipt proof without inventing another attempt if the original caller later
+settles that operation. Only explicit external document writes coalesce this
+proof reconciliation; reads and the worker's own release do not self-wake.
+
+Workers count attempts only after obtaining the project effect turn and
+durably marking running. Contention waits on the actual lock-release epoch,
+not retries or polling. Owner restart may resume queued/running intent, never
+source effects from cancelling/cancelled state. A fresh pre-effect uncertainty
+can mark queued intent interrupted without inventing an attempt. Shutdown
+fences new admission, cancels and joins workers/active calls, then releases
+metadata descriptors, stores and UUID ownership. Native launch activates these
+workers only after its fixed-channel ACTIVE acknowledgement and final checks.
+
+These shared coordinator operations are not yet advertised private-IPC methods
+or public CLI/MCP/Admin controls. Private-IPC integration remains within #183;
+CLI/MCP #184 and Admin #185 remain explicit rollout dependencies. Backup and
+restore #186 must preserve source journal/pins/objects and durable job intent,
+including cancellations; uncertain cancellation history cannot be reset by
+restoring an older metadata snapshot. The persistent search/index lifecycle,
+restricted embedding profile, opaque observation and native qualification are
+still required before #183 is complete.
