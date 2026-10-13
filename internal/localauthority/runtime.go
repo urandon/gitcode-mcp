@@ -102,6 +102,81 @@ func runtimePathOverlap(left, right string) bool {
 	return left == right || strings.HasPrefix(left, right+string(filepath.Separator)) || strings.HasPrefix(right, left+string(filepath.Separator))
 }
 
+type runtimeDirectory struct {
+	path     string
+	physical string
+	file     *os.File
+}
+
+type runtimeNamespaces struct{ directories []runtimeDirectory }
+
+func (n *runtimeNamespaces) close() {
+	for _, entry := range n.directories {
+		_ = entry.file.Close()
+	}
+}
+
+// Qualify every namespace before acquiring even the first writer. Lexical
+// validation alone cannot see ancestor symlinks, case aliases or bind mounts.
+func (r *Runtime) qualifyNamespaces() (*runtimeNamespaces, error) {
+	n := &runtimeNamespaces{}
+	success := false
+	defer func() {
+		if !success {
+			n.close()
+		}
+	}()
+	paths := []string{r.options.Directory, r.registry.root}
+	for _, entry := range r.options.Projects {
+		paths = append(paths, entry.Directory)
+	}
+	for _, path := range paths {
+		canonical, err := privateDirectory(path)
+		if err != nil {
+			return nil, err
+		}
+		f, err := openQualifiedDirectory(canonical)
+		if err != nil {
+			return nil, err
+		}
+		physical, err := physicalIdentity(f)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		for _, other := range n.directories {
+			if physical == other.physical || runtimePathOverlap(canonical, other.path) {
+				_ = f.Close()
+				return nil, authority.Error{Code: authority.Conflict}
+			}
+		}
+		n.directories = append(n.directories, runtimeDirectory{path: canonical, physical: physical, file: f})
+	}
+	if n.directories[1].physical != r.registry.physical {
+		return nil, Error{Corrupt}
+	}
+	success = true
+	return n, nil
+}
+
+func (n *runtimeNamespaces) revalidate() error {
+	for _, entry := range n.directories {
+		if qualifyDirectoryFD(entry.file) != nil {
+			return Error{Corrupt}
+		}
+		f, err := openQualifiedDirectory(entry.path)
+		if err != nil {
+			return Error{Corrupt}
+		}
+		physical, err := physicalIdentity(f)
+		_ = f.Close()
+		if err != nil || physical != entry.physical {
+			return Error{Corrupt}
+		}
+	}
+	return nil
+}
+
 // Serve owns private IPC and project writers together. Handler receives only
 // qualified same-user connections, not a listener/factory it can substitute.
 // Cancellation joins every handler before closing stores or singleton leases.
@@ -127,6 +202,11 @@ func (r *Runtime) Serve(ctx context.Context, handler func(context.Context, net.C
 	if err := registry.checkCapability(); err != nil {
 		return err
 	}
+	namespaces, err := r.qualifyNamespaces()
+	if err != nil {
+		return err
+	}
+	defer namespaces.close()
 	projects := make(map[authority.UUID]*Store, len(r.options.Projects))
 	defer func() {
 		for _, store := range projects {
@@ -135,11 +215,14 @@ func (r *Runtime) Serve(ctx context.Context, handler func(context.Context, net.C
 			}
 		}
 	}()
-	for _, entry := range r.options.Projects {
+	for i, entry := range r.options.Projects {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		store, err := OpenWriter(ctx, registry, entry.Directory, entry.Manifest.ID)
+		if err := namespaces.revalidate(); err != nil {
+			return err
+		}
+		store, err := OpenWriter(ctx, registry, namespaces.directories[i+2].path, entry.Manifest.ID)
 		if err != nil {
 			return err
 		}
@@ -151,7 +234,10 @@ func (r *Runtime) Serve(ctx context.Context, handler func(context.Context, net.C
 	if err := registry.checkCapability(); err != nil {
 		return err
 	}
-	listener, err := privateipc.Listen(ctx, r.options.Directory)
+	if err := namespaces.revalidate(); err != nil {
+		return err
+	}
+	listener, err := privateipc.Listen(ctx, namespaces.directories[0].path)
 	if err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gitcode-mcp/internal/authority"
 )
@@ -16,9 +17,11 @@ import (
 // daemon-profile setting. There is no exported constructor with an arbitrary
 // root. Tests inject one isolated machine root through the private constructor.
 type Registry struct {
-	root     string
-	uid      int
-	physical string
+	mu        sync.Mutex
+	root      string
+	uid       int
+	physical  string
+	directory *os.File
 }
 
 func MachineRegistry() (*Registry, error) {
@@ -41,20 +44,80 @@ func newRegistry(root string) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := qualifyFilesystem(path); err != nil {
-		return nil, err
-	}
-	f, err := os.Open(path)
+	f, err := openQualifiedDirectory(path)
 	if err != nil {
 		return nil, Error{DurabilityUnavailable}
 	}
 	physical, err := physicalIdentity(f)
-	_ = f.Close()
+	if err == nil {
+		err = syncRegistryDirectory(f)
+	}
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
-	return &Registry{root: path, uid: os.Geteuid(), physical: physical}, nil
+	return &Registry{root: path, uid: os.Geteuid(), physical: physical, directory: f}, nil
 }
+
+// Close ends admission through this prepared capability. Existing leases own
+// independent directory descriptors and retain their lock/durability boundary.
+func (r *Registry) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.directory == nil {
+		return nil
+	}
+	f := r.directory
+	r.directory = nil
+	if f.Close() != nil {
+		return Error{DurabilityUnavailable}
+	}
+	return nil
+}
+
+// Each operation is relative to the retained directory, never the pathname.
+// Holding mu also prevents Close from recycling its descriptor during a syscall.
+func (r *Registry) withDirectory(operation func(*os.File) error) error {
+	if r == nil {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.directory == nil || r.uid != os.Geteuid() || os.Getuid() != os.Geteuid() {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
+	if qualifyDirectoryFD(r.directory) != nil {
+		return Error{Corrupt}
+	}
+	return operation(r.directory)
+}
+
+func (r *Registry) exists(name string) (exists bool, err error) {
+	err = r.withDirectory(func(f *os.File) error { var e error; exists, e = registryExists(f, name); return e })
+	return
+}
+
+func (r *Registry) open(name string, create, exclusive bool, maxLinks uint64) (file *os.File, err error) {
+	err = r.withDirectory(func(f *os.File) error {
+		var e error
+		file, e = registryOpen(f, name, create, exclusive, maxLinks)
+		return e
+	})
+	return
+}
+
+func (r *Registry) link(old, next string) error {
+	return r.withDirectory(func(f *os.File) error { return registryLink(f, old, next) })
+}
+
+func (r *Registry) unlink(name string) error {
+	return r.withDirectory(func(f *os.File) error { return registryUnlink(f, name) })
+}
+
+func (r *Registry) sync() error { return r.withDirectory(syncRegistryDirectory) }
 
 // checkCapability performs only local qualified filesystem inspection. It
 // neither resolves an account/home nor creates a registry or chooses a root.
@@ -62,26 +125,37 @@ func (r *Registry) checkCapability() error {
 	if r == nil || r.root == "" || r.uid != os.Geteuid() || os.Getuid() != os.Geteuid() || !validDigest(r.physical) {
 		return authority.Error{Code: authority.PolicyDenied}
 	}
-	path, err := privateDirectory(r.root)
-	if err != nil || path != r.root || qualifyFilesystem(path) != nil {
-		return Error{Corrupt}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return Error{Corrupt}
-	}
-	physical, err := physicalIdentity(f)
-	_ = f.Close()
-	if err != nil || physical != r.physical {
-		return Error{Corrupt}
-	}
-	return nil
+	return r.withDirectory(func(held *os.File) error {
+		if qualifyDirectoryFD(held) != nil {
+			return Error{Corrupt}
+		}
+		identity, err := physicalIdentity(held)
+		if err != nil || identity != r.physical {
+			return Error{Corrupt}
+		}
+		// Path revalidation is only an admission fence. It never supplies the
+		// descriptor used for owner or initialization writes.
+		path, err := privateDirectory(r.root)
+		if err != nil || path != r.root {
+			return Error{Corrupt}
+		}
+		f, err := openQualifiedDirectory(path)
+		if err != nil {
+			return Error{Corrupt}
+		}
+		defer f.Close()
+		physical, err := physicalIdentity(f)
+		if err != nil || physical != r.physical {
+			return Error{Corrupt}
+		}
+		return nil
+	})
 }
 
 type lease struct {
 	file     *os.File
 	binding  string
-	registry string
+	registry *os.File
 }
 
 // The binding is never removed on release. A clone or relocated authority
@@ -101,10 +175,10 @@ func (r *Registry) acquire(ctx context.Context, id, instance authority.UUID, dir
 			_ = l.close()
 		}
 	}()
-	if _, err := os.Lstat(filepath.Join(r.root, string(id)+".init")); err == nil {
+	if exists, err := registryExists(l.registry, initName(id)); err != nil {
+		return nil, err
+	} else if exists {
 		return nil, Error{InitializationPending}
-	} else if !os.IsNotExist(err) {
-		return nil, Error{Corrupt}
 	}
 	digest := sha256.Sum256([]byte(directory))
 	want := string(id) + "\n" + hex.EncodeToString(digest[:]) + "\n" + string(instance) + "\n"
@@ -125,7 +199,7 @@ func (r *Registry) acquire(ctx context.Context, id, instance authority.UUID, dir
 		if err = syncFile(f); err != nil {
 			return nil, err
 		}
-		if err = syncDirectory(r.root); err != nil {
+		if err = syncRegistryDirectory(l.registry); err != nil {
 			return nil, err
 		}
 	}
@@ -142,15 +216,22 @@ func (r *Registry) lockProject(ctx context.Context, id authority.UUID) (*lease, 
 	if r == nil || !id.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
-	f, err := openPrivateFile(filepath.Join(r.root, string(id)+".owner"))
+	var directory *os.File
+	err := r.withDirectory(func(f *os.File) error { var e error; directory, e = duplicateRegistryDirectory(f); return e })
 	if err != nil {
+		return nil, err
+	}
+	f, err := registryOpen(directory, string(id)+".owner", true, false, 1)
+	if err != nil {
+		_ = directory.Close()
 		return nil, err
 	}
 	if err = lockExclusive(f); err != nil {
 		_ = f.Close()
+		_ = directory.Close()
 		return nil, err
 	}
-	return &lease{file: f, registry: r.root}, nil
+	return &lease{file: f, registry: directory}, nil
 }
 
 func (l *lease) bindPhysical(path string) error {
@@ -184,7 +265,7 @@ func (l *lease) bindPhysical(path string) error {
 	if err = syncFile(l.file); err != nil {
 		return err
 	}
-	return syncDirectory(l.registry)
+	return syncRegistryDirectory(l.registry)
 }
 
 func (l *lease) close() error {
@@ -195,7 +276,14 @@ func (l *lease) close() error {
 	l.file = nil
 	// Closing releases the kernel lease. Never truncate, unlink, or replace its
 	// identity while another process could be waiting on the same inode.
-	if err := f.Close(); err != nil {
+	err := f.Close()
+	if l.registry != nil {
+		if e := l.registry.Close(); e != nil {
+			err = e
+		}
+		l.registry = nil
+	}
+	if err != nil {
 		return Error{DurabilityUnavailable}
 	}
 	return nil

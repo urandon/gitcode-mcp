@@ -6,8 +6,17 @@ import (
 )
 
 func qualifyFilesystem(path string) error {
+	f, err := openQualifiedDirectory(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return syncRegistryDirectory(f)
+}
+
+func qualifyFilesystemFD(f *os.File) error {
 	var stat unix.Statfs_t
-	if unix.Statfs(path, &stat) != nil {
+	if unix.Fstatfs(int(f.Fd()), &stat) != nil {
 		return Error{DurabilityUnavailable}
 	}
 	switch stat.Type {
@@ -15,7 +24,7 @@ func qualifyFilesystem(path string) error {
 	default:
 		return Error{DurabilityUnavailable}
 	}
-	return syncDirectory(path)
+	return nil
 }
 
 func syncFile(f *os.File) error {

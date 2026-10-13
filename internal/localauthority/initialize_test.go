@@ -20,6 +20,7 @@ func initializationFixture(t *testing.T) (*Registry, string) {
 	if err != nil {
 		t.Fatal("isolated initialization registry unavailable")
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	return r, privateTestDirectory(t)
 }
 

@@ -153,10 +153,10 @@ func OpenWriter(ctx context.Context, registry *Registry, directory string, expec
 	if registry == nil || !expected.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
-	if _, err := os.Lstat(initPath(registry, expected)); err == nil {
+	if exists, err := registry.exists(initName(expected)); err != nil {
+		return nil, err
+	} else if exists {
 		return nil, Error{InitializationPending}
-	} else if !os.IsNotExist(err) {
-		return nil, Error{Corrupt}
 	}
 	s, err := OpenReadOnly(ctx, directory, expected)
 	if err != nil {

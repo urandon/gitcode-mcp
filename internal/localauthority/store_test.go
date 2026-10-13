@@ -29,6 +29,7 @@ func testStore(t *testing.T) (*Store, *Registry, string) {
 	if err != nil {
 		t.Fatal("machine registry qualification failed")
 	}
+	t.Cleanup(func() { _ = r.Close() })
 	dir := privateTestDirectory(t)
 	s, err := Initialize(context.Background(), r, dir, testManifest())
 	if err != nil {

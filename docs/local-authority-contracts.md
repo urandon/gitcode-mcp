@@ -125,7 +125,14 @@ The L4 bootstrap increment separates trusted machine preparation from execution.
 `Manager.Local` is selected before legacy configuration/environment processing;
 mixed legacy cache/Admin/credential options refuse. A prepared opaque registry
 capability binds equal real/effective UID and the qualified physical directory.
+It retains a qualified directory descriptor: owner locks, pending-init records,
+hard-link publication, unlink and directory sync are descriptor-relative. A
+pathname rename/recreate/restore cannot redirect those operations to a second
+ownership namespace. `Registry.Close` ends capability admission; active writer
+leases retain independently owned descriptors until their stores close.
 Strict execution never lazily resolves an OS account/home or creates a registry.
+All endpoint/registry/project directories are physically qualified and checked
+for canonical nesting and physical aliases before the first writer opens.
 All existing project stores must validate and acquire their global UUID writers
 before private IPC is published; partial enrollment closes earlier writers and
 never initializes a missing store. This is still a contracts-only service:

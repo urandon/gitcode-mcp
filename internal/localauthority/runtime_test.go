@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,9 +59,11 @@ func TestRuntimeOwnsGlobalWriterUntilHandlersJoin(t *testing.T) {
 	r, registry, directory, control := runtimeFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	entered, release := make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	unblock := func() { released.Do(func() { close(release) }) }
 	done := make(chan error, 1)
 	go func() { done <- r.Serve(ctx, func(context.Context, net.Conn) { close(entered); <-release }) }()
-	t.Cleanup(func() { cancel() })
+	t.Cleanup(func() { cancel(); unblock() })
 	client := runtimeClient(t, ctx, control)
 	defer client.Close()
 	select {
@@ -82,7 +85,7 @@ func TestRuntimeOwnsGlobalWriterUntilHandlersJoin(t *testing.T) {
 		_ = second.Close()
 		t.Fatal("shutdown released active handler writer")
 	}
-	close(release)
+	unblock()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -164,6 +167,72 @@ func TestRuntimeRegistryReplacementRefusesBeforeOpening(t *testing.T) {
 	files, _ := os.ReadDir(control)
 	if len(files) != 0 {
 		t.Fatal("replacement registry startup published socket")
+	}
+}
+
+func TestRuntimePhysicalAliasesRefuseBeforeAnyWriterEffects(t *testing.T) {
+	for _, cohort := range []string{"endpoint-project", "registry-project", "project-project"} {
+		t.Run(cohort, func(t *testing.T) {
+			r, registry, directory, control := runtimeFixture(t)
+			options := r.options
+			options.Projects = append([]RuntimeProject(nil), options.Projects...)
+			// An ancestor symlink is accepted by privateDirectory, unlike a leaf
+			// symlink. It is invisible to lexical overlap checks in NewRuntime.
+			parent := privateTestDirectory(t)
+			alias := filepath.Join(parent, "alias")
+			target := filepath.Dir(directory)
+			switch cohort {
+			case "endpoint-project":
+				options.Directory = directory
+				options.Projects[0].Directory = filepath.Join(alias, filepath.Base(directory))
+			case "registry-project":
+				target = filepath.Dir(registry.root)
+				options.Projects[0].Directory = filepath.Join(alias, filepath.Base(registry.root))
+			case "project-project":
+				second := options.Projects[0]
+				second.Manifest.ID = "22222222-2222-4222-8222-222222222222"
+				second.Registration.StorageRef = "second-store"
+				second.Directory = filepath.Join(alias, filepath.Base(directory))
+				options.Projects = append(options.Projects, second)
+			}
+			if os.Symlink(target, alias) != nil {
+				t.Fatal("physical alias fixture unavailable")
+			}
+			next, err := NewRuntime(options)
+			if err != nil {
+				t.Fatal("synthetic lexical intent unexpectedly refused")
+			}
+			// The first owner record is deliberately removed by this isolated
+			// fixture after releasing its lease. A writer admission would recreate
+			// it even if a later project then failed to open.
+			owner := filepath.Join(registry.root, string(testProject)+".owner")
+			if os.Remove(owner) != nil {
+				t.Fatal("no-effects fixture unavailable")
+			}
+			before, err := os.ReadFile(filepath.Join(directory, "tracker.db"))
+			if err != nil {
+				t.Fatal("authority fixture unavailable")
+			}
+			err = next.Serve(context.Background(), func(context.Context, net.Conn) { t.Error("physical alias admitted handler") })
+			var code authority.Error
+			if !errors.As(err, &code) || code.Code != authority.Conflict {
+				t.Fatal("physical namespace overlap not refused")
+			}
+			if _, err := os.Lstat(owner); !os.IsNotExist(err) {
+				t.Fatal("alias refusal happened after writer ownership effects")
+			}
+			after, err := os.ReadFile(filepath.Join(directory, "tracker.db"))
+			if err != nil || string(before) != string(after) {
+				t.Fatal("alias admission modified authority")
+			}
+			for _, root := range []string{control, directory, registry.root} {
+				for _, name := range []string{"runtime.owner", "control.sock"} {
+					if _, err := os.Lstat(filepath.Join(root, name)); !os.IsNotExist(err) {
+						t.Fatal("alias admission published endpoint state")
+					}
+				}
+			}
+		})
 	}
 }
 

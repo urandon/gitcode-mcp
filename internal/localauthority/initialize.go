@@ -33,11 +33,11 @@ func (p *pendingInitialization) Validate() error {
 
 func manifestHash(m authority.Manifest) string { body, _ := json.Marshal(m); return hash(body) }
 func stageName(instance authority.UUID) string { return ".authority-init-" + string(instance) }
-func initPath(r *Registry, id authority.UUID) string {
-	return filepath.Join(r.root, string(id)+".init")
+func initName(id authority.UUID) string {
+	return string(id) + ".init"
 }
-func initTempPath(r *Registry, p pendingInitialization) string {
-	return initPath(r, p.Project) + "-" + string(p.Instance) + ".tmp"
+func initTempName(p pendingInitialization) string {
+	return initName(p.Project) + "-" + string(p.Instance) + ".tmp"
 }
 
 // Initialize is an explicit same-manifest publication intent, never promotion
@@ -239,13 +239,16 @@ func initialFile(path string) (string, string, error) {
 
 func readPending(r *Registry, id authority.UUID) (pendingInitialization, bool, error) {
 	var p pendingInitialization
-	path := initPath(r, id)
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		return p, false, nil
-	} else if err != nil {
-		return p, false, Error{Corrupt}
+	if !id.Valid() {
+		return p, false, authority.Error{Code: authority.InvalidContract}
 	}
-	f, err := openInitializationFile(path)
+	name := initName(id)
+	if exists, err := r.exists(name); err != nil {
+		return p, false, err
+	} else if !exists {
+		return p, false, nil
+	}
+	f, err := r.open(name, false, false, 2)
 	if err != nil {
 		return p, false, err
 	}
@@ -256,9 +259,11 @@ func readPending(r *Registry, id authority.UUID) (pendingInitialization, bool, e
 	}
 	// An interrupted exclusive hard-link publication may retain the known
 	// temporary metadata alias. Remove only an identical, verified inode.
-	temp := initTempPath(r, p)
-	if _, err := os.Lstat(temp); err == nil {
-		other, err := openInitializationFile(temp)
+	temp := initTempName(p)
+	if exists, err := r.exists(temp); err != nil {
+		return p, false, err
+	} else if exists {
+		other, err := r.open(temp, false, false, 2)
 		if err != nil {
 			return p, false, err
 		}
@@ -268,16 +273,14 @@ func readPending(r *Registry, id authority.UUID) (pendingInitialization, bool, e
 		if e != nil || a != b {
 			return p, false, Error{Corrupt}
 		}
-		if os.Remove(temp) != nil {
+		if r.unlink(temp) != nil {
 			return p, false, Error{DurabilityUnavailable}
 		}
-		if err = syncDirectory(r.root); err != nil {
+		if err = r.sync(); err != nil {
 			return p, false, err
 		}
-	} else if !os.IsNotExist(err) {
-		return p, false, Error{Corrupt}
 	}
-	unique, err := openExistingFile(path)
+	unique, err := r.open(name, false, false, 1)
 	if err != nil {
 		return p, false, err
 	}
@@ -295,8 +298,8 @@ func publishPending(r *Registry, p pendingInitialization, inject func(string) er
 	if err != nil || p.Validate() != nil {
 		return Error{Corrupt}
 	}
-	temp := initTempPath(r, p)
-	f, err := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	temp := initTempName(p)
+	f, err := r.open(temp, true, true, 1)
 	if err != nil {
 		return Error{DurabilityUnavailable}
 	}
@@ -310,19 +313,19 @@ func publishPending(r *Registry, p pendingInitialization, inject func(string) er
 	if err = inject("init_journal_prepared"); err != nil {
 		return err
 	}
-	if os.Link(temp, initPath(r, p.Project)) != nil {
+	if r.link(temp, initName(p.Project)) != nil {
 		return authority.Error{Code: authority.Conflict}
 	}
 	if err = inject("init_journal_linked"); err != nil {
 		return err
 	}
-	if err = syncDirectory(r.root); err != nil {
+	if err = r.sync(); err != nil {
 		return err
 	}
-	if os.Remove(temp) != nil {
+	if r.unlink(temp) != nil {
 		return Error{DurabilityUnavailable}
 	}
-	if err = syncDirectory(r.root); err != nil {
+	if err = r.sync(); err != nil {
 		return err
 	}
 	return inject("init_journal_published")
@@ -423,7 +426,7 @@ func finishInitialization(ctx context.Context, r *Registry, owner *lease, path s
 	if err = syncFile(owner.file); err != nil {
 		return err
 	}
-	if err = syncDirectory(r.root); err != nil {
+	if err = syncRegistryDirectory(owner.registry); err != nil {
 		return err
 	}
 	if err = inject("init_binding_published"); err != nil {
@@ -433,10 +436,10 @@ func finishInitialization(ctx context.Context, r *Registry, owner *lease, path s
 	if err != nil || !exists || loaded != p {
 		return Error{Corrupt}
 	}
-	if os.Remove(initPath(r, m.ID)) != nil {
+	if r.unlink(initName(m.ID)) != nil {
 		return Error{DurabilityUnavailable}
 	}
-	if err = syncDirectory(r.root); err != nil {
+	if err = r.sync(); err != nil {
 		return err
 	}
 	// Empty staging directories are metadata only. Unknown extra files stay.
