@@ -12,6 +12,9 @@ import (
 // its reserved parent. Every active blob is checked; a tree name alone does not
 // establish that the authoritative document bytes are present and intact.
 func (g knowledgeRepository) verifyDocumentEvidence(o documentOperation) error {
+	if err := g.checkpoint(""); err != nil {
+		return err
+	}
 	commit, err := g.readObject(o.commitOID(), "commit")
 	if err != nil {
 		return err
@@ -57,6 +60,9 @@ func (g knowledgeRepository) verifyDocumentEvidence(o documentOperation) error {
 		return Error{KnowledgeCorrupt}
 	}
 	for id, oid := range entries {
+		if err := g.checkpoint("knowledge_evidence_blob"); err != nil {
+			return err
+		}
 		blob, err := g.readObject(oid, "blob")
 		if err != nil {
 			return err
@@ -68,7 +74,7 @@ func (g knowledgeRepository) verifyDocumentEvidence(o documentOperation) error {
 			}
 		}
 	}
-	return nil
+	return g.checkpoint("")
 }
 
 func (g knowledgeRepository) syncDocumentEvidence(o documentOperation) error {
@@ -80,6 +86,9 @@ func (g knowledgeRepository) syncDocumentEvidence(o documentOperation) error {
 		objects = append(objects, [2]string{o.Metadata.Result.Locator.BlobOID, "blob"})
 	}
 	for _, pair := range objects {
+		if err := g.checkpoint(""); err != nil {
+			return err
+		}
 		object, err := g.readObject(pair[0], pair[1])
 		if err != nil {
 			return err
@@ -91,7 +100,7 @@ func (g knowledgeRepository) syncDocumentEvidence(o documentOperation) error {
 	return nil
 }
 
-// Only the explicit original-key recovery path calls this. Equal current/lock
+// Only trusted original-intent completion owners call this. Equal current/lock
 // OIDs are insufficient without original SQL identity + candidate/pin proof.
 func (g knowledgeRepository) publishJournalRef(o documentOperation, head bool) error {
 	if err := g.verifyDocumentEvidence(o); err != nil {
@@ -103,8 +112,11 @@ func (g knowledgeRepository) publishJournalRef(o documentOperation, head bool) e
 		if o.Phase != "bound" {
 			return Error{DocumentRecoveryRequired}
 		}
-		pin, err := g.readRef(name)
-		if err != nil || pin != o.commitOID() {
+		pin, err := g.readRefCheckpoint(name, "knowledge_head_pin_admission")
+		if err != nil {
+			return recoveryRefError(err)
+		}
+		if pin != o.commitOID() {
 			return Error{DocumentRecoveryRequired}
 		}
 		name, expected = filepath.Join("heads", "knowledge"), o.Metadata.ExpectedRefOID
@@ -134,8 +146,15 @@ func (g knowledgeRepository) publishJournalRef(o documentOperation, head bool) e
 		if err = g.inject("knowledge_owned_ref_file"); err != nil {
 			return err
 		}
-		if actual, err := g.readRef(name); err != nil || actual != current || g.verifyPhysical() != nil {
+		actual, err := g.readRef(name)
+		if err != nil {
+			return recoveryRefError(err)
+		}
+		if actual != current {
 			return Error{DocumentRecoveryRequired}
+		}
+		if err := g.verifyPhysical(); err != nil {
+			return recoveryRefError(err)
 		}
 		if os.Rename(path+".lock", path) != nil {
 			return Error{DocumentRecoveryRequired}
@@ -143,6 +162,9 @@ func (g knowledgeRepository) publishJournalRef(o documentOperation, head bool) e
 		if err = g.inject("knowledge_owned_ref_rename"); err != nil {
 			return err
 		}
+	}
+	if err := g.checkpoint(""); err != nil {
+		return err
 	}
 	return g.publishRef(name, expected, o.commitOID())
 }

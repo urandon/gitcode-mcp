@@ -3,6 +3,7 @@ package localauthority
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -27,9 +28,29 @@ func (e knowledgeCapacityError) DiagnosticCode() string { return string(Capacity
 func (e knowledgeCapacityError) Unwrap() error          { return Error{Capacity} }
 
 type knowledgeRepository struct {
-	directory string // trusted local coordinate, never serialized
-	physical  string
-	fault     func(string) error
+	directory      string // trusted local coordinate, never serialized
+	physical       string
+	fault          func(string) error
+	ctx            context.Context // operation-local; never durable or configurable
+	readCheckpoint func(string)    // test-only cancellation observation, never public input
+}
+
+func (g knowledgeRepository) withContext(ctx context.Context) knowledgeRepository {
+	g.ctx = ctx
+	return g
+}
+
+func (g knowledgeRepository) checkpoint(phase string) error {
+	if g.ctx != nil && g.ctx.Err() != nil {
+		return g.ctx.Err()
+	}
+	if phase != "" && g.readCheckpoint != nil {
+		g.readCheckpoint(phase)
+	}
+	if g.ctx != nil {
+		return g.ctx.Err()
+	}
+	return nil
 }
 
 func knowledgeDirectory(path string) error {
@@ -70,6 +91,9 @@ func readKnowledgeFile(path string, limit int) ([]byte, error) {
 }
 
 func (g knowledgeRepository) verifyPhysical() error {
+	if err := g.checkpoint(""); err != nil {
+		return err
+	}
 	id, err := knowledgeDirectoryIdentity(g.directory)
 	if err != nil || id != g.physical {
 		return Error{KnowledgeCorrupt}
@@ -78,10 +102,15 @@ func (g knowledgeRepository) verifyPhysical() error {
 }
 
 func (g knowledgeRepository) inject(phase string) error {
-	if g.fault != nil {
-		return g.fault(phase)
+	if err := g.checkpoint(""); err != nil {
+		return err
 	}
-	return nil
+	if g.fault != nil {
+		if err := g.fault(phase); err != nil {
+			return err
+		}
+	}
+	return g.checkpoint("")
 }
 
 func knowledgeNames(path string, limit int) ([]os.DirEntry, error) {
@@ -162,6 +191,9 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 	}
 	headNames := map[string]bool{}
 	for _, entry := range entries {
+		if err = g.checkpoint(""); err != nil {
+			return
+		}
 		if entry.Name() != "knowledge" && entry.Name() != "knowledge.lock" {
 			err = Error{KnowledgeCorrupt}
 			return
@@ -172,13 +204,24 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 		}
 	}
 	if headNames["knowledge"] && headNames["knowledge.lock"] {
-		if original == nil || original.Phase != "bound" || g.verifyDocumentEvidence(*original) != nil {
+		if original == nil || original.Phase != "bound" {
 			err = Error{KnowledgeCorrupt}
 			return
 		}
+		if err = g.verifyDocumentEvidence(*original); err != nil {
+			return
+		}
 		current, e := g.readRef(filepath.Join("heads", "knowledge"))
-		lock, le := g.readRef(filepath.Join("heads", "knowledge.lock"))
-		if e != nil || le != nil || lock != original.commitOID() || current != original.Metadata.ExpectedRefOID && current != lock {
+		if e != nil {
+			err = e
+			return
+		}
+		lock, le := g.readRefCheckpoint(filepath.Join("heads", "knowledge.lock"), "knowledge_layout_head_pair")
+		if le != nil {
+			err = le
+			return
+		}
+		if lock != original.commitOID() || current != original.Metadata.ExpectedRefOID && current != lock {
 			err = Error{KnowledgeCorrupt}
 			return
 		}
@@ -193,6 +236,9 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 	}
 	seenPins := map[string]bool{}
 	for _, entry := range entries {
+		if err = g.checkpoint(""); err != nil {
+			return
+		}
 		name := strings.TrimSuffix(entry.Name(), ".lock")
 		if !authority.UUID(name).Valid() {
 			err = Error{KnowledgeCorrupt}
@@ -202,13 +248,24 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 			// A paired final/lock is ambiguous evidence, even if both OIDs
 			// match. It is not one ordinary retained pin. Only an original
 			// journal-owned recovery transition may later interpret the pair.
-			if original == nil || name != string(original.ID) || original.Phase == "settled" || g.verifyDocumentEvidence(*original) != nil {
+			if original == nil || name != string(original.ID) || original.Phase == "settled" {
 				err = Error{KnowledgeCorrupt}
 				return
 			}
+			if err = g.verifyDocumentEvidence(*original); err != nil {
+				return
+			}
 			final, e := g.readRef(filepath.Join("pins", name))
-			lock, le := g.readRef(filepath.Join("pins", name+".lock"))
-			if e != nil || le != nil || final != original.commitOID() || lock != final {
+			if e != nil {
+				err = e
+				return
+			}
+			lock, le := g.readRefCheckpoint(filepath.Join("pins", name+".lock"), "knowledge_layout_pin_pair")
+			if le != nil {
+				err = le
+				return
+			}
+			if final != original.commitOID() || lock != final {
 				err = Error{KnowledgeCorrupt}
 				return
 			}
@@ -229,6 +286,9 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 		return
 	}
 	for _, fanout := range entries {
+		if err = g.checkpoint(""); err != nil {
+			return
+		}
 		name := fanout.Name()
 		if len(name) != 2 || name != strings.ToLower(name) {
 			err = Error{KnowledgeCorrupt}
@@ -248,6 +308,9 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 			return
 		}
 		for _, file := range files {
+			if err = g.checkpoint("knowledge_layout_object"); err != nil {
+				return
+			}
 			if !knowledgeOIDValid(name+file.Name(), false) {
 				err = Error{KnowledgeCorrupt}
 				return
@@ -270,7 +333,16 @@ func (g knowledgeRepository) verifyJournalLayout(original *documentOperation) (o
 }
 
 func (g knowledgeRepository) readObject(oid, kind string) (knowledgeObject, error) {
-	if !knowledgeOIDValid(oid, false) || g.verifyPhysical() != nil || knowledgeDirectory(filepath.Join(g.directory, "objects")) != nil || knowledgeDirectory(filepath.Join(g.directory, "objects", oid[:2])) != nil {
+	if err := g.checkpoint(""); err != nil {
+		return knowledgeObject{}, err
+	}
+	if !knowledgeOIDValid(oid, false) {
+		return knowledgeObject{}, Error{KnowledgeCorrupt}
+	}
+	if err := g.verifyPhysical(); err != nil {
+		return knowledgeObject{}, err
+	}
+	if knowledgeDirectory(filepath.Join(g.directory, "objects")) != nil || knowledgeDirectory(filepath.Join(g.directory, "objects", oid[:2])) != nil {
 		return knowledgeObject{}, Error{KnowledgeCorrupt}
 	}
 	body, err := readKnowledgeFile(filepath.Join(g.directory, "objects", oid[:2], oid[2:]), maxKnowledgeCompressedBytes)
@@ -295,13 +367,22 @@ func (g knowledgeRepository) readObject(oid, kind string) (knowledgeObject, erro
 	if err != nil || object.oid != oid || string(frame[:boundary]) != kind+" "+strconv.Itoa(len(object.data)) {
 		return knowledgeObject{}, Error{KnowledgeCorrupt}
 	}
+	if err := g.checkpoint(""); err != nil {
+		return knowledgeObject{}, err
+	}
 	return object, nil
 }
 
 func (g knowledgeRepository) writeObject(object knowledgeObject) error {
+	if err := g.checkpoint(""); err != nil {
+		return err
+	}
 	canonical, err := newKnowledgeObject(object.kind, object.data)
-	if err != nil || canonical.oid != object.oid || g.verifyPhysical() != nil {
+	if err != nil || canonical.oid != object.oid {
 		return Error{KnowledgeCorrupt}
+	}
+	if err := g.verifyPhysical(); err != nil {
+		return err
 	}
 	objectsDir := filepath.Join(g.directory, "objects")
 	if knowledgeDirectory(objectsDir) != nil {
@@ -375,7 +456,32 @@ func knowledgeRefName(name string) bool {
 }
 
 func (g knowledgeRepository) readRef(name string) (string, error) {
-	if !knowledgeRefName(name) || g.verifyPhysical() != nil || knowledgeDirectory(filepath.Join(g.directory, "refs")) != nil || knowledgeDirectory(filepath.Join(g.directory, "refs", filepath.Dir(name))) != nil {
+	return g.readRefCheckpoint(name, "")
+}
+
+// Preserve the established explicit-recovery classification for a missing or
+// malformed journal ref without claiming interruption is damaged evidence.
+// Call only after a non-nil read error at a recovery-classified boundary.
+func recoveryRefError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return Error{DocumentRecoveryRequired}
+}
+
+// Fixed internal checkpoint names support deterministic interruption tests;
+// neither a ref name nor a local coordinate is delivered to the observer.
+func (g knowledgeRepository) readRefCheckpoint(name, phase string) (string, error) {
+	if err := g.checkpoint(phase); err != nil {
+		return "", err
+	}
+	if !knowledgeRefName(name) {
+		return "", Error{KnowledgeCorrupt}
+	}
+	if err := g.verifyPhysical(); err != nil {
+		return "", err
+	}
+	if knowledgeDirectory(filepath.Join(g.directory, "refs")) != nil || knowledgeDirectory(filepath.Join(g.directory, "refs", filepath.Dir(name))) != nil {
 		return "", Error{KnowledgeCorrupt}
 	}
 	path := filepath.Join(g.directory, "refs", name)
@@ -394,6 +500,9 @@ func (g knowledgeRepository) readRef(name string) (string, error) {
 // explicit journal-owned transition; partial/foreign evidence is preserved.
 // It never implements a hidden fetch, force-update or weaker ref acknowledgement.
 func (g knowledgeRepository) publishRef(name, expected, next string) error {
+	if err := g.checkpoint(""); err != nil {
+		return err
+	}
 	if !knowledgeRefName(name) || strings.HasSuffix(name, ".lock") || !knowledgeOIDValid(expected, true) || !knowledgeOIDValid(next, false) {
 		return Error{KnowledgeCorrupt}
 	}
@@ -418,8 +527,11 @@ func (g knowledgeRepository) publishRef(name, expected, next string) error {
 		lock := path + ".lock"
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if os.IsExist(err) {
-			saved, e := g.readRef(name + ".lock")
-			if e != nil || saved != next {
+			saved, e := g.readRefCheckpoint(name+".lock", "knowledge_ref_reuse")
+			if e != nil {
+				return recoveryRefError(e)
+			}
+			if saved != next {
 				return Error{DocumentRecoveryRequired}
 			}
 			f, err = openExistingFile(lock)
@@ -441,8 +553,14 @@ func (g knowledgeRepository) publishRef(name, expected, next string) error {
 			return err
 		}
 		current, err = g.readRef(name)
-		if err != nil || current != expected || g.verifyPhysical() != nil {
+		if err != nil {
+			return recoveryRefError(err)
+		}
+		if current != expected {
 			return Error{DocumentRecoveryRequired}
+		}
+		if err = g.verifyPhysical(); err != nil {
+			return recoveryRefError(err)
 		}
 		if err = os.Rename(lock, path); err != nil {
 			return Error{DocumentRecoveryRequired}
@@ -466,7 +584,10 @@ func (g knowledgeRepository) publishRef(name, expected, next string) error {
 	if err != nil {
 		return err
 	}
-	if current, err = g.readRef(name); err != nil || current != next {
+	if current, err = g.readRef(name); err != nil {
+		return recoveryRefError(err)
+	}
+	if current != next {
 		return Error{DocumentRecoveryRequired}
 	}
 	return g.inject("knowledge_ref_directory")

@@ -591,3 +591,42 @@ mandatory gates. No SIP weakening, setup fallback or fake-factory-only proof
 may substitute for unavailable qualification. Projection/recovery jobs,
 restricted real embeddings, opaque observations and L5/L6/L7 rollout remain
 outstanding work, not implied by this backend launch API.
+
+### Exact-journal recovery foundation (L4 in progress)
+
+An internal recovery owner selects one canonical operation by project UUID,
+unique operation UUID, original intent hash and observed journal generation.
+It validates `1 <= observed <= canonical` and advances from the actual canonical
+phase; an older observation cannot downgrade a later binding or receipt. No
+caller key, Markdown, locator/path selector or substitute operation is accepted.
+This is not yet a public maintenance API or durable job queue.
+
+A reservation without the exact published operation pin remains
+`document_recovery_required`, including an owned lock-only or partial object
+collection. Recovery preserves those bytes and requires the original intent;
+it cannot reconstruct a candidate from a similar tip/title or manufacture a pin.
+With a published pin, it verifies the exact generated operation, expected
+parent, single-document tree delta, digest/length and objects, requalifies the
+existing pin/object barriers and CAS-binds that original reservation durably.
+Settled prior history is independently verified; a tombstone cannot hide a
+missing historical blob merely because it is absent from the candidate tree.
+Bound completion shares the original caller's owner: expected ref becomes only
+the exact candidate, or an already-candidate ref keeps its bytes/inode while
+its file/directory barriers are requalified before SQL acknowledgement.
+
+Settled recovery is proof-only: immutable evidence/history plus original receipt
+replay, with no Git publication, object rewrite, pin cleanup or SQL mutation.
+It cannot acknowledge an uncertain SQL publication fence; verified owner reopen
+or the original retry path must requalify that durability first. Pending documents
+continue to fence dependent document writes without disabling an intact tracker.
+
+Admission is nonblocking and bounded to one selected operation with a ten-second
+or earlier caller budget. Evidence/blob, namespace/object and history traversals
+check cancellation between finite reads and before publication/transitions.
+Individual object sizes remain fixed; OS persistence barriers are not hard
+real-time and writer ownership is retained until the actual operation joins.
+Deterministic fault/reopen and abrupt-exit controls distinguish unprepared,
+pinned, bound, candidate-ref and settled states, including late cancellation,
+monotonic retry, foreign/missing evidence and no-write settled replay. These do
+not implement the still-required persistent job/index lifecycle, restricted real
+embedding profile, opaque lifecycle observation or complete native qualification.

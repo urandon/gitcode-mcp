@@ -111,7 +111,7 @@ func (s *Store) MutateDocument(ctx context.Context, request authority.DocumentMu
 	if k.Phase != "ready" {
 		return zero, Error{KnowledgeInitializationPending}
 	}
-	g := s.knowledgeRepository(k)
+	g := s.knowledgeRepository(k).withContext(ctx)
 	if !replay {
 		if err = qualifyFilesystem(g.directory); err != nil {
 			return zero, err
@@ -130,7 +130,11 @@ func (s *Store) MutateDocument(ctx context.Context, request authority.DocumentMu
 		if current != request.Intent.ExpectedRefOID {
 			return zero, Error{RefConflict}
 		}
-		if lock, err := g.readRef(filepath.Join("heads", "knowledge.lock")); err != nil || lock != authority.EmptyKnowledgeRef {
+		lock, err := g.readRefCheckpoint(filepath.Join("heads", "knowledge.lock"), "knowledge_new_operation_lock")
+		if err != nil {
+			return zero, recoveryRefError(err)
+		}
+		if lock != authority.EmptyKnowledgeRef {
 			return zero, Error{DocumentRecoveryRequired}
 		}
 		entity := request.Intent.EntityID
@@ -256,10 +260,41 @@ func (s *Store) MutateDocument(ctx context.Context, request authority.DocumentMu
 		}
 		o.Phase, o.Generation = "bound", 2
 	}
+	result, err := s.completeBoundDocument(ctx, g, o)
+	if err != nil {
+		return zero, err
+	}
+	result.Receipt.Replayed = replay
+	return result, nil
+}
+
+// The original caller and exact-journal recovery share the same bound owner.
+// It preserves candidate ref bytes when already published, but requalifies
+// their OS barriers before SQL acknowledgement. Caller holds the writer turn.
+func (s *Store) completeBoundDocument(ctx context.Context, g knowledgeRepository, o documentOperation) (authority.DocumentMutationResult, error) {
+	var zero authority.DocumentMutationResult
+	if o.Phase != "bound" || o.Generation != 2 {
+		return zero, Error{DocumentRecoveryRequired}
+	}
+	g = g.withContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	prior, err := s.verifySettledKnowledgeHistory(ctx, g)
+	if err != nil {
+		return zero, err
+	}
+	if prior != o.Metadata.ExpectedRefOID {
+		return zero, Error{DocumentRecoveryRequired}
+	}
 	if err = g.verifyDocumentEvidence(o); err != nil {
 		return zero, err
 	}
-	if pin, err := g.readRef(filepath.Join("pins", string(o.ID))); err != nil || pin != o.commitOID() {
+	pin, err := g.readRefCheckpoint(filepath.Join("pins", string(o.ID)), "knowledge_bound_pin_admission")
+	if err != nil {
+		return zero, recoveryRefError(err)
+	}
+	if pin != o.commitOID() {
 		// SQL bound means the original pin barrier already completed. Its
 		// unexplained disappearance is not permission to manufacture proof.
 		return zero, Error{DocumentRecoveryRequired}
@@ -289,7 +324,6 @@ func (s *Store) MutateDocument(ctx context.Context, request authority.DocumentMu
 	if ctx.Err() != nil {
 		return zero, ctx.Err()
 	}
-	result.Receipt.Replayed = replay
 	return result, nil
 }
 
@@ -447,8 +481,11 @@ func (s *Store) replayDocument(ctx context.Context, g knowledgeRepository, o doc
 	// updates. Pins are separately inspected/retained; replay never substitutes
 	// a locator or manufactures a missing object from caller payload.
 	if o.PinCleanup == "retained" {
-		pin, err := g.readRef(filepath.Join("pins", string(o.ID)))
-		if err != nil || pin != o.commitOID() && pin != authority.EmptyKnowledgeRef {
+		pin, err := g.readRefCheckpoint(filepath.Join("pins", string(o.ID)), "knowledge_replay_pin")
+		if err != nil {
+			return zero, recoveryRefError(err)
+		}
+		if pin != o.commitOID() && pin != authority.EmptyKnowledgeRef {
 			return zero, Error{DocumentRecoveryRequired}
 		}
 		if pin != authority.EmptyKnowledgeRef {

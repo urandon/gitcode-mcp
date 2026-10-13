@@ -96,6 +96,23 @@ func TestKnowledgeDocumentAbruptExitPreservesOriginalCandidate(t *testing.T) {
 					if err != nil {
 						t.Fatal("original reservation disappeared")
 					}
+					// Daemon recovery must not need the original Markdown/key once
+					// an exact published pin or settled receipt exists. An earlier
+					// reservation/lock-only still requires the original caller.
+					setup, err := loadKnowledgeSetup(context.Background(), reopened.db, testProject, reopened.instance, reopened.directory)
+					if err != nil {
+						t.Fatal("crash recovery setup unavailable")
+					}
+					pin, err := reopened.knowledgeRepository(setup).readRef("pins/" + string(original.ID))
+					if err != nil {
+						t.Fatal("crash recovery pin inspection unavailable")
+					}
+					automatic, autoErr := reopened.recoverSelectedDocument(context.Background(), selectRecovery(original))
+					if original.Phase == "reserved" && pin == authority.EmptyKnowledgeRef {
+						requireKnowledgeError(t, autoErr, DocumentRecoveryRequired)
+					} else if autoErr != nil || automatic.Validate() != nil || !automatic.Receipt.Replayed || automatic.Receipt.OperationID != original.ID || automatic.Receipt.Citation.EntityID != original.Entity {
+						t.Fatal("exact pinned crash recovery failed or substituted identity")
+					}
 					result, err := reopened.MutateDocument(context.Background(), request, testActor)
 					if err != nil || result.Validate() != nil || !result.Receipt.Replayed || result.Receipt.OperationID != original.ID || result.Receipt.Citation.EntityID != original.Entity {
 						t.Fatal("crash recovery substituted identity/candidate or failed")

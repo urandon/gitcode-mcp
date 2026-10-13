@@ -13,6 +13,7 @@ import (
 // Every pin/ref name must be owned by an exact SQL operation. Objects can be
 // partially published before pin binding; they are never evicted by inspection.
 func (s *Store) verifyDocumentInventory(ctx context.Context, g knowledgeRepository) error {
+	g = g.withContext(ctx)
 	pending, err := s.pendingDocumentOperation(ctx)
 	if err != nil {
 		return err
@@ -33,8 +34,11 @@ func (s *Store) verifyDocumentInventory(ctx context.Context, g knowledgeReposito
 			return Error{DocumentRecoveryRequired}
 		}
 		if pending.Phase == "bound" {
-			pin, err := g.readRef(filepath.Join("pins", string(pending.ID)))
-			if err != nil || pin != pending.commitOID() {
+			pin, err := g.readRefCheckpoint(filepath.Join("pins", string(pending.ID)), "knowledge_inventory_bound_pin")
+			if err != nil {
+				return recoveryRefError(err)
+			}
+			if pin != pending.commitOID() {
 				return Error{DocumentRecoveryRequired}
 			}
 			if err = g.verifyDocumentEvidence(*pending); err != nil {
@@ -47,6 +51,9 @@ func (s *Store) verifyDocumentInventory(ctx context.Context, g knowledgeReposito
 		return err
 	}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		id := authority.UUID(strings.TrimSuffix(entry.Name(), ".lock"))
 		o, err := scanDocumentOperation(ctx, s.db.QueryRowContext(ctx, documentOperationQuery+" WHERE operation_id=?", id), s.manifest.ID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -58,8 +65,11 @@ func (s *Store) verifyDocumentInventory(ctx context.Context, g knowledgeReposito
 		if o.PinCleanup != "retained" || o.Phase == "settled" && strings.HasSuffix(entry.Name(), ".lock") {
 			return Error{KnowledgeCorrupt}
 		}
-		oid, err := g.readRef(filepath.Join("pins", entry.Name()))
-		if err != nil || oid != o.commitOID() {
+		oid, err := g.readRefCheckpoint(filepath.Join("pins", entry.Name()), "knowledge_inventory_pin")
+		if err != nil {
+			return err
+		}
+		if oid != o.commitOID() {
 			return Error{KnowledgeCorrupt}
 		}
 	}
@@ -70,6 +80,7 @@ func (s *Store) verifyDocumentInventory(ctx context.Context, g knowledgeReposito
 // allowing immutable replay/explicit pin cleanup after later revisions. A
 // pending original may account for the tip only after its verified binding.
 func (s *Store) verifyDocumentHistory(ctx context.Context, g knowledgeRepository, target string) error {
+	g = g.withContext(ctx)
 	var key string
 	err := s.db.QueryRowContext(ctx, `SELECT key_hash FROM document_operations WHERE phase<>'settled'`).Scan(&key)
 	var pending *documentOperation
@@ -108,7 +119,13 @@ func (s *Store) verifyDocumentHistory(ctx context.Context, g knowledgeRepository
 		return storageError(ctx)
 	}
 	if current != expected {
-		if pending == nil || pending.Phase != "bound" || pending.Metadata.ExpectedRefOID != expected || current != pending.commitOID() || g.verifyDocumentEvidence(*pending) != nil {
+		if pending == nil || pending.Phase != "bound" || pending.Metadata.ExpectedRefOID != expected || current != pending.commitOID() {
+			return Error{DocumentRecoveryRequired}
+		}
+		if err := g.verifyDocumentEvidence(*pending); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 			return Error{DocumentRecoveryRequired}
 		}
 	}
@@ -131,6 +148,9 @@ func (s *Store) verifyDocumentHistory(ctx context.Context, g knowledgeRepository
 		}
 		o, err := scanDocumentOperation(ctx, s.db.QueryRowContext(ctx, documentOperationQuery+" WHERE operation_id=?", operation), s.manifest.ID)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return Error{KnowledgeCorrupt}
 		}
 		if o.commitOID() != current || o.Metadata.ExpectedRefOID != parent || o.Phase != "settled" && (pending == nil || pending.ID != o.ID || o.Phase != "bound") {
