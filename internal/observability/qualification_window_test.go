@@ -35,6 +35,109 @@ func TestQualificationWindowIsDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestQualificationStartupAcknowledgementFollowsFreshBootPublication(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		name := "fresh"
+		if retained {
+			name = "same-ledger-restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := testDirectory(t)
+			var previousBoot string
+			if retained {
+				previous := New(Config{Directory: dir, ManagedOutput: true})
+				flush(t, previous, true)
+				previousBoot = previous.BootID()
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce, appendOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c := newCollectorWithQualification(Config{Directory: dir, ManagedOutput: true}, func(path string) (*storage, []Event, bool, error) {
+				s, events, unclean, err := openStorage(path)
+				if err == nil {
+					s.appendFault = func() error {
+						appendOnce.Do(func() {
+							close(entered)
+							select {
+							case <-release:
+							case <-ctx.Done():
+							}
+						})
+						return ctx.Err()
+					}
+				}
+				return s, events, unclean, err
+			}, true)
+			defer func() { unblock(); flush(t, c, true) }()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("fresh Boot append did not reach its private storage barrier")
+			}
+			if c.Coverage().State != "ready" {
+				t.Fatal("startup control did not expose loaded ready coverage")
+			}
+			c.mu.Lock()
+			freshBoots, oldBoots := 0, 0
+			for _, e := range c.events {
+				if e.Code == Boot && e.BootID == c.BootID() {
+					freshBoots++
+				}
+				if e.Code == Boot && e.BootID == previousBoot {
+					oldBoots++
+				}
+			}
+			c.mu.Unlock()
+			if freshBoots != 0 || retained && oldBoots != 1 {
+				t.Fatal("startup control did not preserve the unpublished fresh Boot boundary")
+			}
+			type result struct {
+				resume func() bool
+				err    error
+			}
+			done := make(chan result, 1)
+			go func() {
+				resume, err := c.PauseWriterForQualification(ctx)
+				done <- result{resume, err}
+			}()
+			await(t, func() bool { return len(c.qualificationRequests) == 1 || ctx.Err() != nil })
+			if ctx.Err() != nil {
+				t.Fatal("startup acknowledgement did not queue within its bound")
+			}
+			select {
+			case r := <-done:
+				if r.resume != nil {
+					r.resume()
+				}
+				t.Fatal("ready coverage incorrectly acknowledged an unfinished Boot append")
+			default:
+			}
+			unblock()
+			select {
+			case r := <-done:
+				if r.err != nil || r.resume == nil {
+					t.Fatal("completed Boot append did not acknowledge the writer boundary")
+				}
+				defer r.resume()
+				page, err := c.Query(Filter{Code: Boot}, "", 50)
+				freshBoots = 0
+				for _, e := range page.Events {
+					if e.BootID == c.BootID() {
+						freshBoots++
+					}
+				}
+				if err != nil || page.HasMore || freshBoots != 1 || !r.resume() {
+					t.Fatal("startup acknowledgement lacked the real fresh Boot publication")
+				}
+			case <-ctx.Done():
+				t.Fatal("startup acknowledgement did not join")
+			}
+		})
+	}
+}
+
 func TestQualificationWindowEnqueuesOnceAndPreservesQueueLimit(t *testing.T) {
 	c := qualificationCollector(t)
 	resume, err := c.PauseWriterForQualification(context.Background())

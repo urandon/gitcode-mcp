@@ -88,15 +88,24 @@ func qualifyCollector(t *testing.T, mode, dir string) *observability.Collector {
 			t.Fatal("storage fault fixture unavailable")
 		}
 	}
-	c := observability.New(observability.Config{Directory: dir, ManagedOutput: true})
-	eventually(t, func() bool { return c.Coverage().State != "initializing" })
+	c := observability.NewQualificationCollector(observability.Config{Directory: dir, ManagedOutput: true})
+	t.Cleanup(func() { closeCollector(t, c) })
+	// Coverage is loaded before the fresh Boot append. A same-ledger restart
+	// can therefore be ready/partial while startup still changes the snapshot.
+	// Join the real serial writer's startup boundary before comparing DTOs;
+	// this does not stop execution, fabricate events or retry their admission.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resume, err := c.PauseWriterForQualification(ctx)
+	if err != nil || resume == nil || !resume() {
+		t.Fatal("qualification collector startup did not reach its owned writer boundary")
+	}
 	if mode == "storage_unavailable" && c.Coverage().State != "partial" {
 		t.Fatal("actual storage fault was not exercised")
 	}
 	if mode == "sealed" {
 		closeCollector(t, c)
 	}
-	t.Cleanup(func() { closeCollector(t, c) })
 	return c
 }
 
