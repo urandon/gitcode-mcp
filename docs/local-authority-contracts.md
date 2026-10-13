@@ -409,3 +409,32 @@ private coordinates and payloads are never reflected. These are not newly
 advertised MCP tools: #183/#184 own runtime admission, negotiated error/capability
 compatibility and workflow rollout; #185 owns protected actor/history/conflict/
 degraded UI; #186 owns verified backups, identity-preserving rebind and migrations.
+
+## Bounded canonical search foundation (L4 in progress)
+
+The internal `Store.Snapshot` operation captures all entity kinds at one
+committed project sequence. Its strict continuation retains that sequence
+across intervening writes and carries only project/sequence/entity selectors.
+Each page is bounded by 100 entities and the 512 KiB encoded contract ceiling;
+trailing entities remain available through continuation. Documents are hydrated
+from verified immutable Git locators only as transient protected data. No
+projection table, document-text copy, writer admission or repair is created.
+Tombstones remain in the snapshot for derived invalidation. Per-entity content
+digests exclude timestamps, actor metadata and revision/sequence: a new citation
+can reuse identical content while actual edits change its digest.
+
+`Store.LexicalSearch` performs deterministic case-normalized whole-token AND
+matching against typed content, not JSON field names. It accepts 1–64 distinct
+query terms within 4096 UTF-8 bytes, scans at most 128 entities per call and
+returns at most 100 citation/digest/score hits with 512-byte UTF-8 snippets.
+Ranking is top-K within the reported slice, not a claim of global corpus
+ranking. Incomplete corpus coverage is explicitly partial with a query/kind/
+project/sequence-fenced continuation; later calls do not search a newer revision
+by accident. Tombstoned documents/links and archived labels/milestones are
+excluded from active matches without deleting historical citations.
+
+This is the provider-free canonical lexical foundation, not enabled runtime
+negotiation, persistent indexing or semantic retrieval. Coordinator admission,
+jobs, hybrid fallback, restricted real embeddings and native policy
+qualification remain L4 work. Public CLI/MCP and Admin rollout remain L5/L6;
+contracts-only negotiation is unchanged until their runtime gates are met.
