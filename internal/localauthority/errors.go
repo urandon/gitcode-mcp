@@ -25,6 +25,8 @@ const (
 	JobsUncertain                  Code = "authority_recovery_jobs_uncertain"
 	JobNotFound                    Code = "authority_recovery_job_not_found"
 	JobRetryLimit                  Code = "authority_recovery_job_retry_limit"
+	ProjectionCorrupt              Code = "authority_projection_corrupt"
+	ProjectionUncertain            Code = "authority_projection_uncertain"
 )
 
 // Error is deliberately content-free; SQL, paths, keys and payloads are private.
@@ -67,6 +69,10 @@ func (e Error) Error() string {
 		return "local recovery job is not retained"
 	case JobRetryLimit:
 		return "local recovery job reached its bounded attempt limit"
+	case ProjectionCorrupt:
+		return "derived projection is invalid; canonical authority remains separate"
+	case ProjectionUncertain:
+		return "derived projection publication is uncertain; verified owner reopen is required"
 	default:
 		return "local authority storage is unavailable"
 	}

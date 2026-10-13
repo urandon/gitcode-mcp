@@ -18,6 +18,9 @@ type SnapshotRequest struct {
 	Kind      authority.EntityKind
 	Limit     int
 	Cursor    string
+	// AsOf is explicit immutable sequence intake for a durable projection job.
+	// Nil captures current authority; a non-nil zero selects the empty origin.
+	AsOf *uint64
 }
 
 // SnapshotEntity carries transient protected content. Callers may retain its
@@ -86,7 +89,7 @@ func revisionAtSequence(ctx context.Context, latest, fence uint64, sequence func
 // Tombstones are included so a derived owner can remove previously live entries.
 func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage, error) {
 	zero := SnapshotPage{}
-	if !req.ProjectID.Valid() || req.Kind != "" && !req.Kind.Valid() || req.Limit < 1 || req.Limit > 100 || len(req.Cursor) > 512 {
+	if !req.ProjectID.Valid() || req.Kind != "" && !req.Kind.Valid() || req.Limit < 1 || req.Limit > 100 || len(req.Cursor) > 512 || req.AsOf != nil && *req.AsOf > math.MaxInt64 {
 		return zero, authority.Error{Code: authority.InvalidContract}
 	}
 	s.mu.Lock()
@@ -107,9 +110,15 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 		return zero, storageError(ctx)
 	}
 	c := snapshotCursor{ProjectID: req.ProjectID, Sequence: uint64(current), Kind: req.Kind}
+	if req.AsOf != nil {
+		if *req.AsOf > uint64(current) {
+			return zero, authority.Error{Code: authority.InvalidContract}
+		}
+		c.Sequence = *req.AsOf
+	}
 	if req.Cursor != "" {
 		data, err := base64.RawURLEncoding.DecodeString(req.Cursor)
-		if err != nil || authority.DecodeJSON(data, &c) != nil || c.ProjectID != req.ProjectID || c.Kind != req.Kind || c.Sequence > uint64(current) || c.Sequence > math.MaxInt64 || !c.Last.Valid() {
+		if err != nil || authority.DecodeJSON(data, &c) != nil || c.ProjectID != req.ProjectID || c.Kind != req.Kind || c.Sequence > uint64(current) || c.Sequence > math.MaxInt64 || !c.Last.Valid() || req.AsOf != nil && c.Sequence != *req.AsOf {
 			return zero, authority.Error{Code: authority.InvalidContract}
 		}
 	}

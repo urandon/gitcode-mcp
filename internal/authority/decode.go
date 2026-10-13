@@ -21,11 +21,25 @@ const MaxProtectedResultBytes = MaxContractBytes - 4096
 // DecodeJSON rejects unknown/duplicate keys and suffix documents without
 // exposing parser errors or payload bytes. Boundaries are checked before DTOs.
 func DecodeJSON(data []byte, target any) error {
-	if len(data) > MaxContractBytes || !utf8.Valid(data) {
+	return decodeJSONBounded(data, target, MaxContractBytes)
+}
+
+// DecodeStoredJSON retains the same closed grammar for bounded private
+// metadata files. It is not a transport budget override: RPC callers continue
+// using DecodeJSON and the fixed 512 KiB request/response envelope ceiling.
+func DecodeStoredJSON(data []byte, target any, limit int) error {
+	if limit < 1 || limit > 4<<20 {
+		return Error{InvalidContract}
+	}
+	return decodeJSONBounded(data, target, limit)
+}
+
+func decodeJSONBounded(data []byte, target any, limit int) error {
+	if len(data) > limit || !utf8.Valid(data) {
 		return Error{InvalidContract}
 	}
 	data = bytes.TrimSpace(data)
-	if len(data) == 0 || len(data) > MaxContractBytes || data[0] != '{' {
+	if len(data) == 0 || len(data) > limit || data[0] != '{' {
 		return Error{InvalidContract}
 	}
 	walk := json.NewDecoder(bytes.NewReader(data))

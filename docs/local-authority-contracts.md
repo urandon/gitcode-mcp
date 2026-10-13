@@ -418,6 +418,10 @@ degraded UI; #186 owns verified backups, identity-preserving rebind and migratio
 The internal `Store.Snapshot` operation captures all entity kinds at one
 committed project sequence. Its strict continuation retains that sequence
 across intervening writes and carries only project/sequence/entity selectors.
+An internal optional `AsOf` sequence supports durable projection-job intake.
+Nil captures current authority; explicit zero selects the empty origin. A
+future sequence or a continuation disagreeing with that explicit sequence is
+refused before candidate inspection. It is not a public path/provider selector.
 Each page first enumerates at most 100 physical entity candidates plus one
 continuation lookahead, before filtering to the historical sequence. As-of
 revision lookup uses at most 63 primary-key point probes per candidate over the
@@ -448,6 +452,57 @@ integration described below, not persistent indexing or semantic retrieval.
 Jobs, restricted real embeddings and native launch/policy qualification remain
 L4 work. Public CLI/MCP and Admin rollout remain L5/L6; the ordinary daemon stays
 contracts-only until its runtime/workflow gates are met.
+
+### Disposable content-identity catalog foundation
+
+The L4 private projection owner consumes an already prepared coordinator writer;
+read-only or unprepared stores cannot acquire it. Opening or observing a missing
+catalog does not create its namespace, enroll a job, or discover a provider.
+This domain foundation is not yet wired into daemon index jobs or advertised
+in private IPC/CLI/MCP/Admin. Those owned lifecycle and rollout gates remain.
+
+One separately versioned `canonical-content-v1` catalog binds project UUID,
+tracker instance, immutable manifest hash, random epoch, monotonic generation,
+build UUID and one authoritative sequence. Sorted rows contain only immutable
+citations, per-entity sequence, canonical content digest and finite active,
+archived or tombstone state. It contains no title, caller key, actor, coordinate,
+issue/comment text, document Markdown or chunk text. Document locators/bytes
+remain in canonical SQL/Git; metadata alone cannot authorize a source write or
+prove full-text/vector coverage. Source hydration always verifies its citation.
+
+The segmented builder inspects at most 128 candidates per step, retaining only
+metadata between steps. Actual canonical pages preserve the original as-of
+sequence across intervening writes and sparse/byte-bounded pages. Failed,
+cancelled, incomplete or over-capacity candidates cannot replace the prior
+complete catalog; there is no silently published corpus prefix. Limits are
+4096 rows, 2 MiB encoded final metadata, four preserved stages and 8 MiB staged
+bytes. The shared stored-JSON decoder preserves the same closed/duplicate/null
+grammar under an explicit finite file bound. Transport decoding remains capped
+at its unchanged 512 KiB envelope, not the larger stored-file bound.
+
+Content-equal later revisions can reuse semantic work while publishing their
+new immutable citation. Actual edits are stale, new active sources missing,
+and tombstoned/archived sources inactive. Comparison counts are scoped to the
+supplied bounded canonical page, including explicit scanned/partial semantics;
+they are not global corpus counts or claims that vectors exist. Authority
+reads/history and real canonical lexical search do not depend on this catalog.
+
+Only explicit complete-builder publication creates the fixed private namespace.
+No-follow/nonblocking descriptor admission rejects symlink, hardlink, FIFO,
+foreign owner/mode, unknown inventory and oversized files. Retained root,
+namespace and final/stage inode/content identities fence replacement. Unique
+staging, file/directory barriers, generation CAS and exact final readback precede
+success. Pre-rename failure preserves the last complete catalog; post-rename
+uncertainty fences only the projection until verified owner reopen. Explicit
+writer admission requalifies the existing final file, namespace and parent
+durability barriers before exposing a catalog; cancellation or any barrier
+failure refuses admission. Missing namespaces remain unprovisioned and ordinary
+metadata views do not run those barriers. Publication retries repeat the parent
+barrier even if a failed attempt retained the newly created namespace. Reopened
+metadata is not a source mutation receipt or an index-job completion proof.
+Orphan stages are bounded and preserved, never adopted by recency or used to
+reconstruct authority. Explicit corrupt-catalog repair/reset and durable job
+reconciliation remain in the index lifecycle cohort, not an implicit read.
 
 ### Existing-only runtime ownership preparation
 

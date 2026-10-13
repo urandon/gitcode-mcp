@@ -128,6 +128,28 @@ capabilities prevent operation dispatch and that forged, unrelated or extra
 selector responses are rejected even with a discarded result destination.
 Result snapshots replace, rather than patch, a caller's previous object;
 omitted fields clear and invalid responses leave the original object intact.
+
+Local projection catalog tests consume actual prepared writer ownership and
+canonical SQLite/Git snapshot pages. They distinguish a new citation with the
+same content digest from a real edit, new entity, archive or tombstone. An
+explicit as-of origin and changed/future continuation controls prevent snapshot
+mixing. Persisted final/staged files must omit synthetic document/title/key
+sentinels, while old canonical Git citations remain readable. Publication fault
+controls exercise before/after rename cancellation and preserve source sequence,
+readiness and original receipts. Failed namespace-parent synchronization must
+be retried before publication acknowledgement. Reopen after rename uncertainty
+must synchronize final file, namespace and parent; failure/cancellation at every
+barrier refuses admission while preserving final bytes and canonical reads.
+Ordinary metadata views do not repeat writer-admission barriers.
+Metadata view cloning, late generation CAS,
+bounded preserved orphan stages and capacity failure are tested separately.
+The builder's production capacity is fixed; a private smaller fixture limit
+exercises the same failed-prefix branch on real source rows. Stored JSON above
+the transport ceiling validates only the larger bounded file grammar; the
+ordinary transport decoder must still refuse it. Actual child FIFO controls
+prove final/stage type refusal cannot block, alongside symlink/hardlink/unknown
+inventory and namespace/inode/content replacement controls. These domain tests
+do not certify integrated index jobs, real hybrid vectors or native isolation.
 Independent record-count/wire-size/page-continuation controls and fixed typed
 job errors preserve protected scope without echoing arbitrary peer content.
 Malformed peer controls also reject false action acknowledgements, regressed
