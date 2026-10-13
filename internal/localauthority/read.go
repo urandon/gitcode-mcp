@@ -119,7 +119,7 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 		}
 		result.Entities = append(result.Entities, v)
 		encoded, err := json.Marshal(result)
-		if err != nil || len(encoded) > authority.MaxContractBytes {
+		if err != nil || len(encoded) > authority.MaxProtectedResultBytes {
 			return zero, Error{Capacity}
 		}
 		return result, nil
@@ -175,7 +175,7 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 		if err != nil {
 			return zero, Error{Corrupt}
 		}
-		if len(result.Entities) >= limit || len(data) > authority.MaxContractBytes-4096 {
+		if len(result.Entities) >= limit || len(data) > authority.MaxProtectedResultBytes-1024 {
 			if len(result.Entities) == 0 {
 				return zero, Error{Capacity}
 			}

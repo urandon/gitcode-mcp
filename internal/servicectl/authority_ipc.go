@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/authority"
+	"gitcode-mcp/internal/localauthority"
 )
 
 const authorityResponseBytes = 512 << 10
@@ -42,6 +43,27 @@ func authorityParams(method string, raw []byte) (any, error) {
 		return r, r.Validate()
 	case "AuthorityV1.Mutate":
 		var r authority.MutationRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.MutateDocument":
+		var r authority.DocumentMutationRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.KnowledgeStatus":
+		var r authorityProjectRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		if !r.ProjectID.Valid() {
+			return nil, authority.Error{Code: authority.InvalidContract}
+		}
+		return r, nil
+	case "AuthorityV1.Search":
+		var r localauthority.SearchRequest
 		if err := authority.DecodeJSON(raw, &r); err != nil {
 			return nil, err
 		}
@@ -107,16 +129,31 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 		if err != nil {
 			return err
 		}
-		if !reflect.DeepEqual(caps, authority.ContractsOnly()) {
+		if reflect.DeepEqual(caps, authority.ContractsOnly()) {
+			return authority.Error{Code: authority.Unavailable}
+		}
+		if !reflect.DeepEqual(caps, authorityRuntimeCapabilities()) {
 			return authority.Error{Code: authority.Unsupported}
 		}
-		return authority.Error{Code: authority.Unavailable}
+		var raw json.RawMessage
+		if err := c.authorityRoundTrip(ctx, method, normalized, &raw); err != nil {
+			return err
+		}
+		validated, err := authorityRuntimeResult(method, normalized, raw)
+		if err != nil {
+			return err
+		}
+		if result != nil {
+			body, _ := json.Marshal(validated)
+			return authority.DecodeJSON(body, result)
+		}
+		return nil
 	}
 	var caps authority.Negotiation
 	if err := c.authorityRoundTrip(ctx, method, normalized, &caps); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(caps, authority.ContractsOnly()) {
+	if !reflect.DeepEqual(caps, authority.ContractsOnly()) && !reflect.DeepEqual(caps, authorityRuntimeCapabilities()) {
 		return authority.Error{Code: authority.Unsupported}
 	}
 	if result != nil {
@@ -167,6 +204,9 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			return authoritySocketError(ctx, dialErr)
 		}
 		defer conn.Close()
+		if err := sameAuthorityUser(conn); err != nil {
+			return err
+		}
 		done := make(chan struct{})
 		stop := context.AfterFunc(ctx, func() { _ = conn.Close(); close(done) })
 		defer func() {
@@ -216,7 +256,12 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		case authority.InvalidContract, authority.Unavailable, authority.Unsupported, authority.NoAuthority, authority.PolicyDenied, authority.Conflict, authority.RevisionConflict, authority.InitializationRequired:
 			return authority.Error{Code: code}
 		default:
-			return authority.Error{Code: authority.Unsupported}
+			switch storage := localauthority.Code(reply.Error.DiagnosticCode); storage {
+			case localauthority.ReadOnly, localauthority.Corrupt, localauthority.DurabilityUnavailable, localauthority.Capacity, localauthority.StorageUnavailable, localauthority.CommitUncertain, localauthority.InitializationPending, localauthority.RefConflict, localauthority.KnowledgeMigrationRequired, localauthority.KnowledgeSetupRequired, localauthority.KnowledgeInitializationPending, localauthority.DocumentPending, localauthority.DocumentRecoveryRequired, localauthority.KnowledgeCorrupt:
+				return localauthority.Error{Code: storage}
+			default:
+				return authority.Error{Code: authority.Unsupported}
+			}
 		}
 	}
 	return authority.DecodeJSON(reply.Result, result)

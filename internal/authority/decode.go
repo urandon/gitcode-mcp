@@ -14,6 +14,10 @@ import (
 
 const MaxContractBytes = 512 << 10
 
+// Protected results reserve finite RPC/cursor envelope headroom. Total private
+// transport responses retain the same 512 KiB cap as request envelopes.
+const MaxProtectedResultBytes = MaxContractBytes - 4096
+
 // DecodeJSON rejects unknown/duplicate keys and suffix documents without
 // exposing parser errors or payload bytes. Boundaries are checked before DTOs.
 func DecodeJSON(data []byte, target any) error {

@@ -77,7 +77,7 @@ func (s *Store) LexicalSearch(ctx context.Context, req LexicalRequest) (LexicalR
 		if limit > 25 {
 			limit = 25
 		}
-		page, err := s.Snapshot(ctx, SnapshotRequest{ProjectID: req.ProjectID, Limit: limit, Cursor: c.Snapshot})
+		page, err := s.Snapshot(ctx, SnapshotRequest{ProjectID: req.ProjectID, Kind: req.Kind, Limit: limit, Cursor: c.Snapshot})
 		if err != nil {
 			return zero, err
 		}

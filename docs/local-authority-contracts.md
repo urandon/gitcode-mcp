@@ -114,8 +114,9 @@ An explicitly loopback-enabled process is never described as zero-network.
 
 ## Private protocol and schemas
 
-Methods: `AuthorityV1.Negotiate`, `AuthorityV1.Read`, `AuthorityV1.Mutate`.
-The production L1 coordinator implements negotiation only; direct valid read
+The ordinary daemon remains contracts-only: `AuthorityV1.Negotiate`,
+`AuthorityV1.Read`, `AuthorityV1.Mutate`. Its L1 coordinator implements
+negotiation only; direct valid read
 or mutation requests return `authority_not_found`, without remote dispatch.
 Clients negotiate first and return `authority_unavailable` without sending an
 entity operation when the build reports no implemented authority methods.
@@ -440,11 +441,11 @@ project/sequence-fenced continuation; later calls do not search a newer revision
 by accident. Tombstoned documents/links and archived labels/milestones are
 excluded from active matches without deleting historical citations.
 
-This is the provider-free canonical lexical foundation, not enabled runtime
-negotiation, persistent indexing or semantic retrieval. Coordinator admission,
-jobs, hybrid fallback, restricted real embeddings and native policy
-qualification remain L4 work. Public CLI/MCP and Admin rollout remain L5/L6;
-contracts-only negotiation is unchanged until their runtime gates are met.
+This provider-free foundation has a dedicated trusted coordinator/private IPC
+integration described below, not persistent indexing or semantic retrieval.
+Jobs, restricted real embeddings and native launch/policy qualification remain
+L4 work. Public CLI/MCP and Admin rollout remain L5/L6; the ordinary daemon stays
+contracts-only until its runtime/workflow gates are met.
 
 ### Existing-only runtime ownership preparation
 
@@ -479,3 +480,59 @@ root-owned local account metadata with no NSS or environment fallback; missing,
 duplicate or invalid account data refuses. Qualified Darwin builds use native
 account lookup; Darwin `osusergo` and unsupported writer platforms fail closed
 instead of falling back to `HOME`. Strict runtime never invokes that resolver.
+
+### Dedicated coordinator and protected IPC (L4 in progress)
+
+The separate coordinator consumes opaque preparation and at most 16 trusted
+UUID/physical-directory bindings. It inspects the entire cohort before opening
+writers and refuses loopback/Admin policies in its strict factory. It owns no
+ordinary remote manager, provider, credential or Admin dependency. Callers
+cannot retarget admitted bindings; missing preparation or stores never trigger
+initialization, schema migration or environment/home discovery.
+
+One nonblocking turn per project bounds admitted canonical work. Calls have a
+10-second or earlier caller deadline. Shutdown stops new admission, propagates
+cancellation, joins actual operations, then closes stores. A bounded Close that
+times out does not release still-live ownership or claim clean teardown; the
+owned shutdown worker retains its stores until they join. Knowledge readiness
+is distinct from tracker readiness: pending/damaged Git fences dependent
+document work, not unrelated intact tracker reads/writes. Original document
+intent replay remains the recovery boundary, not a new key or silent repair.
+
+The dedicated Unix server is not `RPCServer`/`Manager.Run`. It requires an
+existing private owned listener, authenticates actual OS peer credentials on
+both sides and admits at most 32 handlers. It serves one bounded request per
+connection and joins accepted handlers on shutdown; replacement socket names
+are not unlinked. It holds no filesystem/FD selectors from peers and cannot
+dispatch remote/service/Admin methods. The ordinary daemon remains unavailable
+for authority operations instead of falling through to this graph implicitly.
+
+The dedicated server negotiates implemented Read, Mutate, MutateDocument,
+KnowledgeStatus and Search methods. Concrete responses are validated even when
+a client discards them. Shared pure domain verification binds write confirmation
+to project, kind, original key, full canonical intent, stable local attribution,
+revision and document outcome/ref expectations; another well-formed receipt is
+not sufficient. Raw fault/driver/OS bodies and unknown codes never become error
+prose. Replies retain the total 512 KiB ceiling, including RPC envelope; protected
+results and continuation cursors reserve finite headroom inside that ceiling.
+
+Search accepts `project_id`, `query`, optional `mode`/`kind`/`cursor` and required
+1–100 `limit`. An omitted mode resolves from the immutable manifest default;
+explicit full_text remains explicit. In strict deny, requested hybrid returns
+real full_text with `policy_denied` and `disabled_by_policy`, never fabricated
+semantic vectors/coverage. The closed result has a tagged `lexical` object plus
+requested/effective/fallback fields. Continuations bind the resolved mode and
+canonical project/query/kind/sequence. Kind restriction is applied to bounded
+physical candidates before history/Git hydration: issue-only search does not
+open damaged unrelated document bytes, while document/full-corpus failure is
+not silently hidden. Excluded kinds still count toward physical scan budgets
+and advance sparse continuation.
+
+Isolated tests exercise actual private Unix IPC, temporary authoritative SQLite
+and Git, real mutations/replay/read/search, damaged-document scope isolation,
+untrusted selector rejection, silent-peer joining and receipt tamper controls.
+The test-only registry constructor is compiled only in augmented test builds,
+not as a production path selector. This is not the native launcher, transferred
+capability/restart, foreign-user, zero-network or complete L4 acceptance receipt.
+Those qualifications and bounded recovery/projection jobs, restricted embedding
+profiles and opaque lifecycle observations remain mandatory before #183 closure.

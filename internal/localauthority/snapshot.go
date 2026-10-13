@@ -15,6 +15,7 @@ import (
 // or an authority mutation. Continuations retain the original project sequence.
 type SnapshotRequest struct {
 	ProjectID authority.UUID
+	Kind      authority.EntityKind
 	Limit     int
 	Cursor    string
 }
@@ -35,14 +36,16 @@ type SnapshotPage struct {
 }
 
 type snapshotCursor struct {
-	ProjectID authority.UUID `json:"project_id"`
-	Sequence  uint64         `json:"sequence"`
-	Last      authority.UUID `json:"last"`
+	ProjectID authority.UUID       `json:"project_id"`
+	Sequence  uint64               `json:"sequence"`
+	Last      authority.UUID       `json:"last"`
+	Kind      authority.EntityKind `json:"kind,omitempty"`
 }
 
 type snapshotCandidate struct {
 	id       authority.UUID
 	revision uint64
+	kind     authority.EntityKind
 	view     *authority.EntityView
 }
 
@@ -83,7 +86,7 @@ func revisionAtSequence(ctx context.Context, latest, fence uint64, sequence func
 // Tombstones are included so a derived owner can remove previously live entries.
 func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage, error) {
 	zero := SnapshotPage{}
-	if !req.ProjectID.Valid() || req.Limit < 1 || req.Limit > 100 || len(req.Cursor) > 512 {
+	if !req.ProjectID.Valid() || req.Kind != "" && !req.Kind.Valid() || req.Limit < 1 || req.Limit > 100 || len(req.Cursor) > 512 {
 		return zero, authority.Error{Code: authority.InvalidContract}
 	}
 	s.mu.Lock()
@@ -103,10 +106,10 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 	if tx.QueryRowContext(ctx, "SELECT sequence FROM project WHERE singleton=1").Scan(&current) != nil || current < 0 {
 		return zero, storageError(ctx)
 	}
-	c := snapshotCursor{ProjectID: req.ProjectID, Sequence: uint64(current)}
+	c := snapshotCursor{ProjectID: req.ProjectID, Sequence: uint64(current), Kind: req.Kind}
 	if req.Cursor != "" {
 		data, err := base64.RawURLEncoding.DecodeString(req.Cursor)
-		if err != nil || authority.DecodeJSON(data, &c) != nil || c.ProjectID != req.ProjectID || c.Sequence > uint64(current) || c.Sequence > math.MaxInt64 || !c.Last.Valid() {
+		if err != nil || authority.DecodeJSON(data, &c) != nil || c.ProjectID != req.ProjectID || c.Kind != req.Kind || c.Sequence > uint64(current) || c.Sequence > math.MaxInt64 || !c.Last.Valid() {
 			return zero, authority.Error{Code: authority.InvalidContract}
 		}
 	}
@@ -133,7 +136,7 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 			more = true
 			break
 		}
-		candidates = append(candidates, snapshotCandidate{id: authority.UUID(id), revision: uint64(revision)})
+		candidates = append(candidates, snapshotCandidate{id: authority.UUID(id), revision: uint64(revision), kind: kind})
 	}
 	readErr := rows.Err()
 	_ = rows.Close()
@@ -142,6 +145,11 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 	}
 	for i := range candidates {
 		candidate := &candidates[i]
+		// Kind is immutable. Skip excluded physical candidates BEFORE history
+		// lookup/Git hydration, while retaining the same physical scan budget.
+		if req.Kind != "" && candidate.kind != req.Kind {
+			continue
+		}
 		revision, err := revisionAtSequence(ctx, candidate.revision, c.Sequence, func(revision uint64) (uint64, error) {
 			var sequence int64
 			err := tx.QueryRowContext(ctx, "SELECT sequence FROM revisions WHERE entity_id=? AND revision=?", candidate.id, int64(revision)).Scan(&sequence)
@@ -206,7 +214,7 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 		if err != nil {
 			return zero, Error{Corrupt}
 		}
-		if len(data) > authority.MaxContractBytes-4096 {
+		if len(data) > authority.MaxProtectedResultBytes-1024 {
 			if len(page.Entities) == 0 {
 				return zero, Error{Capacity}
 			}
