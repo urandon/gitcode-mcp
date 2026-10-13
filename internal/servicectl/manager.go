@@ -480,7 +480,7 @@ func (m Manager) Run(ctx context.Context) error {
 		if m.Source != nil || m.CredentialReporter != nil || m.EffectiveConfig != nil || m.JobRetention != nil || m.SchemaMin != 0 || m.SchemaMax != 0 || m.RuntimeDir != "" || m.AdminBind != "" || m.AdminAutoStart || m.AdminAllowNonLoopback || m.AdminSessionTTL != 0 || m.AdminCachePath != "" || m.Offline || m.GOOS != "" || m.Runner != nil || m.OutputRunner != nil || m.StartupTimeout != 0 || m.StartupInterval != 0 || m.observation != nil || m.metrics != nil || m.observationUpgrade || m.maintenanceCacheInspector != nil || m.maintenanceCacheCanonicalizer != nil || m.maintenanceCacheInspectTimeout != 0 || m.syncStageRecovery != nil {
 			return authority.Error{Code: authority.PolicyDenied}
 		}
-		server := RPCServer{Local: m.Local, runtimeContext: ctx}
+		server := RPCServer{Local: m.Local, qualifiedLocal: true, runtimeContext: ctx}
 		return m.Local.Serve(ctx, server.handleConn)
 	}
 	ctx, cancelRun := context.WithCancel(ctx)

@@ -135,9 +135,10 @@ All endpoint/registry/project directories are physically qualified and checked
 for canonical nesting and physical aliases before the first writer opens.
 All existing project stores must validate and acquire their global UUID writers
 before private IPC is published; partial enrollment closes earlier writers and
-never initializes a missing store. This is still a contracts-only service:
-typed transport dispatch, projections, native launch qualification and product workflows
-remain separate L4/L5 acceptance work, not available commands.
+never initializes a missing store. Prepared Local runtime now connects protected
+typed private IPC; the legacy service remains contracts-only. Projections,
+native launch qualification and product workflows remain separate L4/L5
+acceptance work, not available product commands.
 
 The staged shared runtime dispatcher connects protected Store operations under
 context-aware project lanes. `MutateAttributed` carries asserted actor plus the
@@ -148,8 +149,20 @@ with a project-scoped hash; audit responses carry the exact project envelope.
 Raw keys are not echoed. Cleanup requires explicit local intent and a settled
 original operation. Cancellation joins both handlers and active shared domain
 calls before releasing writer leases; lost acknowledgement retains the original
-receipt. Legacy RPC negotiation is still contracts-only: typed client/server
-integration and its actual private-IPC acceptance gates are not yet available.
+receipt. Only `Manager.Local` over `Runtime.Serve` enables available negotiation;
+generic passed listeners and memory transport cannot enable Local authority.
+Explicit trusted-directory clients requalify endpoint ownership and same-UID
+peers on every call, refuse mixed legacy routing overrides and never start or
+repair a daemon. Legacy clients still refuse available authority work.
+
+Private transport validates every concrete response, including nil caller
+destinations: exact project/citation/key/revision/kind, canonical actor/content
+intent hash, document locator digest/length or tombstone parent, and strict audit
+page ordering/cardinality. Fixed safe numeric ids, joined cancellation callbacks,
+10-second budgets and actual 512-KiB encoded envelopes are enforced. Unknown
+methods/enums/fields, malformed unions and unbound results refuse. These
+qualified in-process wire fixtures do not supply native process-entry/restart
+isolation proof, OS no-network qualification or complete product workflows.
 
 `internal/privateipc` owns the Darwin/Linux endpoint primitives: explicitly
 prepared canonical private directory, `0700` directory / `0600` socket and

@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"gitcode-mcp/internal/authority"
+	"gitcode-mcp/internal/privateipc"
 )
 
 const authorityResponseBytes = 512 << 10
@@ -27,28 +30,10 @@ type authorityRPCResponse struct {
 func authorityMethod(method string) bool { return strings.HasPrefix(method, "AuthorityV1.") }
 
 func authorityParams(method string, raw []byte) (any, error) {
-	switch method {
-	case "AuthorityV1.Negotiate":
-		var r authority.NegotiationRequest
-		if err := authority.DecodeJSON(raw, &r); err != nil {
-			return nil, err
-		}
-		return r, r.Validate()
-	case "AuthorityV1.Read":
-		var r authority.ReadRequest
-		if err := authority.DecodeJSON(raw, &r); err != nil {
-			return nil, err
-		}
-		return r, r.Validate()
-	case "AuthorityV1.Mutate":
-		var r authority.MutationRequest
-		if err := authority.DecodeJSON(raw, &r); err != nil {
-			return nil, err
-		}
-		return r, r.Validate()
-	default:
+	if !authorityMethod(method) {
 		return nil, authority.Error{Code: authority.Unsupported}
 	}
+	return authority.DecodeRuntimeRequest(strings.TrimPrefix(method, "AuthorityV1."), raw)
 }
 
 func (s RPCServer) dispatchAuthority(ctx context.Context, method string, raw []byte) (any, error) {
@@ -57,6 +42,12 @@ func (s RPCServer) dispatchAuthority(ctx context.Context, method string, raw []b
 	}
 	if _, err := authorityParams(method, raw); err != nil {
 		return nil, err
+	}
+	if s.Local != nil {
+		if !s.qualifiedLocal {
+			return nil, authority.Error{Code: authority.PolicyDenied}
+		}
+		return s.Local.Dispatch(ctx, strings.TrimPrefix(method, "AuthorityV1."), raw)
 	}
 	if method == "AuthorityV1.Negotiate" {
 		return authority.ContractsOnly(), nil
@@ -67,20 +58,47 @@ func (s RPCServer) dispatchAuthority(ctx context.Context, method string, raw []b
 }
 
 func strictAuthorityEnvelope(raw []byte) error {
-	var r RPCRequest
+	var r struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params,omitempty"`
+	}
 	if err := authority.DecodeJSON(raw, &r); err != nil {
 		return err
 	}
-	id, ok := r.ID.(float64)
-	if !ok || id < 1 || id > 1<<53 || id != float64(int64(id)) {
+	id, err := strconv.ParseUint(string(r.ID), 10, 64)
+	if err != nil || id < 1 || id > (1<<53)-1 || strconv.FormatUint(id, 10) != string(r.ID) || r.JSONRPC != jsonrpcVersion || !authorityMethod(r.Method) {
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	return nil
 }
 
+// NewLocalRPCClient takes a trusted machine enrollment coordinate, not a tool
+// argument or an environment override. Dial requalifies the owned endpoint and
+// same-UID peer every time; this never creates, repairs or starts a runtime.
+func NewLocalRPCClient(directory string) (*RPCClient, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || len(directory) > 4096 {
+		return nil, authority.Error{Code: authority.InvalidContract}
+	}
+	return &RPCClient{localDirectory: directory}, nil
+}
+
 func (c *RPCClient) callAuthority(ctx context.Context, method string, params any, result any) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	local := c.localDirectory != ""
+	if local && (c.Network != "" || c.Address != "" || c.SocketPath != "") {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
+	if params == nil || reflect.ValueOf(params).Kind() == reflect.Pointer && reflect.ValueOf(params).IsNil() {
+		return authority.Error{Code: authority.InvalidContract}
+	}
+	if validated, ok := params.(interface{ Validate() error }); ok {
+		if err := validated.Validate(); err != nil {
+			return err
+		}
 	}
 	raw, err := json.Marshal(params)
 	if err != nil {
@@ -89,6 +107,14 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 	normalized, err := authorityParams(method, raw)
 	if err != nil {
 		return err
+	}
+	if local && method == "AuthorityV1.Mutate" {
+		return authority.Error{Code: authority.Unsupported}
+	}
+	if local || method == "AuthorityV1.Negotiate" {
+		if err := authorityDestination(method, normalized, result); err != nil {
+			return err
+		}
 	}
 	network := c.Network
 	if network == "" {
@@ -107,16 +133,22 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 		if err != nil {
 			return err
 		}
-		if !reflect.DeepEqual(caps, authority.ContractsOnly()) {
+		if !caps.Available {
+			if !reflect.DeepEqual(caps, authority.ContractsOnly()) {
+				return authority.Error{Code: authority.Unsupported}
+			}
+			return authority.Error{Code: authority.Unavailable}
+		}
+		if !local || !caps.Supports(strings.TrimPrefix(method, "AuthorityV1.")) {
 			return authority.Error{Code: authority.Unsupported}
 		}
-		return authority.Error{Code: authority.Unavailable}
+		return c.authorityRoundTrip(ctx, method, normalized, result)
 	}
 	var caps authority.Negotiation
 	if err := c.authorityRoundTrip(ctx, method, normalized, &caps); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(caps, authority.ContractsOnly()) {
+	if !local && !reflect.DeepEqual(caps, authority.ContractsOnly()) {
 		return authority.Error{Code: authority.Unsupported}
 	}
 	if result != nil {
@@ -130,27 +162,33 @@ func (c *RPCClient) callAuthority(ctx context.Context, method string, params any
 
 func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, params any, result any) error {
 	address := c.Address
-	if address == "" {
+	if address == "" && c.localDirectory == "" {
 		address = c.SocketPath
 	}
-	if address == "" {
+	if address == "" && c.localDirectory == "" {
 		return authority.Error{Code: authority.Unavailable}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	id := c.nextID.Add(1)
+	if id < 1 || id > (1<<53)-1 {
+		return authority.Error{Code: authority.Capacity}
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	req := RPCRequest{JSONRPC: jsonrpcVersion, ID: id, Method: method, Params: body}
 	encoded, err := json.Marshal(req)
-	if err != nil || len(encoded) > authority.MaxContractBytes {
+	if err != nil || len(encoded)+1 > authority.MaxContractBytes {
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	var data []byte
 	if c.Network == "mem" {
+		if c.localDirectory != "" {
+			return authority.Error{Code: authority.PolicyDenied}
+		}
 		if !memoryRPC.TryLock() {
 			return authority.Error{Code: authority.Unavailable}
 		}
@@ -159,11 +197,24 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		if !ok {
 			return authority.Error{Code: authority.Unavailable}
 		}
+		if s.Local != nil {
+			return authority.Error{Code: authority.PolicyDenied}
+		}
 		data, err = json.Marshal(s.handleRequest(ctx, req))
 	} else {
-		var dialer net.Dialer
-		conn, dialErr := dialer.DialContext(ctx, "unix", address)
+		var conn net.Conn
+		var dialErr error
+		if c.localDirectory != "" {
+			conn, dialErr = privateipc.Dial(ctx, c.localDirectory)
+		} else {
+			var dialer net.Dialer
+			conn, dialErr = dialer.DialContext(ctx, "unix", address)
+		}
 		if dialErr != nil {
+			var code authority.Error
+			if errors.As(dialErr, &code) {
+				return code
+			}
 			return authoritySocketError(ctx, dialErr)
 		}
 		defer conn.Close()
@@ -217,7 +268,10 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		}
 		return authority.Error{Code: authority.Unsupported}
 	}
-	return authority.DecodeJSON(reply.Result, result)
+	if _, err := checkedAuthorityResult(method, params, reply.Result); err != nil {
+		return err
+	}
+	return authorityResultCopy(reply.Result, result)
 }
 
 func authoritySocketError(ctx context.Context, err error) error {

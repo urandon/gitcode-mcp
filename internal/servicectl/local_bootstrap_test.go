@@ -42,11 +42,9 @@ func TestLocalServerCannotReachLegacyDispatch(t *testing.T) {
 		_, err := s.dispatch(context.Background(), method, json.RawMessage(`{}`))
 		requireAuthorityCode(t, err, authority.PolicyDenied)
 	}
-	// Runtime dispatch is deliberately still unavailable in this increment.
+	// An arbitrary server value/passed listener cannot become qualified merely
+	// by holding a Local pointer. Manager.Run owns qualified handler admission.
 	raw, _ := json.Marshal(authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1})
-	result, err := s.dispatch(context.Background(), "AuthorityV1.Negotiate", raw)
-	caps, ok := result.(authority.Negotiation)
-	if err != nil || !ok || caps.Available || len(caps.Methods) != 0 {
-		t.Fatal("bootstrap advertised unfinished domain methods")
-	}
+	_, err := s.dispatch(context.Background(), "AuthorityV1.Negotiate", raw)
+	requireAuthorityCode(t, err, authority.PolicyDenied)
 }

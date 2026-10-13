@@ -83,6 +83,7 @@ type ServiceHealth struct {
 
 type RPCServer struct {
 	Local               *localauthority.Runtime
+	qualifiedLocal      bool
 	runtimeContext      context.Context
 	observationHandlers *atomic.Int64
 	Manager             Manager
@@ -93,10 +94,11 @@ type RPCServer struct {
 }
 
 type RPCClient struct {
-	Network    string
-	Address    string
-	SocketPath string
-	nextID     atomic.Int64
+	Network        string
+	Address        string
+	SocketPath     string
+	nextID         atomic.Int64
+	localDirectory string
 }
 
 var memoryRPC = struct {
@@ -105,6 +107,9 @@ var memoryRPC = struct {
 }{servers: map[string]RPCServer{}}
 
 func serveMemoryRPC(ctx context.Context, address string, server RPCServer, published func()) error {
+	if server.Local != nil {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
 	if address == "" {
 		return errors.New("memory service address is required")
 	}
@@ -122,6 +127,9 @@ func serveMemoryRPC(ctx context.Context, address string, server RPCServer, publi
 }
 
 func (s RPCServer) Serve(ctx context.Context, listener net.Listener) error {
+	if s.Local != nil {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	closed := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
@@ -156,24 +164,36 @@ func (s RPCServer) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stop()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close(); close(closed) })
+	defer func() {
+		if !stop() {
+			<-closed
+		}
+	}()
 	defer conn.Close()
 	enc := json.NewEncoder(conn)
-	limited := &io.LimitedReader{R: conn, N: maxRPCRequestBytes + 1}
+	requestBytes := int64(maxRPCRequestBytes)
+	if s.Local != nil {
+		requestBytes = authority.MaxContractBytes
+	}
+	limited := &io.LimitedReader{R: conn, N: requestBytes + 1}
 	dec := json.NewDecoder(limited)
 	for {
 		readDeadline := time.Now().Add(observability.ReadBudget)
+		if s.Local != nil {
+			readDeadline = time.Now().Add(authorityCallBudget)
+		}
 		if deadline, ok := ctx.Deadline(); ok && deadline.Before(readDeadline) {
 			readDeadline = deadline
 		}
 		_ = conn.SetReadDeadline(readDeadline)
 		// Keep one decoder so pipelined values retain normal JSON-stream framing
 		// without a recursively growing chain of buffered replay readers.
-		limited.N = maxRPCRequestBytes + 1
+		limited.N = requestBytes + 1
 		before := dec.InputOffset()
 		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil || len(raw) > maxRPCRequestBytes || dec.InputOffset()-before > maxRPCRequestBytes {
+		if err := dec.Decode(&raw); err != nil || int64(len(raw)) > requestBytes || dec.InputOffset()-before > requestBytes {
 			return
 		}
 		var req RPCRequest
@@ -181,7 +201,10 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var resp RPCResponse
-		if observationMethod(req.Method) {
+		if s.Local != nil && !authorityMethod(req.Method) {
+			_ = conn.SetWriteDeadline(readDeadline)
+			resp = authorityFixedResponse(nil, authority.PolicyDenied)
+		} else if observationMethod(req.Method) {
 			_ = conn.SetWriteDeadline(readDeadline)
 			if len(raw) > observability.MaxReadRequestBytes+observationEnvelopeBytes || strictObservationEnvelope(raw) != nil {
 				// The invalid envelope's ID is untrusted: structured or duplicate
@@ -197,8 +220,11 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 			if strictAuthorityEnvelope(raw) != nil {
 				resp = RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32602, Message: "invalid local authority contract", DiagnosticCode: string(authority.InvalidContract)}}
 			} else {
-				resp = s.handleRequest(ctx, req)
+				callCtx, cancel := context.WithTimeout(ctx, authorityCallBudget)
+				resp = s.handleRequest(callCtx, req)
+				cancel()
 			}
+			resp = boundedAuthorityResponse(resp)
 		} else {
 			resp = s.handleRequest(ctx, req)
 		}
@@ -210,21 +236,41 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 }
 
 func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCResponse {
+	if s.Local != nil && !authorityMethod(req.Method) {
+		return authorityFixedResponse(nil, authority.PolicyDenied)
+	}
 	if s.observationHandlers != nil {
 		s.observationHandlers.Add(1)
 		defer s.observationHandlers.Add(-1)
 	}
 	resp := RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID}
 	if ctx.Err() != nil || s.runtimeContext != nil && s.runtimeContext.Err() != nil {
+		if authorityMethod(req.Method) {
+			return authorityFixedResponse(req.ID, authority.Unavailable)
+		}
 		resp.Error = &RPCError{Code: -32000, Message: "service is stopping", DiagnosticCode: "service_stopping"}
 		return resp
 	}
 	if req.JSONRPC != jsonrpcVersion {
+		if authorityMethod(req.Method) {
+			return authorityFixedResponse(req.ID, authority.InvalidContract)
+		}
 		resp.Error = &RPCError{Code: -32600, Message: "invalid jsonrpc version"}
 		return resp
 	}
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
+		if authorityMethod(req.Method) {
+			code := authority.InvalidContract
+			var coded interface{ DiagnosticCode() string }
+			if errors.As(err, &coded) && authority.KnownCode(authority.Code(coded.DiagnosticCode())) {
+				code = authority.Code(coded.DiagnosticCode())
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				code = authority.Unavailable
+			}
+			return authorityFixedResponse(req.ID, code)
+		}
 		resp.Error = &RPCError{Code: -32000, Message: err.Error()}
 		var coded interface{ DiagnosticCode() string }
 		if errors.As(err, &coded) {
@@ -237,6 +283,17 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 		return resp
 	}
 	resp.Result = result
+	if authorityMethod(req.Method) {
+		params, e := authorityParams(req.Method, req.Params)
+		body, marshalErr := json.Marshal(result)
+		if e != nil || marshalErr != nil {
+			return authorityFixedResponse(req.ID, authority.InvalidContract)
+		}
+		if _, e = checkedAuthorityResult(req.Method, params, body); e != nil {
+			return authorityFixedResponse(req.ID, authority.InvalidContract)
+		}
+		return boundedAuthorityResponse(resp)
+	}
 	return resp
 }
 
@@ -539,6 +596,9 @@ func decodeJobID(params json.RawMessage) (string, error) {
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params any, result any) error {
+	if c.localDirectory != "" && !authorityMethod(method) {
+		return authority.Error{Code: authority.PolicyDenied}
+	}
 	if authorityMethod(method) {
 		return c.callAuthority(ctx, method, params, result)
 	}
