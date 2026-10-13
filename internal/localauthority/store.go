@@ -427,6 +427,11 @@ func (s *Store) verifyPhysicalBinding() error {
 	if s.lease == nil {
 		return nil
 	} // Unpublished initialization staging only.
+	if s.lease.runtimeGuard != nil {
+		if err := s.lease.runtimeGuard(); err != nil {
+			return err
+		}
+	}
 	canonical, err := privateDirectory(s.directory)
 	if err != nil || canonical != s.directory {
 		return Error{Corrupt}

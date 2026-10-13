@@ -445,3 +445,37 @@ negotiation, persistent indexing or semantic retrieval. Coordinator admission,
 jobs, hybrid fallback, restricted real embeddings and native policy
 qualification remain L4 work. Public CLI/MCP and Admin rollout remain L5/L6;
 contracts-only negotiation is unchanged until their runtime gates are met.
+
+### Existing-only runtime ownership preparation
+
+Trusted explicit setup may prepare an opaque, non-serialized registry
+capability. Runtime admission consumes that capability without account lookup,
+environment discovery, directory creation, owner-record creation, partial
+binding upgrade or schema initialization/migration. It requires the existing
+full project/instance/coordinate/database binding; missing or partial owner
+state refuses instead of creating a second ownership namespace.
+
+Preparation retains the private registry-directory identity. An admitted writer
+also retains an independent exclusive kernel lease on its authority directory,
+not on the SQLite database (database flock interferes with SQLite locking on
+Darwin). Admission and publication validate registry, authority-directory and
+database identities. Replacing the authority directory around the same database
+inode therefore cannot bypass the guard. Global UUID owner-record locking and
+clone refusal remain mandatory. Protected canonical read-only inspection can
+coexist with the runtime writer; it acquires no writer lease.
+
+The capability cannot close while stores own it. Coordinators must cancel and
+join jobs, close stores, then release preparation; abrupt process exit releases
+both kernel leases and retains confirmed authority state for existing-only
+restart. Contended preparation admission refuses nonblocking with typed
+conflict rather than waiting past cancellation behind another integrity scan;
+mandatory lifetime release bookkeeping is still joined, not discarded.
+This internal foundation does not supply a serialized FD assertion,
+public path selector, daemon launcher, IPC authentication or no-network proof.
+Those runtime integration gates remain outstanding in L4.
+
+Only explicit setup resolves the machine registry account. Linux uses bounded
+root-owned local account metadata with no NSS or environment fallback; missing,
+duplicate or invalid account data refuses. Qualified Darwin builds use native
+account lookup; Darwin `osusergo` and unsupported writer platforms fail closed
+instead of falling back to `HOME`. Strict runtime never invokes that resolver.

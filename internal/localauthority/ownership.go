@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -15,14 +14,17 @@ import (
 // Registry is a trusted machine-global ownership boundary, not a project or
 // daemon-profile setting. There is no exported constructor with an arbitrary
 // root. Tests inject one isolated machine root through the private constructor.
-type Registry struct{ root string }
+type Registry struct {
+	root    string
+	runtime *runtimeRegistry
+}
 
 func MachineRegistry() (*Registry, error) {
-	u, err := user.Current()
-	if err != nil || !filepath.IsAbs(u.HomeDir) {
-		return nil, Error{DurabilityUnavailable}
+	home, err := machineAccountHome()
+	if err != nil {
+		return nil, err
 	}
-	root := filepath.Join(u.HomeDir, ".gitcode-mcp", "authority-owners")
+	root := filepath.Join(home, ".gitcode-mcp", "authority-owners")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, Error{DurabilityUnavailable}
 	}
@@ -41,9 +43,12 @@ func newRegistry(root string) (*Registry, error) {
 }
 
 type lease struct {
-	file     *os.File
-	binding  string
-	registry string
+	file         *os.File
+	binding      string
+	registry     string
+	existingOnly bool
+	runtimeGuard func() error
+	onClose      func() error
 }
 
 // The binding is never removed on release. A clone or relocated authority
@@ -80,7 +85,13 @@ func (r *Registry) acquire(ctx context.Context, id, instance authority.UUID, dir
 		if _, err := f.ReadAt(body, 0); err != nil || string(body) != want && !(strings.HasPrefix(string(body), want) && len(body) == len(want)+65 && body[len(body)-1] == '\n') {
 			return nil, authority.Error{Code: authority.Conflict}
 		}
+		if l.existingOnly && len(body) != len(want)+65 {
+			return nil, Error{InitializationPending}
+		}
 	} else {
+		if l.existingOnly {
+			return nil, authority.Error{Code: authority.InitializationRequired}
+		}
 		if _, err = f.WriteAt([]byte(want), 0); err != nil {
 			return nil, Error{DurabilityUnavailable}
 		}
@@ -104,7 +115,16 @@ func (r *Registry) lockProject(ctx context.Context, id authority.UUID) (*lease, 
 	if r == nil || !id.Valid() {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
-	f, err := openPrivateFile(filepath.Join(r.root, string(id)+".owner"))
+	var f *os.File
+	var err error
+	if r.runtime != nil {
+		if err = r.runtime.verify(r.root); err != nil {
+			return nil, err
+		}
+		f, err = openExistingOwnerAt(r.runtime.directory, string(id)+".owner")
+	} else {
+		f, err = openPrivateFile(filepath.Join(r.root, string(id)+".owner"))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +132,7 @@ func (r *Registry) lockProject(ctx context.Context, id authority.UUID) (*lease, 
 		_ = f.Close()
 		return nil, err
 	}
-	return &lease{file: f, registry: r.root}, nil
+	return &lease{file: f, registry: r.root, existingOnly: r.runtime != nil}, nil
 }
 
 func (l *lease) bindPhysical(path string) error {
@@ -137,6 +157,9 @@ func (l *lease) bindPhysical(path string) error {
 	if string(body) == want {
 		return nil
 	}
+	if l.existingOnly {
+		return authority.Error{Code: authority.Conflict}
+	}
 	if string(body) != l.binding {
 		return authority.Error{Code: authority.Conflict}
 	}
@@ -155,12 +178,20 @@ func (l *lease) close() error {
 	}
 	f := l.file
 	l.file = nil
+	cleanup := l.onClose
+	l.onClose = nil
 	// Closing releases the kernel lease. Never truncate, unlink, or replace its
 	// identity while another process could be waiting on the same inode.
-	if err := f.Close(); err != nil {
-		return Error{DurabilityUnavailable}
+	var err error
+	if f.Close() != nil {
+		err = Error{DurabilityUnavailable}
 	}
-	return nil
+	if cleanup != nil {
+		if e := cleanup(); err == nil {
+			err = e
+		}
+	}
+	return err
 }
 
 func privateDirectory(path string) (string, error) {
