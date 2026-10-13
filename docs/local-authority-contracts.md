@@ -189,6 +189,34 @@ or a temporary per-profile registry are not substitutes. Native handoff, real
 foreign-user process qualification and complete loopback/provider behavior
 must not be reported passed from the current bootstrap fixtures.
 
+The staged private `internal/nativelaunch` Darwin oracle measures the kernel
+peer token and audited code image only; it grants no authority and has no public
+constructor, command or negotiated native capability. Its exact XNU ABI uses
+four-byte status and 21-byte code-hash/type buffers, strong hash types only, and
+stable valid/signed/enforced flags without unknown, invalid-allowed, killed or
+debugged states. A status/hash/hash/status bracket retains one pidversion and
+rechecks the whole token. Unsupported primitives refuse, never degrade to a
+pathname or unsigned image. This is measurement, not proof of message origin.
+
+Default unit tests simulate every unstable observation and caller cancellation
+without machine account/configuration dependencies. Explicit local Darwin
+qualification uses isolated actual children and the same-image/different-image
+re-exec, stale-incarnation, dead-peer and forwarded queued-message controls:
+
+```sh
+GITCODE_MCP_NATIVE_AUTHORITY_IMAGE=1 go test -race ./internal/nativelaunch -run '^TestNativeDarwin(ImageOracle|PeerImageIsNotQueuedMessageSender)$' -count=3 -timeout=90s
+```
+
+The test-build-only fixture hardens its own isolated processes; ordinary Go
+processes without code enforcement correctly refuse. This is not pre-exec
+product isolation, a credential change or a machine-wide policy modification.
+The forwarded-message control proves that a valid last-owner image can differ
+from the sender of an already queued datagram. It must not be converted into
+message authentication. Complete native launcher/enrollment provenance, both
+platforms, real foreign-user processes and OS-level absence of TCP/UDP/DNS from
+exec remain mandatory, separate acceptance gates. Tokens, PIDs, code hashes
+and local coordinates never enter diagnostic or fixture output.
+
 Negotiation request:
 
 ```json
