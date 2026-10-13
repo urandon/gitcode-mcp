@@ -2,8 +2,10 @@ package localauthority
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math"
 
 	"gitcode-mcp/internal/authority"
@@ -27,6 +29,7 @@ type SnapshotEntity struct {
 type SnapshotPage struct {
 	ProjectID  authority.UUID   `json:"project_id"`
 	Sequence   uint64           `json:"sequence"`
+	Scanned    int              `json:"scanned"`
 	Entities   []SnapshotEntity `json:"entities"`
 	NextCursor string           `json:"next_cursor,omitempty"`
 }
@@ -35,6 +38,44 @@ type snapshotCursor struct {
 	ProjectID authority.UUID `json:"project_id"`
 	Sequence  uint64         `json:"sequence"`
 	Last      authority.UUID `json:"last"`
+}
+
+type snapshotCandidate struct {
+	id       authority.UUID
+	revision uint64
+	view     *authority.EntityView
+}
+
+// revisionAtSequence resolves a contiguous immutable revision domain using at
+// most 63 primary-key point probes, independent of retained history length.
+// Revision zero is the sentinel for an entity created after the sequence.
+func revisionAtSequence(ctx context.Context, latest, fence uint64, sequence func(uint64) (uint64, error)) (uint64, error) {
+	if latest < 1 || latest > math.MaxInt64 || fence > math.MaxInt64 {
+		return 0, Error{Corrupt}
+	}
+	low, high := uint64(0), latest
+	for low < high {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		mid := low + (high-low+1)/2
+		at, err := sequence(mid)
+		if err != nil {
+			return 0, err
+		}
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		if at < 1 || at > math.MaxInt64 {
+			return 0, Error{Corrupt}
+		}
+		if at <= fence {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return low, nil
 }
 
 // Snapshot captures tracker and Git citations at one sequence. It never starts
@@ -69,37 +110,79 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 			return zero, authority.Error{Code: authority.InvalidContract}
 		}
 	}
-	// The subquery selects the latest immutable revision at the captured
-	// sequence, even if a subsequent page is read after newer writes.
-	rows, err := tx.QueryContext(ctx, "SELECT "+revisionColumns+` FROM entities e JOIN revisions r ON r.entity_id=e.entity_id
-	 WHERE e.entity_id>? AND r.revision=(SELECT max(v.revision) FROM revisions v WHERE v.entity_id=e.entity_id AND v.sequence<=?)
-	 ORDER BY e.entity_id LIMIT ?`, c.Last, int64(c.Sequence), req.Limit+1)
+	// Bound physical candidates BEFORE applying the historical fence. Sparse
+	// old snapshots must progress through empty pages instead of scanning all
+	// later-created entities under this authority lock. One lookahead establishes
+	// continuation; only Limit candidates receive bounded history point probes.
+	rows, err := tx.QueryContext(ctx, `SELECT entity_id,kind,alias_number,current_revision FROM entities
+	 WHERE entity_id>? ORDER BY entity_id LIMIT ?`, c.Last, req.Limit+1)
 	if err != nil {
 		return zero, storageError(ctx)
 	}
-	views := make([]authority.EntityView, 0, req.Limit+1)
+	candidates := make([]snapshotCandidate, 0, req.Limit)
+	more := false
 	for rows.Next() {
-		v, err := scanView(rows, req.ProjectID)
-		if err != nil {
+		var id string
+		var kind authority.EntityKind
+		var alias, revision int64
+		if rows.Scan(&id, &kind, &alias, &revision) != nil || !authority.UUID(id).Valid() || !kind.Valid() || alias < 1 || revision < 1 || revision > current {
 			_ = rows.Close()
-			return zero, err
+			return zero, Error{Corrupt}
 		}
-		views = append(views, v)
+		if len(candidates) == req.Limit {
+			more = true
+			break
+		}
+		candidates = append(candidates, snapshotCandidate{id: authority.UUID(id), revision: uint64(revision)})
 	}
 	readErr := rows.Err()
 	_ = rows.Close()
 	if readErr != nil {
 		return zero, storageError(ctx)
 	}
+	for i := range candidates {
+		candidate := &candidates[i]
+		revision, err := revisionAtSequence(ctx, candidate.revision, c.Sequence, func(revision uint64) (uint64, error) {
+			var sequence int64
+			err := tx.QueryRowContext(ctx, "SELECT sequence FROM revisions WHERE entity_id=? AND revision=?", candidate.id, int64(revision)).Scan(&sequence)
+			if errors.Is(err, sql.ErrNoRows) || err == nil && (sequence < 1 || sequence > current) {
+				return 0, Error{Corrupt}
+			}
+			if err != nil {
+				return 0, storageError(ctx)
+			}
+			return uint64(sequence), nil
+		})
+		if err != nil {
+			return zero, err
+		}
+		if revision == 0 {
+			continue
+		}
+		v, err := scanView(tx.QueryRowContext(ctx, "SELECT "+revisionColumns+` FROM entities e JOIN revisions r ON r.entity_id=e.entity_id
+		 WHERE e.entity_id=? AND r.revision=?`, candidate.id, int64(revision)), req.ProjectID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return zero, ctx.Err()
+			}
+			return zero, err
+		}
+		if v.ProjectSequence > c.Sequence {
+			return zero, Error{Corrupt}
+		}
+		candidate.view = &v
+	}
 	if tx.Commit() != nil {
 		return zero, storageError(ctx)
 	}
-	page := SnapshotPage{ProjectID: req.ProjectID, Sequence: c.Sequence, Entities: []SnapshotEntity{}}
+	page := SnapshotPage{ProjectID: req.ProjectID, Sequence: c.Sequence, Scanned: len(candidates), Entities: []SnapshotEntity{}}
 	var knowledge *knowledgeRepository
-	for _, v := range views {
-		if len(page.Entities) == req.Limit {
-			break
+	for _, candidate := range candidates {
+		if candidate.view == nil {
+			c.Last = candidate.id
+			continue
 		}
+		v := *candidate.view
 		if v.Citation.Kind == authority.Document {
 			if knowledge == nil {
 				g, err := s.readyKnowledgeRepository(ctx)
@@ -127,12 +210,13 @@ func (s *Store) Snapshot(ctx context.Context, req SnapshotRequest) (SnapshotPage
 			if len(page.Entities) == 0 {
 				return zero, Error{Capacity}
 			}
+			more = true
 			break
 		}
 		page = candidate
 		c.Last = v.Citation.EntityID
 	}
-	if len(page.Entities) < len(views) {
+	if more {
 		data, _ := json.Marshal(c)
 		page.NextCursor = base64.RawURLEncoding.EncodeToString(data)
 	}

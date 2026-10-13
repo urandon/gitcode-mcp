@@ -82,8 +82,8 @@ func (s *Store) LexicalSearch(ctx context.Context, req LexicalRequest) (LexicalR
 			return zero, err
 		}
 		result.Sequence = page.Sequence
+		result.Scanned += page.Scanned
 		for _, entry := range page.Entities {
-			result.Scanned++
 			v := entry.Entity
 			if v.Tombstone || req.Kind != "" && v.Citation.Kind != req.Kind {
 				continue

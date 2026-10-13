@@ -415,8 +415,15 @@ degraded UI; #186 owns verified backups, identity-preserving rebind and migratio
 The internal `Store.Snapshot` operation captures all entity kinds at one
 committed project sequence. Its strict continuation retains that sequence
 across intervening writes and carries only project/sequence/entity selectors.
-Each page is bounded by 100 entities and the 512 KiB encoded contract ceiling;
-trailing entities remain available through continuation. Documents are hydrated
+Each page first enumerates at most 100 physical entity candidates plus one
+continuation lookahead, before filtering to the historical sequence. As-of
+revision lookup uses at most 63 primary-key point probes per candidate over the
+contiguous signed-64-bit revision domain, never a retained-history scan. An
+empty historical slice still advances its cursor. `scanned` counts candidate
+inspections, including excluded newer entities and byte-budget tail candidates
+which a later page may inspect again; it is not a distinct source/coverage count.
+The 512 KiB encoded contract ceiling preserves trailing entities through
+continuation. Documents are hydrated
 from verified immutable Git locators only as transient protected data. No
 projection table, document-text copy, writer admission or repair is created.
 Tombstones remain in the snapshot for derived invalidation. Per-entity content
@@ -425,7 +432,7 @@ can reuse identical content while actual edits change its digest.
 
 `Store.LexicalSearch` performs deterministic case-normalized whole-token AND
 matching against typed content, not JSON field names. It accepts 1–64 distinct
-query terms within 4096 UTF-8 bytes, scans at most 128 entities per call and
+query terms within 4096 UTF-8 bytes, inspects at most 128 candidates per call and
 returns at most 100 citation/digest/score hits with 512-byte UTF-8 snippets.
 Ranking is top-K within the reported slice, not a claim of global corpus
 ranking. Incomplete corpus coverage is explicitly partial with a query/kind/
