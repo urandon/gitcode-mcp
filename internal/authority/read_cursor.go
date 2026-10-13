@@ -77,6 +77,12 @@ func (result ReadResult) Match(request ReadRequest) error {
 		if entity.Citation.Kind != request.Kind {
 			return bad
 		}
+		alias, err := strconv.ParseUint(entity.DisplayAlias[strings.LastIndexByte(entity.DisplayAlias, '-')+1:], 10, 64)
+		// Both the entity alias and this revision consume project sequences,
+		// regardless of which ordinal the requested operation paginates on.
+		if err != nil || alias > entity.ProjectSequence || entity.Citation.Revision > entity.ProjectSequence {
+			return bad
+		}
 		if request.Cursor != "" && entity.ProjectSequence > uint64(input.Snapshot) || result.NextCursor != "" && entity.ProjectSequence > uint64(output.Snapshot) {
 			return bad
 		}
@@ -89,8 +95,7 @@ func (result ReadResult) Match(request ReadRequest) error {
 			}
 			last = entity.Citation.Revision
 		} else {
-			alias, err := strconv.ParseUint(entity.DisplayAlias[strings.LastIndexByte(entity.DisplayAlias, '-')+1:], 10, 64)
-			if err != nil || alias <= last || seen[entity.Citation.EntityID] {
+			if alias <= last || seen[entity.Citation.EntityID] {
 				return bad
 			}
 			last, seen[entity.Citation.EntityID] = alias, true

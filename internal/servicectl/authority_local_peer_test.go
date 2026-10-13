@@ -153,7 +153,7 @@ func TestAuthorityLocalPeerReadCursorBinding(t *testing.T) {
 		return base64.RawURLEncoding.EncodeToString(raw)
 	}
 	for _, operation := range []string{"list", "history"} {
-		for _, variant := range []string{"valid", "terminal", "malformed", "project", "kind", "operation", "entity", "snapshot", "backwards", "ahead", "missing", "null", "extra", "future-row", "duplicate-page", "empty"} {
+		for _, variant := range []string{"valid", "terminal", "terminal-ordinal", "terminal-alias", "terminal-revision", "terminal-future", "malformed", "project", "kind", "operation", "entity", "snapshot", "backwards", "ahead", "missing", "null", "extra", "future-row", "duplicate-page", "empty"} {
 			t.Run(operation+"/"+variant, func(t *testing.T) {
 				fields := map[string]any{"project": authorityExampleProject, "kind": authority.Issue, "operation": operation, "entity": "", "snapshot": 5, "last": 1}
 				request := authority.ReadRequest{ProjectID: authorityExampleProject, Kind: authority.Issue, Operation: operation, Limit: 1}
@@ -187,6 +187,14 @@ func TestAuthorityLocalPeerReadCursorBinding(t *testing.T) {
 					fields["private"] = "synthetic-private"
 				case "future-row":
 					result.Entities[0].ProjectSequence = 6
+				case "terminal-ordinal":
+					result.Entities[0].Citation.Revision, result.Entities[0].DisplayAlias = 99, "ISSUE-99"
+				case "terminal-alias":
+					result.Entities[0].DisplayAlias = "ISSUE-99"
+				case "terminal-revision":
+					result.Entities[0].Citation.Revision = 99
+				case "terminal-future":
+					result.Entities[0].ProjectSequence = 6
 				case "duplicate-page":
 					result.Entities[0].Citation.Revision, result.Entities[0].DisplayAlias, fields["last"] = 1, "ISSUE-1", 1
 				case "empty":
@@ -196,7 +204,7 @@ func TestAuthorityLocalPeerReadCursorBinding(t *testing.T) {
 				if variant == "malformed" {
 					result.NextCursor = "synthetic-cursor"
 				}
-				if variant == "terminal" {
+				if strings.HasPrefix(variant, "terminal") {
 					result.NextCursor = ""
 				}
 				client := authorityLocalPeer(t, func(r RPCRequest) RPCResponse {

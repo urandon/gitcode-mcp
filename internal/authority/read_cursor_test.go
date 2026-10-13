@@ -88,3 +88,29 @@ func TestReadCursorMatchesFirstTerminalAndGetPages(t *testing.T) {
 	result.Entities = append(result.Entities, view)
 	requireError(t, result.Match(r), InvalidContract)
 }
+
+func TestReadCursorTerminalOrdinalCannotExceedProjectSequence(t *testing.T) {
+	for _, operation := range []string{"list", "history", "get"} {
+		for _, continuation := range []bool{false, true} {
+			if operation == "get" && continuation {
+				continue
+			}
+			r := ReadRequest{ProjectID: exampleID, Kind: Issue, Operation: operation}
+			c := ReadPageCursor{Project: exampleID, Kind: Issue, Operation: operation, Snapshot: 5, Last: 1}
+			if operation != "list" {
+				r.EntityID, c.Entity = exampleEntity, exampleEntity
+			}
+			if continuation {
+				r.Cursor = encodePage(t, c)
+			}
+			for _, view := range []EntityView{
+				{Citation: Citation{ProjectID: exampleID, EntityID: exampleEntity, Kind: Issue, Revision: 99}, DisplayAlias: "ISSUE-99", ProjectSequence: 2, Payload: json.RawMessage(`{"title":"Fixture","body":"","state":"open"}`)},
+				{Citation: Citation{ProjectID: exampleID, EntityID: exampleEntity, Kind: Issue, Revision: 2}, DisplayAlias: "ISSUE-99", ProjectSequence: 2, Payload: json.RawMessage(`{"title":"Fixture","body":"","state":"open"}`)},
+				{Citation: Citation{ProjectID: exampleID, EntityID: exampleEntity, Kind: Issue, Revision: 99}, DisplayAlias: "ISSUE-2", ProjectSequence: 2, Payload: json.RawMessage(`{"title":"Fixture","body":"","state":"open"}`)},
+			} {
+				result := ReadResult{ProjectID: exampleID, Entities: []EntityView{view}}
+				requireError(t, result.Match(r), InvalidContract)
+			}
+		}
+	}
+}
