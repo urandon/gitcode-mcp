@@ -179,3 +179,48 @@ func TestIndexJobPublicationProofRequiresExactCatalogBytesAndIdentity(t *testing
 		t.Fatal("arbitrary digest became exact publication evidence")
 	}
 }
+
+func TestIndexJobCausalGenerationFloorsAreSharedWithProtectedViews(t *testing.T) {
+	fresh := indexJobModelFixture(t)
+	fresh.Generation = 2
+	if fresh.valid() || indexJobView(fresh).Validate() == nil {
+		t.Fatal("second-generation queued state invented missing cancellation/retry")
+	}
+	for _, row := range []struct {
+		state    string
+		attempts int
+		minimum  uint64
+	}{
+		{"queued", 0, 1}, {"running", 1, 2}, {"running", 2, 3},
+		{"cancelling", 1, 3}, {"succeeded", 1, 3}, {"failed", 1, 3}, {"interrupted", 2, 4},
+		{"cancelled", 0, 2}, {"cancelled", 1, 4}, {"queued", 1, 4},
+	} {
+		r := indexJobModelFixture(t)
+		r.State, r.Attempts, r.Generation = row.state, row.attempts, row.minimum
+		if row.state == "cancelling" || row.state == "cancelled" {
+			r.CancellationRequested, r.CancelFrom = true, row.minimum-1
+			r.ActionActorHash = hash([]byte("synthetic cancellation"))
+		}
+		if row.state == "queued" && row.attempts > 0 {
+			r.RetryFrom, r.ActionActorHash = row.minimum-1, hash([]byte("synthetic retry"))
+		}
+		if row.state == "cancelled" {
+			r.Code = "cancelled"
+		} else if row.state == "failed" || row.state == "interrupted" {
+			r.Code = "interrupted"
+		} else if row.state == "succeeded" {
+			proof := indexJobModelPublication(t, r)
+			r.Publication = &proof
+		}
+		if !r.valid() || indexJobView(r).Validate() != nil {
+			t.Fatal("real minimum causal history was refused")
+		}
+		for gen := uint64(1); gen < row.minimum; gen++ {
+			bad := cloneIndexJob(r)
+			bad.Generation = gen
+			if bad.valid() || indexJobView(bad).Validate() == nil {
+				t.Fatal("impossible history passed durable or protected validation")
+			}
+		}
+	}
+}

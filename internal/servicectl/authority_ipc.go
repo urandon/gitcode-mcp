@@ -92,6 +92,30 @@ func authorityParams(method string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return r, r.Validate()
+	case "AuthorityV1.EnqueueIndex":
+		var r localauthority.IndexJobRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.IndexJob":
+		var r localauthority.IndexJobLookup
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.IndexJobs":
+		var r localauthority.IndexJobsRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex":
+		var r localauthority.IndexJobAction
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}
@@ -284,6 +308,8 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			case localauthority.ReadOnly, localauthority.Corrupt, localauthority.DurabilityUnavailable, localauthority.Capacity, localauthority.StorageUnavailable, localauthority.CommitUncertain, localauthority.InitializationPending, localauthority.RefConflict, localauthority.KnowledgeMigrationRequired, localauthority.KnowledgeSetupRequired, localauthority.KnowledgeInitializationPending, localauthority.DocumentPending, localauthority.DocumentRecoveryRequired, localauthority.KnowledgeCorrupt:
 				return localauthority.Error{Code: storage}
 			case localauthority.JobsCorrupt, localauthority.JobsUncertain, localauthority.JobNotFound, localauthority.JobRetryLimit:
+				return localauthority.Error{Code: storage}
+			case localauthority.ProjectionCorrupt, localauthority.ProjectionUncertain, localauthority.IndexJobsCorrupt, localauthority.IndexJobsUncertain, localauthority.IndexJobNotFound:
 				return localauthority.Error{Code: storage}
 			default:
 				return authority.Error{Code: authority.Unsupported}

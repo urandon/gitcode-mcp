@@ -111,6 +111,35 @@ func authorityRuntimeResult(method string, params any, raw json.RawMessage) (any
 			return nil, invalid
 		}
 		return result, nil
+	case "AuthorityV1.EnqueueIndex":
+		var result localauthority.IndexJobAdmission
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyIndexJobAdmission(params.(localauthority.IndexJobRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.IndexJob":
+		req := params.(localauthority.IndexJobLookup)
+		var result localauthority.IndexJobView
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.JobID != req.JobID {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex":
+		req := params.(localauthority.IndexJobAction)
+		var result localauthority.IndexJobView
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.JobID != req.JobID || result.Generation < req.ExpectedGeneration {
+			return nil, invalid
+		}
+		if method == "AuthorityV1.CancelIndex" && (result.State == "queued" || result.State == "running") || method == "AuthorityV1.RetryIndex" && result.Generation == req.ExpectedGeneration && result.State != "succeeded" {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.IndexJobs":
+		var result localauthority.IndexJobsPage
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyIndexJobsPage(params.(localauthority.IndexJobsRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}

@@ -91,6 +91,7 @@ func newIPCFixture(t *testing.T) ipcFixture {
 	go func() { done <- server.Serve(ctx, l) }()
 	f := ipcFixture{client: &servicectl.RPCClient{Network: "unix", Address: path}, socket: path, store: dir, core: c, prepared: p, stop: stop, done: done}
 	t.Cleanup(func() {
+		defer l.Close() // early Serve refusal never takes listener ownership
 		stop()
 		select {
 		case err := <-done:
@@ -106,6 +107,15 @@ func newIPCFixture(t *testing.T) ipcFixture {
 			t.Error("native ownership teardown did not join")
 		}
 	})
+	// A listening kernel backlog is not proof that Serve has qualified this
+	// coordinator/socket. Silent connects may complete before its goroutine is
+	// scheduled; qualify real serving before a test can immediately cancel it.
+	ready, finish := context.WithTimeout(ctx, time.Second)
+	defer finish()
+	var caps authority.Negotiation
+	if f.client.Call(ready, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps) != nil || !caps.Available || len(caps.Methods) != 15 {
+		t.Fatal("private native server did not qualify before fixture return")
+	}
 	return f
 }
 
@@ -119,7 +129,7 @@ func TestDedicatedAuthorityActualPrivateRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var caps authority.Negotiation
-	if f.client.Call(ctx, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps) != nil || !caps.Available || len(caps.Methods) != 10 {
+	if f.client.Call(ctx, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps) != nil || !caps.Available || len(caps.Methods) != 15 {
 		t.Fatal("dedicated core did not negotiate actual methods")
 	}
 	m := nativeMutation("synthetic-native-create", "Real canonical issue")
@@ -218,6 +228,115 @@ func TestDedicatedAuthoritySilentConnectionsAreBoundedAndJoined(t *testing.T) {
 	f.stop()
 	wg.Wait()
 	// Fixture teardown independently awaits Serve and coordinator ownership.
+}
+
+func TestDedicatedAuthorityBacklogDoesNotQualifyCancelledStartup(t *testing.T) {
+	p, _, dir := nativeLaunchFixture(t)
+	ctx, stop := context.WithCancel(context.Background())
+	c, err := localauthority.NewStrictCoordinator(ctx, p, []localauthority.ProjectBinding{{ProjectID: fixtureProject, Directory: dir}})
+	if err != nil {
+		t.Fatal("cancelled-start coordinator fixture unavailable")
+	}
+	t.Cleanup(func() { stop(); _ = c.Close(context.Background()) })
+	server, err := servicectl.NewAuthorityServer(c)
+	if err != nil {
+		t.Fatal("cancelled-start server fixture unavailable")
+	}
+	path := filepath.Join(privateTemp(t), "s")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil || os.Chmod(path, 0600) != nil {
+		t.Fatal("cancelled-start socket fixture unavailable")
+	}
+	defer l.Close()
+	start := make(chan struct{})
+	release := sync.OnceFunc(func() { close(start) })
+	served := make(chan error, 1)
+	go func() {
+		defer close(served)
+		<-start
+		served <- server.Serve(ctx, l)
+	}()
+	t.Cleanup(func() {
+		stop()
+		release()
+		select {
+		case <-served:
+		case <-time.After(time.Second):
+			t.Error("gated cancelled startup did not join")
+		}
+	})
+	// Deterministically reproduce the ordering: a kernel connect succeeds
+	// before Serve executes at all. It cannot certify live core admission.
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatal("unserved listener backlog did not accept synthetic peer")
+	}
+	defer conn.Close()
+	stop()
+	release()
+	select {
+	case err = <-served:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled gated startup did not return")
+	}
+	var typed authority.Error
+	if !errors.As(err, &typed) || typed.Code != authority.Unavailable {
+		t.Fatal("cancelled pre-start core fabricated serving readiness")
+	}
+}
+
+func TestDedicatedAuthorityReadinessSilentPeerCancellationJoins(t *testing.T) {
+	path := filepath.Join(privateTemp(t), "s")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil || os.Chmod(path, 0600) != nil {
+		t.Fatal("silent readiness peer unavailable")
+	}
+	defer l.Close()
+	if l.SetDeadline(time.Now().Add(time.Second)) != nil {
+		t.Fatal("silent readiness listener deadline unavailable")
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	client := servicectl.RPCClient{Network: "unix", Address: path}
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		var caps authority.Negotiation
+		done <- client.Call(ctx, "AuthorityV1.Negotiate", authority.NegotiationRequest{Protocol: authority.Protocol, Authority: authority.Local, SchemaMin: 1, SchemaMax: 1}, &caps)
+	}()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("silent readiness caller did not join on failed fixture")
+		}
+	})
+	conn, err := l.AcceptUnix()
+	if err != nil {
+		t.Fatal("silent readiness peer accept failed")
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	var request servicectl.RPCRequest
+	if json.NewDecoder(io.LimitReader(conn, authority.MaxContractBytes)).Decode(&request) != nil || request.Method != "AuthorityV1.Negotiate" {
+		t.Fatal("readiness did not send actual capability request")
+	}
+	// The peer has received the request but has not sent a response. A backlog
+	// connect cannot make readiness succeed; cancellation joins its real call.
+	stop()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal("silent capability peer fabricated readiness")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("silent capability call did not join after cancellation")
+	}
+	var one [1]byte
+	if _, err := conn.Read(one[:]); !errors.Is(err, io.EOF) {
+		t.Fatal("readiness cancellation retained its private connection")
+	}
 }
 
 func TestDedicatedAuthorityClientRejectsAnotherValidReceiptEvenWhenDiscarded(t *testing.T) {

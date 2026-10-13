@@ -69,8 +69,38 @@ func indexJobCode(code string) bool {
 	return false
 }
 
+// Minimum causal generations, shared by durable history and protected DTOs.
+// Each admitted attempt needs a start; terminal/cancel/retry permission needs
+// its own durable transition. Bounded fields alone cannot certify that history.
+func indexJobGenerationValid(state string, attempts int, generation uint64) bool {
+	if attempts < 0 || attempts > maxIndexAttempts || generation < 1 || generation > math.MaxInt64 {
+		return false
+	}
+	extra := uint64(1)
+	switch state {
+	case "queued":
+		if attempts == 0 && generation == 2 {
+			return false // fresh admission is 1; queued cancel+retry is >=3
+		}
+		if attempts > 0 {
+			extra = 3 // start, terminal, explicit retry
+		}
+	case "running":
+	case "cancelling", "succeeded", "failed", "interrupted":
+		extra = 2
+	case "cancelled":
+		extra = 2 // queued cancellation without a start
+		if attempts > 0 {
+			extra = 3 // start, cancelling, joined terminal
+		}
+	default:
+		return false
+	}
+	return generation >= uint64(attempts)+extra
+}
+
 func (r indexJobRecord) valid() bool {
-	if !r.Selection.valid() || !validDigest(r.KeyHash) || !validDigest(r.IntentHash) || !validDigest(r.ActorHash) || r.ActionActorHash != "" && !validDigest(r.ActionActorHash) || r.Generation < 1 || r.Generation > math.MaxInt64 || r.AdmittedGeneration < 2 || r.AdmittedGeneration > math.MaxInt64 || r.Attempts < 0 || r.Attempts > maxIndexAttempts || r.Generation < uint64(r.Attempts)+1 || r.CancelFrom >= r.Generation || r.RetryFrom >= r.Generation || !indexJobCode(r.Code) {
+	if !r.Selection.valid() || !validDigest(r.KeyHash) || !validDigest(r.IntentHash) || !validDigest(r.ActorHash) || r.ActionActorHash != "" && !validDigest(r.ActionActorHash) || r.AdmittedGeneration < 2 || r.AdmittedGeneration > math.MaxInt64 || !indexJobGenerationValid(r.State, r.Attempts, r.Generation) || r.CancelFrom >= r.Generation || r.RetryFrom >= r.Generation || !indexJobCode(r.Code) {
 		return false
 	}
 	if (r.CancelFrom > 0 || r.RetryFrom > 0) && r.ActionActorHash == "" || r.CancellationRequested && r.CancelFrom == 0 {

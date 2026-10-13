@@ -1,6 +1,7 @@
 package localauthority
 
 import (
+	"context"
 	"testing"
 
 	"gitcode-mcp/internal/authority"
@@ -25,4 +26,29 @@ func StartRecoveryTransportFixtureWorkers(c *Coordinator) error {
 	c.jobsStarted = false
 	c.mu.Unlock()
 	return c.activateRecoveryWorkers()
+}
+
+// Test-only prepared owner with deferred dispatch permits deterministic queued
+// cancellation/reopen over actual metadata. No fixture constructor is exported
+// by production binaries and no operator state is touched.
+func NewIndexTransportFixture(t *testing.T) (*Coordinator, IndexJobRequest, func() *Coordinator) {
+	t.Helper()
+	c, prepared, dir := deferredIndexCoordinator(t)
+	if _, err := c.Mutate(context.Background(), request(t, "issue.create", "synthetic-index-ipc-source", authority.IssuePayload{Title: "Synthetic IPC source", Body: "canonical source sentinel", State: "open"}), Actor{ID: "local-user"}); err != nil {
+		t.Fatal("index transport canonical fixture unavailable")
+	}
+	reopen := func() *Coordinator {
+		next, err := newStrictCoordinator(context.Background(), prepared, []ProjectBinding{{testProject, dir}}, false)
+		if err != nil {
+			t.Fatal("index transport owner reopen failed")
+		}
+		next.jobsStarted = true
+		t.Cleanup(func() {
+			if next.Close(context.Background()) != nil {
+				t.Error("reopened index transport owner did not join")
+			}
+		})
+		return next
+	}
+	return c, IndexJobRequest{ProjectID: testProject, Sequence: 1, IdempotencyKey: "synthetic-index-ipc-original", WriteMode: "local"}, reopen
 }

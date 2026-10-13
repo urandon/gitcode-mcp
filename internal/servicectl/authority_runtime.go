@@ -31,7 +31,7 @@ func NewAuthorityServer(core *localauthority.Coordinator) (*AuthorityServer, err
 }
 
 func authorityRuntimeCapabilities() authority.Negotiation {
-	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery"}}
+	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery", "AuthorityV1.EnqueueIndex", "AuthorityV1.IndexJob", "AuthorityV1.IndexJobs", "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex"}}
 }
 
 type authorityProjectRequest struct {
@@ -187,6 +187,17 @@ func (s *AuthorityServer) dispatch(ctx context.Context, method string, raw []byt
 		return s.core.CancelRecovery(ctx, params.(localauthority.RecoveryJobAction), localauthority.Actor{ID: "local-user"})
 	case "AuthorityV1.RetryRecovery":
 		return s.core.RetryRecovery(ctx, params.(localauthority.RecoveryJobAction), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.EnqueueIndex":
+		return s.core.AdmitIndex(ctx, params.(localauthority.IndexJobRequest), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.IndexJob":
+		req := params.(localauthority.IndexJobLookup)
+		return s.core.IndexJob(ctx, req.ProjectID, req.JobID)
+	case "AuthorityV1.IndexJobs":
+		return s.core.IndexJobs(ctx, params.(localauthority.IndexJobsRequest))
+	case "AuthorityV1.CancelIndex":
+		return s.core.CancelIndex(ctx, params.(localauthority.IndexJobAction), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.RetryIndex":
+		return s.core.RetryIndex(ctx, params.(localauthority.IndexJobAction), localauthority.Actor{ID: "local-user"})
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}

@@ -149,7 +149,7 @@ the transport ceiling validates only the larger bounded file grammar; the
 ordinary transport decoder must still refuse it. Actual child FIFO controls
 prove final/stage type refusal cannot block, alongside symlink/hardlink/unknown
 inventory and namespace/inode/content replacement controls. These domain tests
-do not certify integrated index jobs, real hybrid vectors or native isolation.
+do not certify real hybrid vectors or complete native isolation.
 
 Index-job tests use actual prepared authority, ledger publication and coordinator
 workers. They qualify original caller identity, generation-fenced cancellation,
@@ -172,8 +172,24 @@ Actual completed-catalog controls hold ledger or projection locks beyond a
 short private proof deadline: terminal exit remains bounded, controls seal
 uncertainty without blocking, source/catalog remain intact, and verified reopen
 reconciles the original build without another attempt.
-These controls do not certify protected IPC rollout, corrupt reset, semantic
-vectors, safe observation or full native network isolation.
+The index private-IPC cohort validates exact caller-request admission digests,
+typed unknown jobs, generation-fenced cancel/retry, missing-ledger observation,
+bounded sorted pages and generation/digest/count/offset continuation. Real Unix
+round trips preserve queued cancellation across owner reopen, explicitly retry
+the original intent, execute one actual catalog build and retain honest hybrid
+fallback. A same-binary native process publishes an actual catalog and reopens
+its exact job identity without another attempt. Authenticated malformed-peer
+fixtures reject forged project/job/digest/cursor/selector and false-action
+responses even when discarded; finite errors omit peer prose. These tests do
+not certify corrupt reset, semantic vectors, safe observation or full native
+network isolation.
+
+Private server fixtures qualify an actual capability handshake before exposing
+their listener to cancellation tests. A kernel backlog connect is not serving
+readiness: a deterministic cancelled-before-Serve control preserves the cold
+unavailable refusal. The existing 40 silent peers, 32-handler cap and actual
+joined-shutdown checks remain unchanged; no sleep or timeout inflation replaces
+the startup barrier. Failed-start cleanup still closes the caller-owned listener.
 Independent record-count/wire-size/page-continuation controls and fixed typed
 job errors preserve protected scope without echoing arbitrary peer content.
 Malformed peer controls also reject false action acknowledgements, regressed

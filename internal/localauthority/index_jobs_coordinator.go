@@ -109,7 +109,7 @@ func (c *Coordinator) IndexJob(ctx context.Context, project, id authority.UUID) 
 		return IndexJobView{}, err
 	}
 	if !found {
-		return IndexJobView{}, authority.Error{Code: authority.NoAuthority}
+		return IndexJobView{}, Error{IndexJobNotFound}
 	}
 	return indexJobView(r), nil
 }
@@ -129,13 +129,16 @@ func (c *Coordinator) indexAction(ctx context.Context, req IndexJobAction, actor
 		return IndexJobView{}, err
 	}
 	if !found {
-		return IndexJobView{}, authority.Error{Code: authority.NoAuthority}
+		return IndexJobView{}, Error{IndexJobNotFound}
 	}
 	if retry && r.RetryFrom == req.ExpectedGeneration || !retry && r.CancelFrom == req.ExpectedGeneration && r.CancellationRequested {
 		q.signal()
 		return indexJobView(r), nil
 	}
 	if r.Generation != req.ExpectedGeneration {
+		return IndexJobView{}, authority.Error{Code: authority.Conflict}
+	}
+	if retry && r.State != "succeeded" && r.State != "failed" && r.State != "interrupted" && r.State != "cancelled" {
 		return IndexJobView{}, authority.Error{Code: authority.Conflict}
 	}
 	if retry && (r.State == "failed" || r.State == "interrupted" || r.State == "cancelled") && r.Attempts >= maxIndexAttempts {

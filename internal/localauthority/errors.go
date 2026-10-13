@@ -29,6 +29,7 @@ const (
 	ProjectionUncertain            Code = "authority_projection_uncertain"
 	IndexJobsCorrupt               Code = "authority_index_jobs_corrupt"
 	IndexJobsUncertain             Code = "authority_index_jobs_uncertain"
+	IndexJobNotFound               Code = "authority_index_job_not_found"
 )
 
 // Error is deliberately content-free; SQL, paths, keys and payloads are private.
@@ -79,6 +80,8 @@ func (e Error) Error() string {
 		return "local index job metadata is invalid; preserve it for explicit recovery"
 	case IndexJobsUncertain:
 		return "local index job publication is uncertain; verified owner reopen is required"
+	case IndexJobNotFound:
+		return "local index job is not retained"
 	default:
 		return "local authority storage is unavailable"
 	}

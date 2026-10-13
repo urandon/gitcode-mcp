@@ -57,7 +57,7 @@ type IndexJobView struct {
 }
 
 func (v IndexJobView) Validate() error {
-	if v.Schema != 1 || !v.ProjectID.Valid() || !v.JobID.Valid() || v.Type != "content_catalog" || v.Generation < 1 || v.Generation > math.MaxInt64 || v.Sequence > math.MaxInt64 || v.Attempts < 0 || v.Attempts > maxIndexAttempts || v.Generation < uint64(v.Attempts)+1 || v.CatalogGeneration < 1 || v.CatalogGeneration > math.MaxInt64 || !indexJobCode(v.Code) || v.Published != (v.State == "succeeded") {
+	if v.Schema != 1 || !v.ProjectID.Valid() || !v.JobID.Valid() || v.Type != "content_catalog" || !indexJobGenerationValid(v.State, v.Attempts, v.Generation) || v.Sequence > math.MaxInt64 || v.CatalogGeneration < 1 || v.CatalogGeneration > math.MaxInt64 || !indexJobCode(v.Code) || v.Published != (v.State == "succeeded") {
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	switch v.State {

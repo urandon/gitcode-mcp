@@ -515,9 +515,10 @@ build UUID survive restart independently of the disposable catalog. No source
 text, actor/key bytes, locator paths or provider body enter this ledger.
 
 Content-catalog jobs currently certify metadata only, not semantic vectors.
-Their shared coordinator methods are not yet advertised by private IPC or
-CLI/MCP/Admin. The runtime rollout and those protected-response cohorts remain
-mandatory. Semantic readiness cannot be inferred from a successful catalog job.
+Their shared coordinator methods are implemented by the dedicated protected
+private IPC server. Public CLI/MCP/Admin rollout remains #184/#185, and complete
+runtime qualification remains mandatory. Semantic readiness cannot be inferred
+from a successful catalog job.
 
 There are at most 128 retained jobs, one active job per project, eight attempts,
 a 512 KiB final ledger, four preserved stages and 2 MiB staged bytes. Capacity
@@ -549,8 +550,8 @@ jobs can advance the catalog. Failed ledger acknowledgement fences only its
 job controls, including a definitive pre-rename terminal-save failure after
 the joined catalog effect. Intact canonical reads, receipts and lexical retrieval remain
 available. Shutdown joins admitted workers and controls before releasing the
-project writer. Explicit corrupt-catalog reset, integrated protected IPC,
-opaque observation and real restricted embedding qualification remain L4 work.
+project writer. Explicit corrupt-catalog reset, opaque observation and real
+restricted embedding qualification remain L4 work.
 Every failed joined-terminal exit, including ledger/proof contention deadline,
 sets a nonblocking owner-local uncertainty seal. Subsequent admission/readback
 and in-flight ledger acknowledgement honor that seal without taking the held
@@ -560,6 +561,32 @@ Canonical Store identity is initialized before owner publication and thereafter
 only compared during SQL revalidation. Content-free filesystem guards may read
 that immutable identity without taking the source SQL mutex; manifest changes
 are corruption, never permission to replace the admitted policy at runtime.
+
+The dedicated private server also implements EnqueueIndex, IndexJob, IndexJobs,
+CancelIndex and RetryIndex over this shared owner. Admission requires project
+UUID, exact source sequence, bounded caller key and `write_mode: local`. Its
+envelope includes a domain-separated SHA-256 digest of the typed caller request
+and the exact metadata-only job view. This digest is response consistency, not
+an authentication signature; OS peer authentication is still mandatory. Neither
+the original key nor actor/physical selectors enter the view. A completed
+`content_catalog` job is not evidence of vector readiness or hybrid search.
+
+IndexJobs pages contain at most 32 UUID-sorted unique views, within 64 KiB.
+Missing metadata returns `state: missing`, zero generation/count, an empty
+array and no digest/continuation without provisioning a namespace. Ready pages
+pin retained ledger generation, encoded snapshot digest, count, offset and last
+UUID through a bounded opaque cursor. A changed ledger rejects prior cursors
+with typed conflict; pages never mix generations or grant execution. All
+protected results, including discarded responses, bind project/job, admission
+digest, generation-fenced actions and exact continuation accounting. An active
+retry cannot falsely acknowledge an unperformed retry. Unknown jobs have the
+finite `authority_index_job_not_found` error; corrupt/uncertain job/catalog
+diagnostics are fixed and never reflect peer error prose.
+Durable records and protected views share causal generation floors: a start
+precedes terminal/cancelling acknowledgement; running cancellation has a joined
+terminal transition, while an unstarted queued cancellation remains valid.
+Retried queued permission requires prior start, terminal state and explicit
+retry. A first-running generation cannot masquerade as published success.
 
 ### Existing-only runtime ownership preparation
 
@@ -623,7 +650,8 @@ for authority operations instead of falling through to this graph implicitly.
 
 The dedicated server negotiates implemented Read, Mutate, MutateDocument,
 KnowledgeStatus, Search, EnqueueRecovery, RecoveryJob, RecoveryJobs,
-CancelRecovery and RetryRecovery methods. Exact implemented-method inventory
+CancelRecovery, RetryRecovery, EnqueueIndex, IndexJob, IndexJobs, CancelIndex
+and RetryIndex methods. Exact implemented-method inventory
 is required before an operation; contracts-only stays unavailable and an old,
 incomplete, reordered or unknown inventory is unsupported, never auto-started
 or routed to remote state. Concrete responses are validated even when
