@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"gitcode-mcp/internal/authority"
@@ -79,43 +78,8 @@ func checkedAuthorityResult(method string, params any, raw []byte) (any, error) 
 			return bad()
 		}
 	case *authority.ReadResult:
-		r := params.(authority.ReadRequest)
-		if value.ProjectID != r.ProjectID {
+		if value.Match(params.(authority.ReadRequest)) != nil {
 			return bad()
-		}
-		limit := r.Limit
-		if limit == 0 {
-			limit = 50
-		}
-		if r.Operation == "get" {
-			if len(value.Entities) != 1 || value.NextCursor != "" {
-				return bad()
-			}
-		} else if len(value.Entities) > limit {
-			return bad()
-		}
-		var last uint64
-		seen := map[authority.UUID]bool{}
-		for _, entity := range value.Entities {
-			if entity.Citation.Kind != r.Kind {
-				return bad()
-			}
-			if r.Operation == "get" || r.Operation == "history" {
-				if entity.Citation.EntityID != r.EntityID || r.Revision != 0 && entity.Citation.Revision != r.Revision {
-					return bad()
-				}
-				if r.Operation == "history" && entity.Citation.Revision <= last {
-					return bad()
-				}
-				last = entity.Citation.Revision
-			} else {
-				alias, err := strconv.ParseUint(entity.DisplayAlias[strings.LastIndexByte(entity.DisplayAlias, '-')+1:], 10, 64)
-				if err != nil || alias <= last || seen[entity.Citation.EntityID] {
-					return bad()
-				}
-				last = alias
-				seen[entity.Citation.EntityID] = true
-			}
 		}
 	case *authority.MutationReceipt:
 		if method == "AuthorityV1.MutationReceipt" {

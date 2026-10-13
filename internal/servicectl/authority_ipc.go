@@ -24,7 +24,29 @@ type authorityRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *RPCError       `json:"error,omitempty"`
+	// Raw arms preserve presence, including explicit null. Pointer decoding
+	// would lose the distinction between an absent arm and a forbidden null.
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+type authorityRPCError struct {
+	Code           int            `json:"code"`
+	Message        string         `json:"message"`
+	DiagnosticCode authority.Code `json:"diagnostic_code"`
+}
+
+func decodeAuthorityRPCError(raw []byte) error {
+	var arm authorityRPCError
+	if authority.DecodeJSON(raw, &arm) != nil || arm.Code != -32000 {
+		return authority.Error{Code: authority.InvalidContract}
+	}
+	if !authority.KnownCode(arm.DiagnosticCode) {
+		return authority.Error{Code: authority.Unsupported}
+	}
+	if arm.Message != (authority.Error{Code: arm.DiagnosticCode}).Error() {
+		return authority.Error{Code: authority.InvalidContract}
+	}
+	return authority.Error{Code: arm.DiagnosticCode}
 }
 
 func authorityMethod(method string) bool { return strings.HasPrefix(method, "AuthorityV1.") }
@@ -257,16 +279,11 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	var reply authorityRPCResponse
-	if authority.DecodeJSON(data, &reply) != nil || reply.JSONRPC != jsonrpcVersion || string(reply.ID) != strconv.FormatInt(id, 10) || reply.Error != nil && len(reply.Result) > 0 {
+	if authority.DecodeJSON(data, &reply) != nil || reply.JSONRPC != jsonrpcVersion || string(reply.ID) != strconv.FormatInt(id, 10) || (len(reply.Error) > 0) == (len(reply.Result) > 0) {
 		return authority.Error{Code: authority.InvalidContract}
 	}
-	if reply.Error != nil {
-		// Old daemons or unknown codes are unsupported, never raw peer errors.
-		code := authority.Code(reply.Error.DiagnosticCode)
-		if authority.KnownCode(code) {
-			return authority.Error{Code: code}
-		}
-		return authority.Error{Code: authority.Unsupported}
+	if len(reply.Error) > 0 {
+		return decodeAuthorityRPCError(reply.Error)
 	}
 	if _, err := checkedAuthorityResult(method, params, reply.Result); err != nil {
 		return err

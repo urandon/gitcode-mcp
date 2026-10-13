@@ -158,7 +158,14 @@ repair a daemon. Legacy clients still refuse available authority work.
 Private transport validates every concrete response, including nil caller
 destinations: exact project/citation/key/revision/kind, canonical actor/content
 intent hash, document locator digest/length or tombstone parent, and strict audit
-page ordering/cardinality. Fixed safe numeric ids, joined cancellation callbacks,
+page ordering/cardinality. Protected list/history cursors use an exact shared
+schema: project, kind, operation, entity, sequence snapshot and last position.
+Each continuation matches the final returned row, advances past the input
+position and retains its snapshot; even terminal pages cannot repeat earlier
+rows or include revisions newer than that snapshot. Get/empty pages cannot carry
+a continuation. Response arms are exclusive by field presence (including null),
+and authority errors require the fixed numeric code and matching finite message;
+observability extensions are not authority errors. Fixed safe numeric ids, joined cancellation callbacks,
 10-second budgets and actual 512-KiB encoded envelopes are enforced. Unknown
 methods/enums/fields, malformed unions and unbound results refuse. These
 qualified in-process wire fixtures do not supply native process-entry/restart

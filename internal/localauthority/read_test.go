@@ -27,6 +27,9 @@ func TestByteBoundedPagesPreserveSnapshotAndProgress(t *testing.T) {
 	if err != nil || len(page.Entities) != 3 || page.NextCursor == "" {
 		t.Fatal("byte budget did not produce progress-safe continuation")
 	}
+	if page.Match(req) != nil {
+		t.Fatal("storage byte-bounded page violates shared cursor contract")
+	}
 	data, _ := json.Marshal(page)
 	if len(data) > authority.MaxContractBytes {
 		t.Fatal("encoded reply exceeds contract")
@@ -37,6 +40,9 @@ func TestByteBoundedPagesPreserveSnapshotAndProgress(t *testing.T) {
 	next, err := s.Read(ctx, req)
 	if err != nil || len(next.Entities) != 2 || next.NextCursor != "" || next.Entities[0].Citation.Revision != 1 {
 		t.Fatal("continuation lost immutable snapshot or skipped trailing entities")
+	}
+	if next.Match(req) != nil {
+		t.Fatal("storage terminal page violates shared snapshot contract")
 	}
 	wrong := req
 	wrong.Kind = authority.Label
@@ -50,10 +56,16 @@ func TestByteBoundedPagesPreserveSnapshotAndProgress(t *testing.T) {
 	if err != nil || len(first.Entities) != 1 || first.NextCursor == "" {
 		t.Fatal("history continuation missing")
 	}
+	if first.Match(history) != nil {
+		t.Fatal("storage history cursor violates shared contract")
+	}
 	history.Cursor = first.NextCursor
 	last, err := s.Read(ctx, history)
 	if err != nil || len(last.Entities) != 1 || last.Entities[0].Citation.Revision != 2 {
 		t.Fatal("history continuation incorrect")
+	}
+	if last.Match(history) != nil {
+		t.Fatal("storage terminal history violates shared contract")
 	}
 }
 

@@ -153,7 +153,9 @@ func TestAuthorityPrivateSocketRetainsDeclaredErrorIdentity(t *testing.T) {
 				if json.NewDecoder(conn).Decode(&req) != nil {
 					return
 				}
-				_ = json.NewEncoder(conn).Encode(RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID, Error: &RPCError{Code: -32000, Message: "synthetic-private-peer-body", DiagnosticCode: string(code)}})
+				// A recognized authority error has a fixed matching message. Raw
+				// peer messages are malformed (covered by the qualified-peer suite).
+				_ = json.NewEncoder(conn).Encode(RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID, Error: &RPCError{Code: -32000, Message: (authority.Error{Code: code}).Error(), DiagnosticCode: string(code)}})
 			}()
 			t.Cleanup(func() {
 				cancel()

@@ -76,6 +76,11 @@ func (r ReadRequest) Validate() error {
 	default:
 		return Error{Unsupported}
 	}
+	if r.Cursor != "" {
+		if _, err := DecodeReadPageCursor(r.Cursor, r); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

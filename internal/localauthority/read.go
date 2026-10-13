@@ -47,14 +47,7 @@ func scanView(row scanner, project authority.UUID) (authority.EntityView, error)
 	return v, nil
 }
 
-type pageCursor struct {
-	Project   authority.UUID       `json:"project"`
-	Kind      authority.EntityKind `json:"kind"`
-	Operation string               `json:"operation"`
-	Entity    authority.UUID       `json:"entity"`
-	Snapshot  int64                `json:"snapshot"`
-	Last      int64                `json:"last"`
-}
+type pageCursor = authority.ReadPageCursor
 
 func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.ReadResult, error) {
 	zero := authority.ReadResult{}
@@ -130,8 +123,9 @@ func (s *Store) Read(ctx context.Context, r authority.ReadRequest) (authority.Re
 	}
 	c := pageCursor{Project: r.ProjectID, Kind: r.Kind, Operation: r.Operation, Entity: r.EntityID, Snapshot: current}
 	if r.Cursor != "" {
-		data, err := base64.RawURLEncoding.DecodeString(r.Cursor)
-		if err != nil || authority.DecodeJSON(data, &c) != nil || c.Project != r.ProjectID || c.Kind != r.Kind || c.Operation != r.Operation || c.Entity != r.EntityID || c.Snapshot < 0 || c.Snapshot > current || c.Last < 0 || c.Last > c.Snapshot {
+		var err error
+		c, err = authority.DecodeReadPageCursor(r.Cursor, r)
+		if err != nil || c.Snapshot > current {
 			return zero, authority.Error{Code: authority.InvalidContract}
 		}
 	}

@@ -5,6 +5,7 @@ package servicectl
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,11 @@ import (
 )
 
 func authorityLocalPeer(t *testing.T, respond func(RPCRequest) RPCResponse) *RPCClient {
+	t.Helper()
+	return authorityLocalRawPeer(t, func(r RPCRequest) any { return respond(r) })
+}
+
+func authorityLocalRawPeer(t *testing.T, respond func(RPCRequest) any) *RPCClient {
 	t.Helper()
 	path, err := os.MkdirTemp("", "lp-")
 	if err != nil {
@@ -82,6 +88,134 @@ func authorityLocalPeer(t *testing.T, respond func(RPCRequest) RPCResponse) *RPC
 		t.Fatal("local peer client constructor failed")
 	}
 	return client
+}
+
+func TestAuthorityLocalPeerExactErrorUnion(t *testing.T) {
+	for _, variant := range []string{"success-null-error", "error-null-result", "error-null", "no-arm", "observation", "numeric-code", "message", "missing-code", "missing-message", "missing-diagnostic", "null-code", "null-message", "null-diagnostic"} {
+		t.Run(variant, func(t *testing.T) {
+			client := authorityLocalRawPeer(t, func(r RPCRequest) any {
+				if r.Method == "AuthorityV1.Negotiate" {
+					return RPCResponse{JSONRPC: jsonrpcVersion, ID: r.ID, Result: peerCapabilities("Read")}
+				}
+				arm := map[string]any{"code": -32000, "message": (authority.Error{Code: authority.Conflict}).Error(), "diagnostic_code": string(authority.Conflict)}
+				response := map[string]any{"jsonrpc": jsonrpcVersion, "id": r.ID, "error": arm}
+				switch variant {
+				case "success-null-error":
+					response["result"], response["error"] = peerStatus(), nil
+				case "error-null-result":
+					response["result"] = nil
+				case "error-null":
+					response["error"] = nil
+				case "no-arm":
+					delete(response, "error")
+				case "observation":
+					arm["observation"] = map[string]any{"code": "synthetic-private", "reason": "synthetic-private-peer-body"}
+				case "numeric-code":
+					arm["code"] = -32001
+				case "message":
+					arm["message"] = "synthetic-private-peer-body"
+				case "missing-code":
+					delete(arm, "code")
+				case "missing-message":
+					delete(arm, "message")
+				case "missing-diagnostic":
+					delete(arm, "diagnostic_code")
+				case "null-code":
+					arm["code"] = nil
+				case "null-message":
+					arm["message"] = nil
+				case "null-diagnostic":
+					arm["diagnostic_code"] = nil
+				}
+				return response
+			})
+			requireAuthorityCode(t, client.Call(context.Background(), "AuthorityV1.Read", authority.ReadRequest{ProjectID: authorityExampleProject, Operation: "status"}, nil), authority.InvalidContract)
+		})
+	}
+}
+
+func TestAuthorityLocalPeerFixedErrorArmRemainsUsable(t *testing.T) {
+	for _, code := range []authority.Code{authority.Conflict, authority.PolicyDenied, authority.Capacity, authority.Unavailable} {
+		client := authorityLocalPeer(t, func(r RPCRequest) RPCResponse {
+			if r.Method == "AuthorityV1.Negotiate" {
+				return RPCResponse{JSONRPC: jsonrpcVersion, ID: r.ID, Result: peerCapabilities("Read")}
+			}
+			return authorityFixedResponse(r.ID, code)
+		})
+		requireAuthorityCode(t, client.Call(context.Background(), "AuthorityV1.Read", authority.ReadRequest{ProjectID: authorityExampleProject, Operation: "status"}, nil), code)
+	}
+}
+
+func TestAuthorityLocalPeerReadCursorBinding(t *testing.T) {
+	entityID := authority.UUID("33333333-3333-4333-8333-333333333333")
+	encode := func(fields map[string]any) string {
+		raw, _ := json.Marshal(fields)
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+	for _, operation := range []string{"list", "history"} {
+		for _, variant := range []string{"valid", "terminal", "malformed", "project", "kind", "operation", "entity", "snapshot", "backwards", "ahead", "missing", "null", "extra", "future-row", "duplicate-page", "empty"} {
+			t.Run(operation+"/"+variant, func(t *testing.T) {
+				fields := map[string]any{"project": authorityExampleProject, "kind": authority.Issue, "operation": operation, "entity": "", "snapshot": 5, "last": 1}
+				request := authority.ReadRequest{ProjectID: authorityExampleProject, Kind: authority.Issue, Operation: operation, Limit: 1}
+				if operation == "history" {
+					fields["entity"], request.EntityID = entityID, entityID
+				}
+				request.Cursor = encode(fields)
+				fields["last"] = 2
+				view := authority.EntityView{Citation: authority.Citation{ProjectID: authorityExampleProject, EntityID: entityID, Kind: authority.Issue, Revision: 2}, DisplayAlias: "ISSUE-2", ProjectSequence: 2, Payload: json.RawMessage(`{"title":"Synthetic","body":"","state":"open"}`)}
+				result := authority.ReadResult{ProjectID: authorityExampleProject, Entities: []authority.EntityView{view}}
+				switch variant {
+				case "project":
+					fields["project"] = "22222222-2222-4222-8222-222222222222"
+				case "kind":
+					fields["kind"] = authority.Label
+				case "operation":
+					fields["operation"] = "get"
+				case "entity":
+					fields["entity"] = "44444444-4444-4444-8444-444444444444"
+				case "snapshot":
+					fields["snapshot"] = 6
+				case "backwards":
+					fields["last"] = 1
+				case "ahead":
+					fields["last"] = 3
+				case "missing":
+					delete(fields, "last")
+				case "null":
+					fields["snapshot"] = nil
+				case "extra":
+					fields["private"] = "synthetic-private"
+				case "future-row":
+					result.Entities[0].ProjectSequence = 6
+				case "duplicate-page":
+					result.Entities[0].Citation.Revision, result.Entities[0].DisplayAlias, fields["last"] = 1, "ISSUE-1", 1
+				case "empty":
+					result.Entities = []authority.EntityView{}
+				}
+				result.NextCursor = encode(fields)
+				if variant == "malformed" {
+					result.NextCursor = "synthetic-cursor"
+				}
+				if variant == "terminal" {
+					result.NextCursor = ""
+				}
+				client := authorityLocalPeer(t, func(r RPCRequest) RPCResponse {
+					if r.Method == "AuthorityV1.Negotiate" {
+						return RPCResponse{JSONRPC: jsonrpcVersion, ID: r.ID, Result: peerCapabilities("Read")}
+					}
+					return RPCResponse{JSONRPC: jsonrpcVersion, ID: r.ID, Result: result}
+				})
+				err := client.Call(context.Background(), "AuthorityV1.Read", request, nil)
+				if variant == "valid" || variant == "terminal" {
+					if err != nil {
+						t.Fatal("valid bound page refused")
+					}
+					return
+				}
+				requireAuthorityCode(t, err, authority.InvalidContract)
+			})
+		}
+	}
 }
 
 func peerCapabilities(method string) authority.Negotiation {
