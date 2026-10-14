@@ -457,6 +457,54 @@ Jobs, restricted real embeddings and native launch/policy qualification remain
 L4 work. Public CLI/MCP and Admin rollout remain L5/L6; the ordinary daemon stays
 contracts-only until its runtime/workflow gates are met.
 
+### Restricted pre-provisioned embedding transport foundation
+
+The separate `internal/localauthority/embedding` package has a pure trusted
+constructor and a bounded real HTTP adapter, not coordinator enrollment or a
+completed semantic index. Strict deny does not construct it. Its only routes
+are inventory `GET /api/tags` and embeddings `POST /api/embed` on one prepared
+literal HTTP loopback address and explicit port. Hostnames, redirects, proxies,
+cookies, compression, credentials and provider setup are unavailable. Fresh
+HTTP/1 connections disable both connection reuse and its transparent retries.
+Reads are gated until the first registered plaintext request write; closing an
+unregistered connection wakes its reader without consuming unsolicited bytes.
+This prevents the standard transport's initial idle-response path from logging
+raw peer bytes. Every request closes its connection. Ambient caller HTTP trace
+callbacks are excluded while deadline/cancellation still propagate; logging is
+not disabled or redirected globally.
+
+Preparation binds an explicit tagged local model, inventory digest, dimensions
+and `trusted_fixed_local_model` evidence. The operator must keep the already
+running, local-only/cloud-disabled model immutable for the owner's lifetime.
+Pre/post inventory checks qualify name, GGUF format and digest; embedding replies
+must match model/cardinality/dimensions and contain finite nonzero vectors.
+This is consistency under a trusted provisioning precondition, not weight
+attestation or certification of the provider's own egress. Model changes require
+new preparation. No product read installs, starts, downloads or configures it.
+
+One nonblocking two-slot admission and one ten-second or earlier caller deadline
+cover the complete inventory/embed/inventory call. Shutdown seals admission,
+cancels and joins admitted calls without stopping the external provider. Inputs
+are length-checked before scanning or adding the fixed query instruction.
+Admission is nonblocking; a timed-out Close retains its already-sealed owned
+join, never reopens admission or releases active lifetime prematurely. Inputs
+are at most eight nonempty 4096-byte UTF-8 values, including the fixed query
+instruction; encoded requests are at most 64 KiB and responses 512 KiB. Initial
+headers have a 4 KiB ceiling and the HTTP/1 reader bounds trailer parsing to
+another 4 KiB. Informational responses and all declared/undeclared trailers
+are refused; ordinary trailer-free chunked JSON remains supported. Inventory is
+bounded to 128 unique models. Vector arrays are decoded with cardinality and
+dimension bounds before allocation growth, then normalized. Errors carry only
+finite codes, never source text, routes, parser errors or provider bodies.
+Documented optional response timing/count fields may be absent; present values
+retain closed integer/null/duplicate checks and nonnegative signed-64-bit bounds.
+
+Smoke uses a constant public probe only. Preparation and observations do no
+provider I/O. Synthetic offline fixtures qualify the transport, not production
+model quality, native process isolation, durable vector bundles, semantic jobs,
+hybrid retrieval or readiness. Those remain mandatory #183 work, followed by
+CLI/MCP #184, Admin #185 and integrated backup/recovery acceptance #186.
+
 ### Disposable content-identity catalog foundation
 
 The L4 private projection owner consumes an already prepared coordinator writer;
