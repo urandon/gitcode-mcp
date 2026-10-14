@@ -62,7 +62,7 @@ Only issues carry labels/milestone. Links contain a typed kind and stable ID in
 this project; unresolved links are not silently converted to remote URLs.
 Deletion retains a tombstone and Git history, not an erasure guarantee.
 
-Unknown/duplicate fields, aliases, anchors, unsupported schemas, invalid IDs,
+Unknown/duplicate fields, aliases, anchors, YAML merges, unsupported schemas, invalid IDs,
 identity/path mismatches, binary/LFS/symlink/submodule entity files and malformed
 metadata are rejected. Titles are at most 512 UTF-8 bytes, labels at most 32
 unique values of 128 bytes, milestone at most 128 bytes, links at most 64.
@@ -70,7 +70,8 @@ unique values of 128 bytes, milestone at most 128 bytes, links at most 64.
 Receipts contain only `schema`, `project_id`, `key_hash`, `intent_hash`,
 `operation`, typed `result`, and `result_blob`. Hashes are 64 lowercase hex
 characters; the result blob is a full Git object ID. Operation must match the
-result kind. Unknown/duplicate keys and content fields are rejected. A receipt
+result kind. JSON key names are exact and case-sensitive, including nested
+result fields. Unknown/duplicate keys and content fields are rejected. A receipt
 does not contain its own producing commit ID: Git history supplies that locator.
 Publication/replay is the next adapter child, not implemented by the reader.
 
@@ -88,7 +89,10 @@ tree output 4 MiB, tree entries 10,000, one list at most 128 entities and 8 MiB
 source bytes, history at most 256 first-parent commits. Public read operations
 have a ten-second ceiling in addition to caller cancellation. History returns
 the commit introducing each distinct entity blob on the service's linear
-history. A prefix too short to prove complete history returns
+history. Historical project identity, file mode and entity frontmatter must
+validate before a citation is returned. History also has an 8 MiB cumulative
+source-byte budget; already validated blobs are reused within the one request.
+A prefix too short to prove complete history returns
 `history_unavailable`, not a complete or absent result. Limits return typed
 errors with fixed fields, not private input, Git stderr or filesystem paths.
 

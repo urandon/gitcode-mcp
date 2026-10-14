@@ -226,7 +226,7 @@ func decodeYAML(data []byte, into any) error {
 			keys := map[string]bool{}
 			for i := 0; i < len(n.Content); i += 2 {
 				key := n.Content[i]
-				if key.Kind != yaml.ScalarNode || keys[key.Value] {
+				if key.Kind != yaml.ScalarNode || key.Tag == "!!merge" || key.Value == "<<" || keys[key.Value] {
 					return false
 				}
 				keys[key.Value] = true
@@ -286,6 +286,25 @@ func oidValid(s string) bool { return hashValid(s, 40) || hashValid(s, 64) }
 
 func decodeReceipt(data []byte, project, key string) (Receipt, error) {
 	var r Receipt
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil || raw == nil {
+		return r, fail("invalid_schema", "receipt")
+	}
+	allowed := map[string]bool{"schema": true, "project_id": true, "key_hash": true, "intent_hash": true, "operation": true, "result": true, "result_blob": true}
+	for key := range raw {
+		if !allowed[key] {
+			return r, fail("invalid_schema", "receipt")
+		}
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(raw["result"], &result); err != nil || result == nil {
+		return r, fail("invalid_schema", "receipt_result")
+	}
+	for key := range result {
+		if key != "kind" && key != "id" {
+			return r, fail("invalid_schema", "receipt_result")
+		}
+	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&r); err != nil {

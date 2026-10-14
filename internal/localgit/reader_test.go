@@ -260,6 +260,12 @@ func TestContentFreeReceiptAndMetadataValidation(t *testing.T) {
 	requireCode(t, err, "invalid_schema")
 	_, err = decodeReceipt([]byte(strings.TrimSuffix(string(data), "}")+`,"schema":1}`), "fixture-project", key)
 	requireCode(t, err, "invalid_schema")
+	_, err = decodeReceipt([]byte(strings.Replace(string(data), `"schema":1`, `"schema":9,"Schema":1`, 1)), "fixture-project", key)
+	requireCode(t, err, "invalid_schema")
+	_, err = decodeReceipt([]byte(strings.Replace(string(data), `"kind":"issue"`, `"kind":"wiki","Kind":"issue"`, 1)), "fixture-project", key)
+	requireCode(t, err, "invalid_schema")
+	_, err = decodeReceipt([]byte(strings.Replace(string(data), `"project_id"`, `"Project_ID"`, 1)), "fixture-project", key)
+	requireCode(t, err, "invalid_schema")
 	for _, m := range []Metadata{{Schema: 1, ID: "ISSUE-1", Kind: Issue, Title: "x", State: "active"}, {Schema: 1, ID: "COMMENT-1", Kind: Comment, Title: "x", State: "active"}, {Schema: 1, ID: "DOC-1", Kind: Wiki, Title: "x", State: "active", Labels: []string{"x"}}} {
 		requireCode(t, validateMetadata(m), "invalid_schema")
 	}
@@ -267,6 +273,65 @@ func TestContentFreeReceiptAndMetadataValidation(t *testing.T) {
 		_, err := idNumber(Issue, id)
 		requireCode(t, err, "invalid_argument")
 	}
+}
+
+func TestYAMLMergeIsNotPartOfProjectSchema(t *testing.T) {
+	data := []byte("---\nschema: 1\nid: ISSUE-1\nkind: issue\nstate: open\n<<: {title: injected}\n---\nBody.\n")
+	_, err := decodeEntity(data, MaxMetadataBytes)
+	requireCode(t, err, "invalid_schema")
+	var project Project
+	err = decodeYAML([]byte("schema: 1\nproject_id: fixture-project\nnext_issue: 3\nnext_comment: 2\nnext_document: 2\n<<: {project_id: overwritten}\n"), &project)
+	requireCode(t, err, "invalid_schema")
+}
+
+func TestHistoryRejectsHistoricalForeignIdentity(t *testing.T) {
+	for _, field := range []string{"entity", "project", "counter"} {
+		t.Run(field, func(t *testing.T) {
+			dir := newFixture(t)
+			old := fixtureFiles()
+			if field == "entity" {
+				old["issues/ISSUE-1/issue.md"] = strings.Replace(old["issues/ISSUE-1/issue.md"], "id: ISSUE-1", "id: ISSUE-2", 1)
+			} else if field == "project" {
+				old[".harness/project.yaml"] = strings.Replace(old[".harness/project.yaml"], "fixture-project", "foreign-project", 1)
+			} else {
+				old[".harness/project.yaml"] = strings.Replace(old[".harness/project.yaml"], "next_issue: 3", "next_issue: 1", 1)
+			}
+			first := fixtureCommit(t, dir, old, "")
+			fixtureCommit(t, dir, fixtureFiles(), first)
+			snap := pinFixture(t, openFixture(t, dir, Limits{}))
+			_, err := snap.History(context.Background(), Issue, "ISSUE-1", 2)
+			requireCode(t, err, "invalid_schema")
+		})
+	}
+}
+
+func TestHistoryRepeatedBlobBudgetAndHistoricalModes(t *testing.T) {
+	dir := newFixture(t)
+	files := fixtureFiles()
+	first := fixtureCommit(t, dir, files, "")
+	second := fixtureCommit(t, dir, files, first)
+	// A repeated blob is validated once, not charged once per unrelated commit.
+	budget := len(files["issues/ISSUE-1/issue.md"]) + len(files[".harness/project.yaml"])
+	snap := pinFixture(t, openFixture(t, dir, Limits{ReadBytes: budget}))
+	history, err := snap.History(context.Background(), Issue, "ISSUE-1", 2)
+	if err != nil || len(history) != 1 || history[0].Commit != first {
+		t.Fatalf("repeated blob history failed: %v", err)
+	}
+	files["issues/ISSUE-1/issue.md"] += "Changed.\n"
+	fixtureCommit(t, dir, files, second)
+	_, err = pinFixture(t, openFixture(t, dir, Limits{ReadBytes: budget})).History(context.Background(), Issue, "ISSUE-1", 3)
+	requireCode(t, err, "history_unavailable")
+	// Mode can change without changing the blob ID, so cached validation cannot
+	// replace per-commit mode checks.
+	projectTree := fixtureGit(t, dir, "", "ls-tree", first+":.harness")
+	unsafeTree := fixtureGit(t, dir, strings.ReplaceAll(projectTree, "100644 blob", "120000 blob")+"\n", "mktree")
+	oldTree := fixtureGit(t, dir, "", "rev-parse", first+":.harness")
+	root := fixtureGit(t, dir, "", "ls-tree", first)
+	rootOID := fixtureGit(t, dir, strings.Replace(root, oldTree, unsafeTree, 1)+"\n", "mktree")
+	unsafe := fixtureGit(t, dir, "Unsafe fixture mode\n", "commit-tree", rootOID)
+	fixtureCommit(t, dir, fixtureFiles(), unsafe)
+	_, err = pinFixture(t, openFixture(t, dir, Limits{})).History(context.Background(), Issue, "ISSUE-1", 2)
+	requireCode(t, err, "invalid_schema")
 }
 
 func TestRestrictedConfigReplacementRefsAndMissingObjects(t *testing.T) {

@@ -116,6 +116,9 @@ func (s *Store) tree(ctx context.Context, commit, path string) (map[string]repos
 			size = -1
 		}
 		e := repositorydocs.TreeEntry{Path: string(p), Mode: fields[0], Type: fields[1], OID: fields[2], Size: size}
+		if _, exists := entries[e.Path]; exists {
+			return nil, fail("invalid_schema", "duplicate_path")
+		}
 		entries[e.Path] = e
 	}
 	return entries, nil
@@ -253,15 +256,107 @@ func (s *Snapshot) History(ctx context.Context, kind Kind, id string, maxCommits
 	path := s.entities[id]
 	result := []Citation{}
 	var pending *Citation
+	projects := map[string]Project{}
+	validated := map[string]bool{s.entries[path].OID: true} // Get above checked the pinned entity.
+	readBytes := s.entries[path].Size
+	charge := func(e repositorydocs.TreeEntry, max int) error {
+		if e.Mode != "100644" || e.Type != "blob" || e.Size < 0 {
+			return fail("invalid_schema", "file_mode")
+		}
+		if e.Size > int64(max) {
+			return fail("limit_exceeded", "file_bytes")
+		}
+		readBytes += e.Size
+		if readBytes > int64(s.store.limits.ReadBytes) {
+			return fail("history_unavailable", "read_bytes")
+		}
+		return nil
+	}
 	for _, commit := range commits {
 		if !oidValid(commit) {
 			return nil, fail("invalid_schema", "history")
+		}
+		projectEntries, err := s.store.tree(ctx, commit, ".harness/project.yaml")
+		if err != nil {
+			return nil, err
+		}
+		pe, exists := projectEntries[".harness/project.yaml"]
+		if !exists {
+			return nil, fail("history_unavailable", "project")
+		}
+		if pe.Mode != "100644" || pe.Type != "blob" || pe.Size < 0 {
+			return nil, fail("invalid_schema", "file_mode")
+		}
+		p, known := projects[pe.OID]
+		if !known {
+			if err := charge(pe, s.store.limits.MetadataBytes); err != nil {
+				return nil, err
+			}
+			hs := &Snapshot{store: s.store, entries: projectEntries}
+			data, _, err := hs.file(ctx, ".harness/project.yaml", s.store.limits.MetadataBytes)
+			if err != nil {
+				return nil, err
+			}
+			if err := decodeYAML(data, &p); err != nil {
+				return nil, err
+			}
+			if err := validateProject(p); err != nil {
+				return nil, err
+			}
+			projects[pe.OID] = p
+		}
+		if p.ID != s.project.ID {
+			return nil, fail("invalid_schema", "project_identity")
 		}
 		entries, err := s.store.tree(ctx, commit, path)
 		if err != nil {
 			return nil, err
 		}
 		entry, ok := entries[path]
+		if !ok && len(entries) != 0 {
+			return nil, fail("invalid_schema", "entity_path")
+		}
+		if ok {
+			if entry.Mode != "100644" || entry.Type != "blob" || entry.Size < 0 {
+				return nil, fail("invalid_schema", "file_mode")
+			}
+			n, _ := idNumber(kind, id)
+			next := map[Kind]int64{Issue: p.NextIssue, Comment: p.NextComment, Wiki: p.NextDocument}[kind]
+			if n >= next {
+				return nil, fail("invalid_schema", "counters")
+			}
+			if kind == Comment {
+				_, parent, _ := parseEntityPath(path)
+				parentPath, _ := entityPath(Issue, parent, "")
+				parents, err := s.store.tree(ctx, commit, parentPath)
+				if err != nil {
+					return nil, err
+				}
+				parentEntry, exists := parents[parentPath]
+				if !exists || parentEntry.Mode != "100644" || parentEntry.Type != "blob" {
+					return nil, fail("invalid_schema", "parent_id")
+				}
+			}
+			if !validated[entry.OID] {
+				if err := charge(entry, s.store.limits.FileBytes); err != nil {
+					return nil, err
+				}
+				hs := &Snapshot{store: s.store, entries: entries}
+				data, _, err := hs.file(ctx, path, s.store.limits.FileBytes)
+				if err != nil {
+					return nil, err
+				}
+				e, err := decodeEntity(data, s.store.limits.MetadataBytes)
+				if err != nil {
+					return nil, err
+				}
+				want, err := entityPath(e.Metadata.Kind, e.Metadata.ID, e.Metadata.ParentID)
+				if err != nil || want != path || e.Metadata.Kind != kind || e.Metadata.ID != id {
+					return nil, fail("invalid_schema", "identity")
+				}
+				validated[entry.OID] = true
+			}
+		}
 		if pending != nil && (!ok || pending.Blob != entry.OID) {
 			result = append(result, *pending)
 			pending = nil
