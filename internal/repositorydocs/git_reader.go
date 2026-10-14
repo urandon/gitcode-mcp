@@ -136,6 +136,7 @@ func (e *IndexSnapshotStaleError) Unwrap() error { return ErrIndexSnapshotStale 
 func (e *IndexSnapshotStaleError) DiagnosticCode() string { return "repository_docs_snapshot_stale" }
 
 type Repository struct {
+	pinned       *pinnedCorpus
 	root         string
 	commonDir    string
 	GitStoreRef  string `json:"git_store_ref"`
@@ -162,7 +163,7 @@ func (r *Repository) unavailableGitObjectError(ctx context.Context, object, reas
 }
 
 func (r *Repository) gitObjectAvailability(ctx context.Context, revisionObject bool) GitObjectAvailability {
-	if r == nil || strings.TrimSpace(r.root) == "" {
+	if r == nil || r.pinned != nil || strings.TrimSpace(r.root) == "" {
 		return GitObjectUnavailable
 	}
 	isShallow := func() bool {
@@ -394,6 +395,9 @@ func (r *Repository) ResolveRevision(ctx context.Context, revision string) (stri
 	if r == nil {
 		return "", fmt.Errorf("repository docs: Git repository is required")
 	}
+	if r.pinned != nil {
+		return r.pinned.resolve(ctx, revision)
+	}
 	if strings.TrimSpace(revision) == "" {
 		revision = "HEAD"
 	}
@@ -423,6 +427,9 @@ func (r *Repository) ListTree(ctx context.Context, commitOID string) ([]TreeEntr
 // WalkTree visits the committed tree in Git's deterministic output order
 // without buffering the complete ls-tree response in memory.
 func (r *Repository) WalkTree(ctx context.Context, commitOID string, visit func(TreeEntry) error) error {
+	if r.pinned != nil {
+		return r.pinned.walk(ctx, commitOID, visit)
+	}
 	if !validOID(commitOID, r.ObjectFormat) {
 		return invalidGitObjectError(commitOID, "invalid commit object id")
 	}
@@ -514,6 +521,16 @@ func parseTreeRecord(record []byte) (TreeEntry, error) {
 }
 
 func (r *Repository) OpenBlob(ctx context.Context, oid string) (io.ReadCloser, error) {
+	if r.pinned != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		data, ok := r.pinned.blobs[oid]
+		if !ok {
+			return nil, ErrGitObjectUnavailable
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
 	if !validOID(oid, r.ObjectFormat) {
 		return nil, invalidGitObjectError(oid, "invalid blob object id")
 	}
@@ -574,6 +591,9 @@ func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func (r *Repository) ReadFileAtCommit(ctx context.Context, commitOID, repoPath string, maxBytes int64) ([]byte, bool, error) {
+	if r.pinned != nil {
+		return r.pinned.file(ctx, commitOID, repoPath, maxBytes)
+	}
 	if !validOID(commitOID, r.ObjectFormat) {
 		return nil, false, invalidGitObjectError(commitOID, "invalid commit object id")
 	}
@@ -627,6 +647,9 @@ func (r *Repository) TrackedChangesAt(ctx context.Context, commitOID string, max
 // relevant to the caller's corpus. Git still computes one local name-status
 // diff, but an unrelated large tracked file cannot fail documentation work.
 func (r *Repository) TrackedChangesAtFiltered(ctx context.Context, commitOID string, maxBytes int64, include func(string) bool) ([]WorktreeChange, error) {
+	if r.pinned != nil {
+		return nil, ErrWorktreeUnavailable
+	}
 	if !validOID(commitOID, r.ObjectFormat) {
 		return nil, invalidGitObjectError(commitOID, "invalid overlay base commit")
 	}
@@ -733,6 +756,9 @@ func stateForWorktreeChange(states map[string]byte, change WorktreeChange) byte 
 }
 
 func (r *Repository) ReadTrackedWorktreeFile(ctx context.Context, repoPath string, maxBytes int64) ([]byte, error) {
+	if r.pinned != nil {
+		return nil, ErrWorktreeUnavailable
+	}
 	if filepath.IsAbs(repoPath) || filepath.VolumeName(repoPath) != "" {
 		return nil, &WorktreeError{Reason: "unsafe repository-relative path"}
 	}
@@ -760,6 +786,12 @@ func ResolvePolicy(ctx context.Context, repo *Repository, revision string, inclu
 	commitOID, err := repo.ResolveRevision(ctx, revision)
 	if err != nil {
 		return "", PolicyResolution{}, err
+	}
+	if repo.pinned != nil {
+		if includeWorktree {
+			return "", PolicyResolution{}, ErrWorktreeUnavailable
+		}
+		return commitOID, pinnedProjectPolicy(), nil
 	}
 	data, found, err := repo.ReadFileAtCommit(ctx, commitOID, PolicyConfigPath, DefaultMaxDocumentBytes)
 	if err != nil {

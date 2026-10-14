@@ -26,7 +26,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		}
 	}
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "project init|register|status|get|list|history|mutate --project SELECTOR [--format json]\nSetup: --project-id ID --storage-ref REF --confirm; global YAML only. Mutate: --operation OP --write-mode local --idempotency-key KEY --expected-head OID or --expected-revision OID. No implicit daemon start.")
+		fmt.Fprintln(stdout, "project init|register|status|get|list|history|mutate|search|index --project SELECTOR [--format json]\nSetup: --project-id ID --storage-ref REF --confirm; global YAML only. Mutate: --operation OP --write-mode local --idempotency-key KEY --expected-head OID or --expected-revision OID. Search: --query TEXT [--mode fulltext|hybrid]; index: --write-mode local [--max-chunks 64]. No implicit daemon start.")
 		return 0
 	}
 	verb := args[0]
@@ -35,6 +35,8 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	var q service.LocalProjectQuery
 	var mut localgit.Mutation
 	var setup service.LocalProjectSetupRequest
+	var search service.LocalProjectSearchRequest
+	var index service.LocalProjectIndexRequest
 	var format, kind, labels, links, bodyFile string
 	fs.StringVar(&q.Project, "project", "", "opaque project selector")
 	fs.StringVar(&format, "format", "json", "json or text")
@@ -48,6 +50,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	fs.StringVar(&setup.Ref, "ref", "refs/heads/main", "local branch")
 	fs.BoolVar(&setup.ReadOnly, "read-only", false, "read-only registration")
 	fs.BoolVar(&setup.Confirm, "confirm", false, "confirm setup and strict-local configuration")
+	fs.StringVar(&setup.RAGProfile, "rag-profile", "disabled", "optional existing pre-provisioned embedding profile; never setup/download")
 	fs.StringVar(&mut.Operation, "operation", "", "fixed typed mutation")
 	fs.StringVar(&mut.ParentID, "parent-id", "", "parent issue for new comment")
 	fs.StringVar(&mut.Title, "title", "", "entity title")
@@ -61,6 +64,9 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	fs.StringVar(&mut.ExpectedRevision, "expected-revision", "", "entity blob precondition")
 	fs.StringVar(&mut.IdempotencyKey, "idempotency-key", "", "caller retry key")
 	fs.StringVar(&mut.WriteMode, "write-mode", "", "requires local")
+	fs.StringVar(&search.Query, "query", "", "bounded UTF-8 search query")
+	fs.StringVar(&search.Mode, "mode", "fulltext", "fulltext or explicit hybrid")
+	fs.IntVar(&index.MaxChunks, "max-chunks", 64, "maximum new chunks to embed, at most128")
 	parseErr := fs.Parse(args[1:])
 	help := errors.Is(parseErr, flag.ErrHelp)
 	if parseErr != nil && !help || fs.NArg() != 0 || (format != "json" && format != "text") {
@@ -70,7 +76,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	var fields string
 	switch verb {
 	case "init", "register":
-		fields = "project-id storage-ref ref read-only confirm"
+		fields = "project-id storage-ref ref read-only confirm rag-profile"
 	case "status":
 	case "get":
 		fields = "kind id"
@@ -80,6 +86,10 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		fields = "kind id max-commits"
 	case "mutate":
 		fields = "operation id parent-id title body body-file state labels milestone links expected-head expected-revision idempotency-key write-mode"
+	case "search":
+		fields = "query mode limit"
+	case "index":
+		fields = "max-chunks write-mode"
 	default:
 		return writeError(stderr, format, invalid())
 	}
@@ -206,6 +216,21 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		method += "Mutate"
 		params = service.LocalProjectMutation{Project: q.Project, Mutation: mut}
 		result = &localgit.MutationResult{}
+	case "search":
+		method += "Search"
+		search.Project = q.Project
+		search.Limit = q.Limit
+		if !seen["limit"] {
+			search.Limit = 10
+		}
+		params = search
+		result = &service.LocalProjectSearchResult{}
+	case "index":
+		method += "Index"
+		index.Project = q.Project
+		index.WriteMode = mut.WriteMode
+		params = index
+		result = &service.LocalProjectIndexResult{}
 	}
 	if err = client.Call(ctx, method, params, result); err != nil {
 		return writeError(stderr, format, err)

@@ -26,9 +26,9 @@ func TestLocalProjectDiscoveryPolicyAndClosedArgumentsBeforeIPC(t *testing.T) {
 		if json.Unmarshal(resp.Result, &list) != nil {
 			t.Fatal("invalid local tool list")
 		}
-		want := 4
+		want := 5
 		if access == ToolAccessWrite {
-			want = 5
+			want = 7
 		}
 		if len(list.Tools) != want {
 			t.Fatal("local discovery exposed remote or hid required tools")
@@ -43,13 +43,16 @@ func TestLocalProjectDiscoveryPolicyAndClosedArgumentsBeforeIPC(t *testing.T) {
 				t.Fatal("nonlocal or open schema in local discovery")
 			}
 		}
-		for _, name := range []string{"local_project_status", "local_project_get", "local_project_list", "local_project_history"} {
+		for _, name := range []string{"local_project_status", "local_project_get", "local_project_list", "local_project_history", "local_project_search"} {
 			if !names[name] {
 				t.Fatal("required local read tool missing")
 			}
 		}
 		if names["local_project_mutate"] != (access == ToolAccessWrite) {
 			t.Fatal("local mutation discovery policy changed")
+		}
+		if names["local_project_index"] != (access == ToolAccessWrite) {
+			t.Fatal("local derived-index write policy changed")
 		}
 		for _, test := range []struct{ name, args, code string }{
 			{"local_project_get", `{"project":"lab","kind":"issue","id":"ISSUE-1","path":"private-coordinate"}`, "local_git_invalid_argument"},
@@ -61,8 +64,13 @@ func TestLocalProjectDiscoveryPolicyAndClosedArgumentsBeforeIPC(t *testing.T) {
 			{"local_project_mutate", `{"project":"lab","mutation":{"operation":"create_issue","write_mode":"live","idempotency_key":"key"}}`, "local_git_invalid_argument"},
 			{"local_project_mutate", `{"project":"lab","mutation":{"operation":"create_issue","write_mode":"local","idempotency_key":"key","body":"` + string([]byte{0xff}) + `"}}`, "local_git_invalid_argument"},
 			{"create_issue", `{}`, "local_git_unsupported_capability"},
+			{"local_project_search", `{"project":"lab","query":"x","mode":"semantic"}`, "local_git_invalid_argument"},
+			{"local_project_search", `{"project":"lab","query":"x","limit":33}`, "local_git_invalid_argument"},
+			{"local_project_search", `{"project":"lab","query":"x","endpoint":"private-coordinate"}`, "local_git_invalid_argument"},
+			{"local_project_index", `{"project":"lab","write_mode":"live"}`, "local_git_invalid_argument"},
+			{"local_project_index", `{"project":"lab","write_mode":"local","max_chunks":129}`, "local_git_invalid_argument"},
 		} {
-			if access == ToolAccessRead && test.name == "local_project_mutate" {
+			if access == ToolAccessRead && (test.name == "local_project_mutate" || test.name == "local_project_index") {
 				test.code = "tool_disabled_by_policy"
 			}
 			resp := mcpObservationCall(t, h, test.name, test.args)

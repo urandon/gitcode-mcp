@@ -20,12 +20,14 @@ type localProjectStore struct {
 type localProjectBinding struct {
 	runtime  *localProjectStore
 	readOnly bool
+	profile  string
 }
 
 // LocalProjects is independent of the remote Service constructor, cache,
 // credential pipeline and provider graph. Git is its only durable authority.
 type LocalProjects struct {
-	bindings map[string]localProjectBinding
+	bindings     map[string]localProjectBinding
+	searchConfig config.Config // selected once; accessed only by explicit search/index.
 }
 
 func localProjectError(code, field string) error { return &localgit.Error{Code: code, Field: field} }
@@ -77,7 +79,7 @@ func NewLocalProjects(ctx context.Context, cfg map[string]config.LocalProjectCon
 			runtime = &localProjectStore{store: store, projectID: p.ProjectID, ref: p.Ref}
 			stores[canonical] = runtime
 		}
-		host.bindings[selector] = localProjectBinding{runtime: runtime, readOnly: p.ReadOnly}
+		host.bindings[selector] = localProjectBinding{runtime: runtime, readOnly: p.ReadOnly, profile: p.RAGProfile}
 	}
 	return host, nil
 }

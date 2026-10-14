@@ -15,6 +15,13 @@ see [Local project setup and tool contracts](local-git-project-format.md#climcp-
 No cache, credentials or embedding provider is bootstrapped by that profile.
 This is the epic's first usable checkpoint, not its full feature rollout.
 
+Local project search defaults to cache/provider-free `fulltext` through
+`local_project_search`. Explicit `hybrid` and write-policy-gated
+`local_project_index` use only a registered pre-provisioned local-boundary
+profile and the existing disposable repository-document index; they never set
+up models or contact GitCode. See the linked G5 contract for bounds, exact
+entity citations and requested/effective-mode fallback.
+
 ## Stdio mode
 
 ### Starting the server

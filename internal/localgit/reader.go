@@ -167,6 +167,10 @@ func (s *Snapshot) Get(ctx context.Context, kind Kind, id string) (Entity, error
 	if err != nil {
 		return Entity{}, err
 	}
+	return s.entityFromFile(path, kind, id, data, entry)
+}
+
+func (s *Snapshot) entityFromFile(path string, kind Kind, id string, data []byte, entry repositorydocs.TreeEntry) (Entity, error) {
 	e, err := decodeEntity(data, s.store.limits.MetadataBytes)
 	if err != nil {
 		return Entity{}, err

@@ -1,8 +1,8 @@
 # Local Git project format (schema 1)
 
 This is the isolated implementation of epic #200. The G4 CLI/MCP checkpoint
-below is usable on this branch; search/RAG, Admin and whole-feature rollout
-remain gated by the later children. Its child PRs integrate into
+and G5 search/index slice below are usable on this branch; Admin and whole-feature
+rollout remain gated by the later children. Its child PRs integrate into
 `codex/epic-200-git-backed-harness`; the whole cohort enters `main` together.
 Git owns all project content and history. No cache database is required by the
 adapter, and no source or chunk bytes are copied into an index by this package.
@@ -228,8 +228,8 @@ After a lost reply/restart, retrying the same key returns the Git receipt's
 original result even if the entity was subsequently edited.
 
 Reader, writer and private-service tests create real temporary Git stores
-without credentials or external network. Search/RAG, protected Admin and bundle
-restore remain separate required children of #200.
+without credentials or external network. G5 adds explicit search/index below;
+protected Admin and bundle restore remain required children of #200.
 
 ## CLI/MCP first usable checkpoint (G4)
 
@@ -323,8 +323,9 @@ is `read`. `write` discovery does not bypass local intent/revision/key checks.
 Storage setup is CLI-only; MCP never accepts paths, store refs or provider URLs.
 Stdio uses the ordinary MCP transport. Explicit HTTP/SSE uses the same local
 handler but must bind a loopback IP; that opt-in listener is not a zero-network
-deployment claim. Neither transport resolves credentials, constructs GitCode or
-embedding providers, initializes a cache or implicitly starts the daemon.
+deployment claim. Startup and the G4 operations resolve no credentials, construct
+no GitCode/embedding providers, initialize no cache and start no daemon. G5's
+explicit optional embedding operations below remain separate from that default.
 
 CLI defaults to structured JSON. Results carry entity metadata/body and exact
 commit/blob/Git-tree citations; writes also carry `replayed`. Missing cache data
@@ -338,3 +339,74 @@ project/configuration/service failures remain typed and never select GitCode.
 Current reads and returned historical citations remain Git-backed; direct
 checkout editing/import, history rewriting and standalone label/milestone CRUD
 are outside this checkpoint.
+
+## Local project search and derived indexing (G5)
+
+Both transports reuse the existing repository-document retriever, chunker,
+immutable revision sets, vectors and digest-verified hydration. The adapter
+passes one validated LocalGit snapshot in bounded request-local memory. Only
+active `issues/**` (including comments) and `wiki/**` entity files are eligible;
+tombstones, `.harness/**`, counters and receipts are excluded. Fixed internal
+corpus policy cannot be expanded by a client or by a source checkout config.
+Every hit has its project/kind/stable-ID/commit/blob/tree-path citation, bounded
+snippet, line range, raw-slice digest and score. The 8 MiB source/tree/file and
+ten-second request limits still apply; oversized corpora fail explicitly.
+
+```sh
+gitcode-mcp project search --project lab --query 'research evidence'
+gitcode-mcp project search --project lab --query 'research evidence' --mode hybrid
+gitcode-mcp project index --project lab --write-mode local --max-chunks 64
+```
+
+MCP exposes `local_project_search` (`project`, `query`, optional `mode`, `limit`)
+and `local_project_index` (`project`, `write_mode: local`, optional `max_chunks`).
+Search defaults to `fulltext`, maximum query 4096 UTF-8 bytes, default 10 hits,
+maximum 32. It requires neither cache nor provider. A hybrid query must be
+explicit and the registration must name an already provisioned embedding
+profile. Queries never install/download/start/probe setup, repair, initialize
+an index or contact GitCode. The query alone is embedded; document transfer
+happens only in the explicit index action.
+
+Strict local mode ignores repository-owned configuration from the process's
+working directory. Only trusted global settings/environment configure providers
+and cache selection; an unrelated checkout cannot retarget local project bytes.
+Restart the local daemon explicitly after changing machine configuration.
+
+CLI setup accepts `--rag-profile EXISTING_PROFILE` (default `disabled`) when
+creating/registering a new selector. An existing registration is never silently
+retargeted; change its trusted global YAML deliberately when selecting a profile.
+Only configured `local_process`/`local_network` boundaries are allowed; remote,
+unknown or absent boundaries fail closed before embedding. Provider requests
+have bounded deadlines and 4 MiB response bodies, do not follow redirects or
+environment proxy settings, and never invoke setup/model-management commands.
+
+Index is an explicit bounded foreground call through the same private IPC, not
+a new job protocol. It embeds at most `max_chunks` new chunks (default 64,
+maximum 128) and returns exact commit, revision-set ID, ready/partial state and
+embedded/reused/failed counts. Repeat a partial/interrupted call to reuse the
+existing engine's immutable metadata and vector-only checkpoints; no new project
+receipt or authority journal is created. Read-only registrations and read-only
+MCP policy reject index writes. No index action changes project Git content.
+
+The existing SQLite schema/engine is used in a separate disposable file named
+by appending `.local-project-index.db` to the selected filesystem cache path
+(SQLite URI and in-memory selections require a file-path handoff). This keeps
+internal metadata scope keys out of remote GitCode repository bindings; these
+keys have no owner, remote API endpoint or sync scopes. Only metadata, locators,
+digests and vectors are persisted, never Markdown or chunk text. The normal
+selected cache is not initialized by local project operations. Existing derived
+retention keeps eight committed sets per identity for 30 days with a 512 MiB
+vector ceiling; vector-only handoffs are bounded to seven days/512 MiB.
+
+Search reports `requested_mode`, `effective_mode`, `index_state`, `fallback`,
+coverage and hits. Missing/stale/partial/failed/unusable semantic state visibly
+falls back to fresh Git lexical results. Exact commit/policy/model namespace and
+content digests prevent an edit or tombstone from reusing a stale revision set;
+unchanged chunks can reuse vectors during explicit reindexing. Deleting derived
+state loses no project content: fulltext still works, hybrid reports fallback,
+and explicit index rebuilds it. Cache/schema failures and invalid derived
+citations cannot hide valid current lexical matches. Historical Git citations
+remain independent of derived-cache retention.
+
+Protected Admin search/effective-mode/index controls are the explicit #206
+cohort; complete feature rollout and backup/restore remain gated by #207.

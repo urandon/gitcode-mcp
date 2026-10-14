@@ -91,25 +91,28 @@ func (e SemanticProviderContractError) DiagnosticCode() string {
 }
 
 type SearchResult struct {
-	RepoID            string          `json:"repo_id"`
-	CorpusKind        string          `json:"corpus_kind"`
-	Query             string          `json:"query"`
-	RequestedRevision string          `json:"requested_revision"`
-	EffectiveRevision string          `json:"effective_revision"`
-	Mode              string          `json:"mode"`
-	RequestedMode     string          `json:"requested_mode"`
-	EffectiveMode     string          `json:"effective_mode"`
-	Authority         string          `json:"authority"`
-	OverlayDigest     string          `json:"overlay_digest,omitempty"`
-	RevisionSetID     string          `json:"revision_set_id,omitempty"`
-	PolicyHash        string          `json:"policy_hash"`
-	PolicySource      string          `json:"policy_source"`
-	NamespaceID       string          `json:"namespace_id,omitempty"`
-	Coverage          SearchCoverage  `json:"coverage"`
-	Hits              []SearchHit     `json:"hits"`
-	Warnings          []string        `json:"warnings,omitempty"`
-	WarningDetails    []SearchWarning `json:"warning_details,omitempty"`
-	Fallback          string          `json:"fallback,omitempty"`
+	// RequestedNamespaceID supports internal coverage classification. It is not
+	// public evidence of a selected/ready semantic namespace.
+	RequestedNamespaceID string          `json:"-"`
+	RepoID               string          `json:"repo_id"`
+	CorpusKind           string          `json:"corpus_kind"`
+	Query                string          `json:"query"`
+	RequestedRevision    string          `json:"requested_revision"`
+	EffectiveRevision    string          `json:"effective_revision"`
+	Mode                 string          `json:"mode"`
+	RequestedMode        string          `json:"requested_mode"`
+	EffectiveMode        string          `json:"effective_mode"`
+	Authority            string          `json:"authority"`
+	OverlayDigest        string          `json:"overlay_digest,omitempty"`
+	RevisionSetID        string          `json:"revision_set_id,omitempty"`
+	PolicyHash           string          `json:"policy_hash"`
+	PolicySource         string          `json:"policy_source"`
+	NamespaceID          string          `json:"namespace_id,omitempty"`
+	Coverage             SearchCoverage  `json:"coverage"`
+	Hits                 []SearchHit     `json:"hits"`
+	Warnings             []string        `json:"warnings,omitempty"`
+	WarningDetails       []SearchWarning `json:"warning_details,omitempty"`
+	Fallback             string          `json:"fallback,omitempty"`
 }
 
 func (r *SearchResult) addWarning(code, message string) {
@@ -132,7 +135,7 @@ func NewRetriever(store SearchStore, provider rag.EmbeddingProvider) *Retriever 
 }
 
 func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult, error) {
-	if r == nil || r.store == nil || req.Repository == nil || strings.TrimSpace(req.RepoID) == "" || strings.TrimSpace(req.Query) == "" {
+	if r == nil || req.Repository == nil || strings.TrimSpace(req.RepoID) == "" || strings.TrimSpace(req.Query) == "" {
 		return SearchResult{}, fmt.Errorf("repository docs: search requires repo id, Git repository, query, and cache")
 	}
 	if req.Mode == "" {
@@ -168,7 +171,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		result.Authority = "worktree_overlay"
 		result.OverlayDigest = overlayDigest
 	}
-	semanticAvailable := req.Mode == SearchModeHybrid && r.provider != nil
+	semanticAvailable := req.Mode == SearchModeHybrid && r.provider != nil && r.store != nil
 	expectedNamespaceID := ""
 	if semanticAvailable {
 		identity, identityErr := r.provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: chunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
@@ -179,6 +182,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			result.addWarning("embedding_provider_identity_unavailable", "embedding provider identity unavailable; returning verified lexical results")
 		} else {
 			expectedNamespaceID = cache.EmbeddingNamespaceID(identity)
+			result.RequestedNamespaceID = expectedNamespaceID
 		}
 	}
 	var selected cache.RepositoryDocRevisionSet

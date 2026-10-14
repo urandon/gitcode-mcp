@@ -97,7 +97,10 @@ func runLocalFixture(t *testing.T, m Manager) (*RPCClient, func()) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		var status service.LocalProjectsStatus
-		callCtx, callCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		// A ready response performs real bounded Git reads. Give that one
+		// request the remaining readiness budget rather than repeatedly killing
+		// legitimate work at an unrelated 100ms sub-deadline under test load.
+		callCtx, callCancel := context.WithDeadline(context.Background(), deadline)
 		err := client.Call(callCtx, "LocalProjects.Status", nil, &status)
 		callCancel()
 		if err == nil {

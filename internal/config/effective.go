@@ -356,7 +356,10 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 	if err := applyEnvOverrides(src, &eff); err != nil {
 		return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
 	}
-	if overrides.CachePath == "" {
+	// Local projects use machine-owned registrations and pre-provisioned
+	// providers. An unrelated checkout's tracked config must not retarget
+	// their content transfer or derived-cache location through cwd discovery.
+	if overrides.CachePath == "" && eff.Config.Service.Mode != ServiceModeLocal {
 		if err := applyRepoLocalCache(src, &eff); err != nil {
 			var local LocalProjectConfigError
 			if errors.As(err, &local) {
