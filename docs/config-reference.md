@@ -12,13 +12,6 @@ Configuration is loaded from five layers, in order of precedence:
 
 Legacy JSON config files are still recognized through `GITCODE_CONFIG`.
 
-Local-authoritative project intent is a separate contract, not an extra flag
-in this remote/cache configuration. Runtime loaders refuse `project`,
-`local_projects` or top-level `authority` selectors (including YAML merge
-sources) rather than silently falling back to GitCode defaults. See
-[Local authority contracts](local-authority-contracts.md) for the L1 schema and
-explicitly unavailable runtime/workflow rollout status.
-
 ## Default config location
 
 | Platform | Path |

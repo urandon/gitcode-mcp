@@ -13,8 +13,6 @@ import (
 	"sort"
 	"strings"
 
-	"gitcode-mcp/internal/authority"
-
 	"gopkg.in/yaml.v3"
 )
 
@@ -500,9 +498,6 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	}
 	if loc.Format == "json" || strings.HasSuffix(loc.Path, ".json") {
 		var cfg fileConfig
-		if err := rejectProjectJSON(data); err != nil {
-			return fileConfig{}, CredentialConfig{}, err
-		}
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s: %w", loc.Path, err)
 		}
@@ -547,14 +542,6 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return invalid()
 	}
-	scanBudget := 16384
-	project, scanErr := projectYAMLKeys(document.Content[0], 0, &scanBudget)
-	if scanErr != nil {
-		return invalid()
-	}
-	if project {
-		return fileConfig{}, CredentialConfig{}, authority.Error{Code: authority.InitializationRequired}
-	}
 	var decoded yamlFileConfig
 	budget := 16384
 	root, err := legacyYAMLScalars(document.Content[0], reflect.TypeOf(decoded), 0, &budget)
@@ -573,57 +560,6 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		cred = *cfg.Credential
 	}
 	return cfg, cred, nil
-}
-
-// Follow only YAML merge sources, never unrelated metadata. A reserved intent
-// key inherited through an anchor must not bypass the remote-mode boundary.
-func projectYAMLKeys(n *yaml.Node, depth int, budget *int) (bool, error) {
-	if n == nil {
-		return false, nil
-	}
-	(*budget)--
-	if depth > 64 || *budget < 0 {
-		return false, errors.New("configuration merge traversal limit")
-	}
-	if n.Kind == yaml.AliasNode {
-		return projectYAMLKeys(n.Alias, depth+1, budget)
-	}
-	if n.Kind != yaml.MappingNode {
-		return false, nil
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		key := n.Content[i]
-		for key.Kind == yaml.AliasNode {
-			(*budget)--
-			if *budget < 0 || key.Alias == nil {
-				return false, errors.New("configuration merge traversal limit")
-			}
-			key = key.Alias
-		}
-		switch strings.ToLower(key.Value) {
-		case "project", "local_projects", "authority":
-			return true, nil
-		}
-		if key.Tag == "!!merge" {
-			value := n.Content[i+1]
-			// Match legacyYAMLScalars: a merge sequence is syntax, not an
-			// extra visited node/level. Each source is inspected at depth+1.
-			if value.Kind == yaml.SequenceNode {
-				for _, child := range value.Content {
-					found, err := projectYAMLKeys(child, depth+1, budget)
-					if found || err != nil {
-						return found, err
-					}
-				}
-				continue
-			}
-			found, err := projectYAMLKeys(value, depth+1, budget)
-			if found || err != nil {
-				return found, err
-			}
-		}
-	}
-	return false, nil
 }
 
 // yamlStringList accepts standard block/flow sequences and the historical
