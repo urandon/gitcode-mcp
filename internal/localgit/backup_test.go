@@ -205,3 +205,57 @@ func TestBackupValidationCompleteHistoryAndReceiptContinuity(t *testing.T) {
 	_, err = s.validateBackup(context.Background(), pinFixture(t, s).Commit(), "fixture-project")
 	requireCode(t, err, "history_unavailable")
 }
+
+func TestBundleRejectsOperationResultMismatch(t *testing.T) {
+	for _, op := range []string{"create_issue", "update_issue", "delete_issue", "add_comment", "update_comment", "delete_comment", "create_wiki", "update_wiki", "delete_wiki"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			s := newWritable(t)
+			snap := pinFixture(t, s)
+			kind := operationKind(op)
+			id := map[Kind]string{Issue: "ISSUE-1", Comment: "COMMENT-1", Wiki: "DOC-1"}[kind]
+			e, err := snap.Get(ctx, kind, id)
+			if err != nil {
+				t.Fatal("fixture entity unavailable")
+			}
+			if !deleting(op) {
+				e.Metadata.State, e.Body = "deleted", ""
+			}
+			data, err := s.renderMutationEntity(e)
+			if err != nil {
+				t.Fatal("fixture entity invalid")
+			}
+			blob, err := s.writeBlob(ctx, data)
+			if err != nil {
+				t.Fatal("fixture blob unavailable")
+			}
+			r := Receipt{Schema: SchemaVersion, ProjectID: snap.project.ID, KeyHash: digest([]byte("mismatch")), IntentHash: digest([]byte("fixture intent")), Operation: op, Result: Reference{kind, id}, ResultBlob: blob}
+			raw, _ := json.Marshal(r)
+			files := map[string]string{}
+			for path := range snap.entries {
+				content, _, err := snap.file(ctx, path, MaxFileBytes)
+				if err != nil {
+					t.Fatal("fixture read unavailable")
+				}
+				files[path] = string(content)
+			}
+			files[e.Citation.Path] = string(data)
+			files[".harness/receipts/"+r.KeyHash+".json"] = string(raw)
+			head := fixtureCommit(t, s.dir, files, snap.commit)
+			bundle := filepath.Join(t.TempDir(), "invalid.bundle")
+			fixtureGit(t, s.dir, "", "bundle", "create", bundle, mainRef)
+			target := filepath.Join(t.TempDir(), "restore.git")
+			_, _, err = RestoreBundle(ctx, target, bundle, snap.project.ID, mainRef, head)
+			requireCode(t, err, "invalid_schema")
+			var typed *Error
+			if !errors.As(err, &typed) || typed.Field != "receipt_result" {
+				t.Fatal("operation/result mismatch did not retain typed error")
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatal("invalid unpublished import retained")
+			}
+			_, err = pinFixture(t, s).receiptResult(ctx, r.KeyHash, r)
+			requireCode(t, err, "invalid_schema")
+		})
+	}
+}

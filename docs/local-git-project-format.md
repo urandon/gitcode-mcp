@@ -75,6 +75,9 @@ characters; the result blob is a full Git object ID. Operation must match the
 result kind. JSON key names are exact and case-sensitive, including nested
 result fields. Unknown/duplicate keys and content fields are rejected. A receipt
 does not contain its own producing commit ID: Git history supplies that locator.
+At that commit, a delete result must be a tombstone with an empty body; other
+operations must return live entities. Create/add results must be absent in the
+immediate parent and consume exactly its next ID/counter, not claim an old ID.
 The mutation adapter publishes receipts with their entity and counters in one
 commit; the reader can inspect the same files without opening a database.
 
@@ -557,7 +560,9 @@ the branch/registering it. SHA-1 and SHA-256 object formats retain their exact
 commit identities. It verifies schema/project identity on every commit, fixed
 regular entity paths/metadata/parents, monotonic counters, retained entities and
 unchanged receipts, including each receipt's result blob at its introducing
-commit. Removed/changed receipts cannot become an unsafe same-key retry.
+commit, operation outcome and fresh creation allocation in the immediate parent.
+Removed/changed or internally inconsistent receipts cannot become an unsafe
+same-key retry.
 
 Bounds: 64 MiB input/export bundle, at most 40,256 advertised pack objects;
 existing 1 MiB entity, 16 KiB metadata/envelope, 4 MiB tree/10,000 entries,
