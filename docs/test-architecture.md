@@ -100,6 +100,13 @@ test host is not evidence for network, credential, or foreign-user isolation.
 
 ## Fixture Boundary
 
+Knowledge-status interruption controls cancel or expire a real caller context
+at actual initial-layout, settled-history and final-ref checkpoints. They require
+prompt traversal termination without a corruption verdict, publication barrier,
+source-sequence/ref change or loss of the original canonical receipt. Separate
+Git-damage, SQL-corruption, capacity and legacy-readiness controls retain their
+existing classifications; interruption is not evidence that damaged data healed.
+
 Fixtures are code inputs, not evidence archives. Before adding or changing a
 fixture, check that it is:
 

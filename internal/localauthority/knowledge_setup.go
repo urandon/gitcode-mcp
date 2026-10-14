@@ -176,6 +176,9 @@ func (s *Store) KnowledgeStatus(ctx context.Context, project authority.UUID) (Kn
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ctx.Err() != nil {
+		return zero, ctx.Err()
+	}
 	if s.closed {
 		return zero, Error{ReadOnly}
 	}
@@ -188,6 +191,9 @@ func (s *Store) KnowledgeStatus(ctx context.Context, project authority.UUID) (Kn
 		return state, nil
 	}
 	k, err := loadKnowledgeSetup(ctx, s.db, project, s.instance, s.directory)
+	if ctx.Err() != nil {
+		return zero, ctx.Err()
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		state.Code = string(KnowledgeSetupRequired)
 		return state, nil
@@ -205,7 +211,8 @@ func (s *Store) KnowledgeStatus(ctx context.Context, project authority.UUID) (Kn
 		state.Code, state.Remediation = string(KnowledgeInitializationPending), "recover_original_setup"
 		return state, nil
 	}
-	g := s.knowledgeRepository(k)
+	g := s.knowledgeRepository(k).withContext(ctx)
+	g.readCheckpoint = s.knowledgeReadCheckpoint
 	pending, err := s.pendingDocumentOperation(ctx)
 	if err != nil {
 		return zero, err
@@ -219,7 +226,13 @@ func (s *Store) KnowledgeStatus(ctx context.Context, project authority.UUID) (Kn
 	}
 	current := ""
 	if err == nil {
-		current, err = g.readRef(filepath.Join("heads", "knowledge"))
+		current, err = g.readRefCheckpoint(filepath.Join("heads", "knowledge"), "knowledge_status_head")
+	}
+	if ctx.Err() != nil {
+		return zero, ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return zero, err
 	}
 	if err != nil {
 		state.Phase, state.Code, state.Remediation = "corrupt", string(KnowledgeCorrupt), "operator_recovery"

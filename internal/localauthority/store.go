@@ -31,6 +31,8 @@ type Store struct {
 	closed        bool
 	// fault is test-only injection at transaction boundaries; no public option.
 	fault func(string) error
+	// Private deterministic read cancellation seam; never runtime/config input.
+	knowledgeReadCheckpoint func(string)
 }
 
 type Inspection struct {

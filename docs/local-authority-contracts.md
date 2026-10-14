@@ -369,7 +369,11 @@ delete document objects/history or alter project sequence.
 
 `KnowledgeStatus` observes setup readiness, the exact verified current ref OID
 for a deliberate new intent, and an optional opaque pending operation. It never
-refreshes CAS inside a submitted write. `DocumentOperationStatus` reports finite original phase/pin/remediation
+refreshes CAS inside a submitted write. Cancellation/deadline propagates through
+the initial Git layout scan, settled history and final ref read; an interrupted
+inspection returns the context error, not a corruption/readiness verdict, and
+does not change canonical state or clear an existing fence.
+`DocumentOperationStatus` reports finite original phase/pin/remediation
 without key text or coordinates. Git-only corruption fences documents while
 intact tracker data remains available. SQL logical corruption fences the global
 writer and cannot be cleared by replaying an unrelated receipt. SQL barrier

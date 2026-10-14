@@ -30,6 +30,9 @@ func (s *Store) verifySettledKnowledgeHistory(ctx context.Context, g knowledgeRe
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if err := g.checkpoint("knowledge_history_entry"); err != nil {
+			return "", err
+		}
 		count++
 		if count > maxKnowledgeLooseObjects {
 			return "", Error{Capacity}
