@@ -71,17 +71,24 @@ func ChunkDocumentWithPolicy(objectIdentity string, data []byte, policy Processi
 		if normalized != "" {
 			rawDigest := digestBytes(raw)
 			inputDigest := digestBytes([]byte(normalized))
-			lineStart := 1 + bytes.Count(data[:start], []byte{'\n'})
-			lineEnd := lineStart + bytes.Count(raw, []byte{'\n'})
-			if len(raw) > 0 && raw[len(raw)-1] == '\n' && lineEnd > lineStart {
-				lineEnd--
-			}
+			lineStart, lineEnd := chunkLineRange(data, start, end)
 			idSum := sha256.Sum256([]byte(strings.Join([]string{objectIdentity, fmt.Sprint(start), fmt.Sprint(end), rawDigest, inputDigest, policyID}, "\x00")))
 			chunks = append(chunks, Chunk{ID: "repo-doc-chunk-" + hex.EncodeToString(idSum[:]), ByteStart: start, ByteEnd: end, LineStart: lineStart, LineEnd: lineEnd, RawSliceDigest: rawDigest, EmbeddingInputDigest: inputDigest, Text: normalized})
 		}
 		start = end
 	}
 	return chunks, nil
+}
+
+// Call only after validating the byte range. Line locators are always derived
+// from authoritative bytes, never trusted from disposable index metadata.
+func chunkLineRange(data []byte, start, end int) (int, int) {
+	lineStart := 1 + bytes.Count(data[:start], []byte{'\n'})
+	lineEnd := lineStart + bytes.Count(data[start:end], []byte{'\n'})
+	if end > start && data[end-1] == '\n' && lineEnd > lineStart {
+		lineEnd--
+	}
+	return lineStart, lineEnd
 }
 
 func normalizeEmbeddingInput(value string) string {

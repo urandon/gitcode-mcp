@@ -62,6 +62,18 @@ func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw 
 		return status, nil
 	}
 	switch method {
+	case "LocalProjects.Search":
+		var q service.LocalProjectSearchRequest
+		if !localSearchRequestShape(raw, "project", "query") || strictObservationResponse(raw, &q) != nil {
+			return nil, localHostError("invalid_argument")
+		}
+		return s.LocalProjects.Search(ctx, q)
+	case "LocalProjects.Index":
+		var q service.LocalProjectIndexRequest
+		if !localSearchRequestShape(raw, "project", "write_mode") || strictObservationResponse(raw, &q) != nil {
+			return nil, localHostError("invalid_argument")
+		}
+		return s.LocalProjects.Index(ctx, q)
 	case "LocalProjects.Get", "LocalProjects.List", "LocalProjects.History":
 		var q service.LocalProjectQuery
 		if strictObservationResponse(raw, &q) != nil {
@@ -288,6 +300,8 @@ func memoryRequestOwner(ctx context.Context, address string) (RPCServer, context
 
 func validateLocalProjectResult(method string, raw []byte) (any, bool) {
 	switch method {
+	case "LocalProjects.Search", "LocalProjects.Index":
+		return validateLocalSearchResult(method, raw)
 	case "LocalProjects.Get":
 		return decodeLocalEntity(raw)
 	case "LocalProjects.List":

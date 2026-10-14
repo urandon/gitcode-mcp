@@ -47,7 +47,16 @@ func localProjectToolDefinition(name string) (toolDefinition, bool) {
 		required = append(required, "project")
 	}
 	str := func(desc string) schemaProp { return schemaProp{Type: "string", Description: desc} }
-	if name == "local_project_mutate" {
+	if name == "local_project_search" {
+		props["query"] = str("Required UTF-8 query, maximum4096 bytes.")
+		props["mode"] = schemaProp{Type: "string", Enum: []string{"fulltext", "hybrid"}, Default: "fulltext"}
+		props["limit"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(32), Default: 10}
+		required = append(required, "query")
+	} else if name == "local_project_index" {
+		props["write_mode"] = schemaProp{Type: "string", Enum: []string{"local"}}
+		props["max_chunks"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(128), Default: 64}
+		required = append(required, "write_mode")
+	} else if name == "local_project_mutate" {
 		mutation := map[string]schemaProp{}
 		for _, key := range []string{"operation", "id", "parent_id", "title", "body", "state", "milestone", "expected_head", "expected_revision", "idempotency_key", "write_mode"} {
 			mutation[key] = str("Typed local mutation field. Updates replace all editable metadata/body; preserve omitted data explicitly.")
@@ -112,6 +121,14 @@ func (s *Server) callLocalProject(ctx context.Context, id *json.RawMessage, name
 		method = "Status"
 		params = &struct{}{}
 		result = &service.LocalProjectsStatus{}
+	} else if name == "local_project_search" {
+		method = "Search"
+		params = &service.LocalProjectSearchRequest{}
+		result = &service.LocalProjectSearchResult{}
+	} else if name == "local_project_index" {
+		method = "Index"
+		params = &service.LocalProjectIndexRequest{}
+		result = &service.LocalProjectIndexResult{}
 	} else if name == "local_project_mutate" {
 		method = "Mutate"
 		params = &service.LocalProjectMutation{}

@@ -30,6 +30,33 @@ func TestLocalProjectConfigOpaqueMachineBindings(t *testing.T) {
 	}
 }
 
+func TestLocalProjectsIgnoreRepositoryOwnedProviderAndCacheOverrides(t *testing.T) {
+	src := newMemorySource(t)
+	root := filepath.Join(src.homeDir, "workspace", "repo")
+	src.cwd = root
+	src.dirs[filepath.Join(root, ".git")] = true
+	global := filepath.Join(src.configDir, "local.yaml")
+	src.env[EnvMCPConfigPath] = global
+	trustedRAG := "rag:\n  providers:\n    fixture:\n      type: ollama\n      endpoint: https://trusted.example.invalid\n      data_boundary: local_network\n  profiles:\n    fixture:\n      provider: fixture\n      model: fixture-embedding\n      dimensions: 8\n"
+	src.files[global] = []byte("service: {mode: local}\nlocal_projects:\n  lab: {backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main, rag_profile: fixture}\n" + trustedRAG)
+	repoPath := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	poison := "cache_mode: repo-local\nrag:\n  providers:\n    fixture:\n      type: ollama\n      endpoint: https://untrusted.example.invalid\n      data_boundary: local_network\n"
+	for _, repoConfig := range []string{poison, "[malformed repository config"} {
+		src.files[repoPath] = []byte(repoConfig)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil || eff.Config.RAG.Providers["fixture"].Endpoint != "https://trusted.example.invalid" || eff.CachePathSource != "default" || eff.RepoRoot != "" {
+			t.Fatal("working directory retargeted local project provider/cache or blocked local serving")
+		}
+	}
+	// Ordinary GitCode mode keeps its existing repository-owned RAG/cache rules.
+	src.files[global] = []byte(trustedRAG)
+	src.files[repoPath] = []byte(poison)
+	eff, err := LoadEffective(src, Overrides{})
+	if err != nil || eff.Config.RAG.Providers["fixture"].Endpoint != "https://untrusted.example.invalid" || eff.RepoRoot != root {
+		t.Fatal("local-only trust fence changed ordinary repository behavior")
+	}
+}
+
 func TestLocalProjectsRepoOnlyBindingRefusesRemoteFallback(t *testing.T) {
 	src := newMemorySource(t)
 	root := filepath.Join(src.homeDir, "workspace", "repo")

@@ -13,6 +13,7 @@ type LocalProjectSetupRequest struct {
 	StorageRef string
 	Ref        string
 	ReadOnly   bool
+	RAGProfile string
 	Confirm    bool
 	Initialize bool
 }
@@ -28,7 +29,11 @@ func SetupLocalProject(ctx context.Context, src config.Source, req LocalProjectS
 	if ctx.Err() != nil {
 		return zero, ctx.Err()
 	}
-	b := config.LocalProjectConfig{Backend: "local_git", ProjectID: req.ProjectID, StorageRef: req.StorageRef, Ref: req.Ref, ReadOnly: req.ReadOnly, RAGProfile: "disabled"}
+	profile := req.RAGProfile
+	if profile == "" {
+		profile = "disabled"
+	}
+	b := config.LocalProjectConfig{Backend: "local_git", ProjectID: req.ProjectID, StorageRef: req.StorageRef, Ref: req.Ref, ReadOnly: req.ReadOnly, RAGProfile: profile}
 	if !req.Confirm || config.ValidateLocalProjects(config.ServiceModeLocal, map[string]config.LocalProjectConfig{req.Project: b}) != nil {
 		return zero, localProjectError("invalid_argument", "setup_confirmation")
 	}

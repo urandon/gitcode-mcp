@@ -41,6 +41,7 @@ func (m Manager) runLocalProjects(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	host.WithSearchConfig(*cfg)
 	if err := ensurePathDirs(paths); err != nil {
 		return localHostError("unavailable")
 	}
