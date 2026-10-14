@@ -87,7 +87,15 @@ func (s *Store) Snapshot(ctx context.Context, ref string) (*Snapshot, error) {
 }
 
 func (s *Store) tree(ctx context.Context, commit, path string) (map[string]repositorydocs.TreeEntry, error) {
-	args := []string{"ls-tree", "-r", "-l", "-z", "--full-tree", commit}
+	return s.readTree(ctx, commit, path, true)
+}
+
+func (s *Store) readTree(ctx context.Context, commit, path string, recursive bool) (map[string]repositorydocs.TreeEntry, error) {
+	args := []string{"ls-tree", "-l", "-z", "--full-tree"}
+	if recursive {
+		args = append(args, "-r")
+	}
+	args = append(args, commit)
 	if path != "" {
 		args = append(args, "--", ":(top,literal)"+path)
 	}

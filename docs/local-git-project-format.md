@@ -4,7 +4,7 @@ This is the internal foundation of epic #200, not a currently enabled CLI,
 MCP or Admin feature. Its child PRs integrate into
 `codex/epic-200-git-backed-harness`; the whole cohort enters `main` together.
 Git owns all project content and history. No cache database is required by the
-reader, and no source or chunk bytes are copied into an index by this package.
+adapter, and no source or chunk bytes are copied into an index by this package.
 
 ## Git tree
 
@@ -73,7 +73,8 @@ characters; the result blob is a full Git object ID. Operation must match the
 result kind. JSON key names are exact and case-sensitive, including nested
 result fields. Unknown/duplicate keys and content fields are rejected. A receipt
 does not contain its own producing commit ID: Git history supplies that locator.
-Publication/replay is the next adapter child, not implemented by the reader.
+The mutation adapter publishes receipts with their entity and counters in one
+commit; the reader can inspect the same files without opening a database.
 
 ## Read contract and limits
 
@@ -105,6 +106,60 @@ OS-level network sandbox or a guarantee against a malicious Git installation or
 concurrent out-of-band filesystem changes. See Git's
 [environment contract](https://git-scm.com/docs/git#_environment_variables).
 
-Reader tests create real temporary Git stores without credentials or network.
-CLI/MCP exposure, writes, service hosting, search/RAG, protected Admin and bundle
+## Typed local mutation contract
+
+The internal `Mutate` entry point accepts only `create_issue`, `update_issue`,
+`delete_issue`, `add_comment`, `update_comment`, `delete_comment`, `create_wiki`,
+`update_wiki`, and `delete_wiki`. Each generates the fixed tree paths above;
+callers cannot submit arbitrary Git commands or file patches. It requires
+`write_mode: local` and a non-empty caller idempotency key of at most 256 bytes.
+This is a local Git write, not a remote GitCode write or an implicit read effect.
+
+Creates require the expected full HEAD commit ID. Updates/deletes require an
+expected entity blob revision or full HEAD, or both. Updates replace all editable
+fields; identity and comment parent never change. Creates default to `open`
+(issue) or `active` (comment/wiki); updates specify state. Only the explicit
+delete operation creates a `deleted` tombstone with an empty current body.
+It retains metadata, IDs, receipts and all previous Git history. Adding a comment
+to a deleted issue and editing a tombstoned entity conflict.
+
+One non-blocking OS writer lock covers the canonical Git directory, including
+symlink aliases and separately opened processes. Its fixed lock file lives
+outside the project tree; it is not a durable operation journal. A busy writer
+returns `writer_busy`. The adapter builds blobs/changed trees, one parented
+commit containing all authoritative effects, then publishes with
+`update-ref --no-deref <configured-ref> <new> <expected-old>`. The configured
+local branch must not be symbolic. No working-tree/index or SQLite write is
+needed. Rejected candidates may leave unreferenced Git objects for ordinary Git
+garbage collection; they are never treated as published operations.
+
+The intent digest covers project identity, configured ref, operation, target
+and content. Concurrency guards are excluded, so refreshing a stale guard does
+not change a logical retry. A known receipt is resolved before the stale guard:
+same key/intent returns the original entity, blob and producing commit with
+`replayed: true`; changed intent returns `idempotency_conflict`. The original
+result is read at the receipt's introducing commit, not from a later edited
+entity. Receipts never carry copies of content or their self-referential commit
+hash and are never silently changed or pruned.
+
+The complete bounded HEAD tree is authoritative for receipt-key presence.
+Resolving a present receipt's origin is a bounded first-parent lookup; exhaustion
+returns `history_unavailable`, never key absence and never a duplicate mutation.
+New distinct keys do not require proving the entire project history. Removing
+receipts, external ref mutation or rewriting history is outside the supported
+service-owned workflow. Capacity exhaustion (including the 10,000-entry limit)
+requires an explicit future archival policy, not implicit receipt pruning.
+
+Every write has the same ten-second ceiling/caller cancellation and input,
+metadata, receipt and tree limits as reads. Candidate validation happens before
+publication. Cancellation before the ref update leaves the ref unchanged. After
+publication, receipt readback confirms the result. Definite concurrent ref
+mismatch returns `write_conflict`; an observed unchanged ref after a rejected
+update returns `publication_rejected`. Lost response or unavailable readback
+returns `publication_ambiguous`: recover using the same key, never blind retry
+with another key. This does not certify power-loss durability beyond Git's own
+object/ref publication semantics.
+
+Reader and writer tests create real temporary Git stores without credentials
+or network. CLI/MCP exposure, service hosting, search/RAG, protected Admin and bundle
 restore remain separate required children of #200.
