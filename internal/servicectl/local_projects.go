@@ -16,10 +16,11 @@ import (
 func localHostError(code string) error { return &localgit.Error{Code: code, Field: "service"} }
 
 // This is the same Manager lifecycle and private RPC implementation, with an
-// early startup branch that never constructs maintenance/jobs/providers/Admin.
-func (m Manager) runLocalProjects(ctx context.Context) error {
+// early startup branch with no maintenance/jobs/remote providers. Admin exists
+// only after explicit --admin opt-in and can never use a non-loopback bind.
+func (m Manager) runLocalProjects(ctx context.Context) (runErr error) {
 	cfg := m.EffectiveConfig
-	if cfg == nil || m.AdminAutoStart || m.AdminBind != "" || m.AdminAllowNonLoopback {
+	if cfg == nil || m.AdminAllowNonLoopback || !m.AdminAutoStart && m.AdminBind != "" {
 		return config.LocalProjectConfigError{}
 	}
 	paths, err := m.ResolvePaths()
@@ -48,6 +49,10 @@ func (m Manager) runLocalProjects(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	now := time.Now().UTC()
+	admin, err := m.newLocalProjectAdmin(host, paths, now)
+	if err != nil {
+		return err
+	}
 	min, max := m.schemaRange()
 	if err := writeState(paths, State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version, Commit: m.Commit, SchemaMin: min, SchemaMax: max}); err != nil {
 		return localHostError("unavailable")
@@ -55,7 +60,20 @@ func (m Manager) runLocalProjects(ctx context.Context) error {
 	defer os.Remove(paths.PIDPath)
 	defer os.Remove(paths.StatePath)
 	var handlers atomic.Int64
-	server := RPCServer{Manager: m, LocalProjects: host, LocalOnly: true, runtimeContext: ctx, observationHandlers: &handlers}
+	server := RPCServer{Manager: m, LocalProjects: host, LocalOnly: true, Admin: admin, runtimeContext: ctx, observationHandlers: &handlers}
+	if admin != nil {
+		if _, err := admin.Start(ctx); err != nil {
+			return localHostError("unavailable")
+		}
+		defer func() {
+			cancel()
+			shutdown, stop := context.WithTimeout(context.Background(), 4*time.Second)
+			defer stop()
+			if !admin.WaitStopped(shutdown) {
+				runErr = localHostError("unavailable")
+			}
+		}()
+	}
 	if paths.Network == "mem" {
 		err := serveMemoryRPC(ctx, paths.Address, server, nil)
 		// Removal from memoryRPC closes admission under its existing mutex.

@@ -18,16 +18,18 @@ func adminMetricRoute(pattern string, r *http.Request) string {
 	case "GET /api/admin/v1/readiness", "GET /api/admin/v1/snapshot", "GET /api/admin/v1/caches", "GET /api/admin/v1/caches/{cache_ref}",
 		"GET /api/admin/v1/caches/{cache_ref}/repositories/{repo_id...}", "GET /api/admin/v1/jobs", "GET /api/admin/v1/jobs/{job_id}",
 		"GET /api/admin/v1/maintenance", "GET /api/admin/v1/diagnostics", "GET /api/admin/v1/capabilities",
-		"GET /api/admin/v1/observability", "GET /api/admin/v1/observability/metrics", "GET /api/admin/v1/observability/events":
+		"GET /api/admin/v1/observability", "GET /api/admin/v1/observability/metrics", "GET /api/admin/v1/observability/events",
+		"GET /api/admin/v1/local-projects", "POST /api/admin/v1/local-projects/list", "POST /api/admin/v1/local-projects/get", "POST /api/admin/v1/local-projects/history":
 		return "read"
-	case "POST /api/admin/v1/search/compare", "POST /api/admin/v1/repository-docs/{registration_id}/search":
+	case "POST /api/admin/v1/search/compare", "POST /api/admin/v1/repository-docs/{registration_id}/search", "POST /api/admin/v1/local-projects/search":
 		return "search"
 	case "POST /api/admin/v1/jobs/{job_id}/cancel", "POST /api/admin/v1/jobs/{job_id}/retry", "POST /api/admin/v1/maintenance/plan", "POST /api/admin/v1/maintenance/apply",
 		"POST /api/admin/v1/maintenance/{registration_id}/disable", "POST /api/admin/v1/maintenance/{registration_id}/reconcile",
 		"POST /api/admin/v1/maintenance/{registration_id}/conflict-resolution/plan", "POST /api/admin/v1/maintenance/{registration_id}/conflict-resolution/apply",
 		"POST /api/admin/v1/bindings/plan", "POST /api/admin/v1/bindings/apply", "POST /api/admin/v1/feedback/setup/plan", "POST /api/admin/v1/feedback/setup/apply",
 		"POST /api/admin/v1/repository-docs/{registration_id}/plan", "POST /api/admin/v1/repository-docs/{registration_id}/index",
-		"POST /api/admin/v1/rag/provider/smoke", "POST /api/admin/v1/rag/repair/plan", "POST /api/admin/v1/rag/repair/apply":
+		"POST /api/admin/v1/rag/provider/smoke", "POST /api/admin/v1/rag/repair/plan", "POST /api/admin/v1/rag/repair/apply",
+		"POST /api/admin/v1/local-projects/mutation-plan", "POST /api/admin/v1/local-projects/mutation-apply", "POST /api/admin/v1/local-projects/index-plan", "POST /api/admin/v1/local-projects/index-apply":
 		return "control"
 	case "GET /api/admin/v1/events":
 		return "events"

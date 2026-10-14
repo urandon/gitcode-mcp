@@ -87,6 +87,12 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 		snapshot.Diagnostics = append(snapshot.Diagnostics, adminStageDiagnostics(item.entry)...)
 	}
 	for _, cap := range capability.Capabilities() {
+		// This snapshot belongs to the ordinary GitCode/cache host, which has
+		// no LocalProjects HTTP provider. Explicit local Admin owns its separate
+		// minimal snapshot and enables the same cohort there, not globally here.
+		if cap.Category == capability.CategoryLocalProject {
+			cap.UI = capability.Surface{DisabledReason: "Unavailable in this GitCode/cache host; use explicit protected local Admin."}
+		}
 		snapshot.Capabilities = append(snapshot.Capabilities, adminCapabilityObservation(cap))
 	}
 	for _, diagnostic := range snapshot.Diagnostics {

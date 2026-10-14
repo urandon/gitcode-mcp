@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/localgit"
 	"gitcode-mcp/internal/service"
 )
@@ -23,7 +24,7 @@ const localProjectResponseBytes = 64 << 20 // bounded escaped JSON over the G1 8
 // DecodeLocalProjectJSON reuses the existing private IPC closed decoder for
 // CLI/MCP transport values. It never reflects input bytes in diagnostics.
 func DecodeLocalProjectJSON(raw []byte, dst any) error {
-	if len(raw) > maxRPCRequestBytes || !utf8.Valid(raw) || strictObservationResponse(raw, dst) != nil {
+	if len(raw) > maxRPCRequestBytes || !utf8.Valid(raw) || !localSearchRequestShape(raw) || strictObservationResponse(raw, dst) != nil {
 		return localHostError("invalid_argument")
 	}
 	return nil
@@ -34,6 +35,26 @@ func localProjectMethod(method string) bool { return strings.HasPrefix(method, "
 func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw []byte) (any, error) {
 	if s.LocalProjects == nil {
 		return nil, localHostError("unavailable")
+	}
+	if method == "Admin.Open" || method == "Admin.Status" {
+		if s.Admin == nil {
+			return nil, localHostError("unsupported_capability")
+		}
+		if method == "Admin.Status" {
+			if len(raw) > 0 && strictObservationResponse(raw, &struct{}{}) != nil {
+				return nil, localHostError("invalid_argument")
+			}
+			return s.Admin.Status(), nil
+		}
+		var q adminhttp.OpenRequest
+		if strictObservationResponse(raw, &q) != nil {
+			return nil, localHostError("invalid_argument")
+		}
+		result, err := s.Admin.Open(ctx, q)
+		if err != nil {
+			return nil, localHostError("invalid_argument")
+		}
+		return result, nil
 	}
 	if method == "Service.Status" || method == "Service.Health" || method == "LocalProjects.Status" {
 		if len(raw) > 0 && strictObservationResponse(raw, &struct{}{}) != nil {
