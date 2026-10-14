@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -157,10 +158,28 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 
 	eff, err := config.LoadEffective(src, opts.overrides)
 	if err != nil {
+		var local config.LocalProjectConfigError
+		if errors.As(err, &local) {
+			fmt.Fprintln(stderr, local.Error())
+			return 1
+		}
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 1
 	}
 	cfg := eff.Config
+	// Daemon startup is machine-local. In strict-local mode it must never enter
+	// the remote credential/provider dependency graph, even to discover a token.
+	if len(rest) > 0 && rest[0] == "service" {
+		deps := StartupDeps{Config: cfg, Source: src, Stdin: stdin, GitCode: GitCodeStartup{Live: opts.live, Offline: opts.offline}}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if cfg.DefaultTimeout > 0 && !runsUntilSignal(rest) {
+			var stop context.CancelFunc
+			ctx, stop = context.WithTimeout(ctx, cfg.DefaultTimeout)
+			defer stop()
+		}
+		return cliRoute(ctx, rest, stdout, stderr, deps)
+	}
 	credentialResolver := auth.NewCredentialResolver(src)
 	token := ""
 	if !opts.mcp && !opts.mcpServe {
