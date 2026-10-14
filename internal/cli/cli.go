@@ -383,6 +383,9 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 }
 
 func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	if len(args) > 0 && args[0] == "project" {
+		return executeProjectCommand(ctx, args[1:], stdout, stderr, deps)
+	}
 	if IsObservationCommand(args) {
 		return executeObservationCommand(ctx, args[1:], stdout, stderr, deps)
 	}
@@ -5496,6 +5499,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  gitcode-mcp [command] [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  project init|register|status|get|list|history|mutate (explicit local Git project)")
 	for _, command := range commands {
 		fmt.Fprintf(w, "  %s\n", command)
 	}

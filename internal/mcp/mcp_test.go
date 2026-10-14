@@ -1211,6 +1211,12 @@ func TestMCPToolAccessPolicy(t *testing.T) {
 			listed[tool.Name] = true
 		}
 		for name := range writeToolNames {
+			if cap, ok := capability.LookupByMCPName(name); ok && cap.Category == capability.CategoryLocalProject {
+				if listed[name] {
+					t.Fatalf("local-only tool %q leaked into normal discovery", name)
+				}
+				continue // the separate local-catalog test asserts these are discoverable there.
+			}
 			if !listed[name] {
 				t.Fatalf("write mode missing write tool %q", name)
 			}

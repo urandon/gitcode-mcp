@@ -99,6 +99,7 @@ func (s *Server) feedbackReadiness(ctx context.Context) (feedback.Readiness, err
 }
 
 type RPCHandler struct {
+	localOnly            bool
 	toolRelease          func()
 	bootstrapDiagnostic  func() StartupDiagnostic
 	toolBootstrap        ToolBootstrap
@@ -119,6 +120,7 @@ type RPCHandler struct {
 }
 
 type Server struct {
+	localOnly            bool
 	bootstrapDiagnostic  func() StartupDiagnostic
 	toolBootstrap        ToolBootstrap
 	reader               io.Reader
@@ -256,6 +258,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 	var buf bytes.Buffer
 	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, repositoryDocsPolicy: h.repositoryDocsPolicy, repositoryDocsStatus: h.repositoryDocsStatus, repositoryDocsSearch: h.repositoryDocsSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
 	server.serviceClient, server.toolBootstrap = h.serviceClient, h.toolBootstrap
+	server.localOnly = h.localOnly
 	if h.bootstrapDiagnostic != nil {
 		server.startupDiagnostic = h.bootstrapDiagnostic()
 	}
@@ -327,15 +330,18 @@ type inputSchema struct {
 }
 
 type schemaProp struct {
-	Type        string      `json:"type"`
-	Description string      `json:"description,omitempty"`
-	Enum        []string    `json:"enum,omitempty"`
-	Minimum     *float64    `json:"minimum,omitempty"`
-	Maximum     *float64    `json:"maximum,omitempty"`
-	Default     any         `json:"default,omitempty"`
-	MinLength   int         `json:"minLength,omitempty"`
-	MinItems    int         `json:"minItems,omitempty"`
-	Items       *schemaProp `json:"items,omitempty"`
+	Properties           map[string]schemaProp `json:"properties,omitempty"`
+	Required             []string              `json:"required,omitempty"`
+	AdditionalProperties *bool                 `json:"additionalProperties,omitempty"`
+	Type                 string                `json:"type"`
+	Description          string                `json:"description,omitempty"`
+	Enum                 []string              `json:"enum,omitempty"`
+	Minimum              *float64              `json:"minimum,omitempty"`
+	Maximum              *float64              `json:"maximum,omitempty"`
+	Default              any                   `json:"default,omitempty"`
+	MinLength            int                   `json:"minLength,omitempty"`
+	MinItems             int                   `json:"minItems,omitempty"`
+	Items                *schemaProp           `json:"items,omitempty"`
 }
 
 type initResult struct {
@@ -823,12 +829,19 @@ func (s *Server) Serve() error {
 	ctx := context.Background()
 	buf := make([]byte, 0, 4096)
 	for {
-		line, err := readLineFrom(s.reader, buf[:0])
+		limit := 0
+		if s.localOnly {
+			limit = 1 << 20
+		}
+		line, err := readLineFromLimit(s.reader, buf[:0], limit)
 		if err == io.EOF || errors.Is(err, io.ErrClosedPipe) {
 			return nil
 		}
 		if err != nil {
 			s.writeError(nil, -32700, "Parse error", nil)
+			if s.localOnly {
+				return errors.New("local MCP frame unavailable")
+			}
 			continue
 		}
 		buf = line
@@ -852,6 +865,9 @@ func (s *Server) Serve() error {
 }
 
 func readLineFrom(r io.Reader, buf []byte) ([]byte, error) {
+	return readLineFromLimit(r, buf, 0)
+}
+func readLineFromLimit(r io.Reader, buf []byte, limit int) ([]byte, error) {
 	for {
 		var b [1]byte
 		n, err := r.Read(b[:])
@@ -862,6 +878,9 @@ func readLineFrom(r io.Reader, buf []byte) ([]byte, error) {
 			return nil, err
 		}
 		buf = append(buf, b[0])
+		if limit > 0 && len(buf) > limit {
+			return nil, errors.New("local MCP frame exceeds limit")
+		}
 		if b[0] == '\n' {
 			return buf[:len(buf)-1], nil
 		}
@@ -907,7 +926,16 @@ func (s *Server) init(req request) {
 func (s *Server) toolsList(ctx context.Context, req request) {
 	registry := s.toolRegistry()
 	tools := make([]toolDefinition, 0, len(registry))
-	for _, name := range toolListOrder {
+	order := toolListOrder
+	if s.localOnly {
+		order = nil
+		for _, cap := range capability.LocalProjectCapabilities() {
+			if cap.MCP.Enabled {
+				order = append(order, cap.MCPName)
+			}
+		}
+	}
+	for _, name := range order {
 		tool, ok := registry[name]
 		if !ok {
 			continue
@@ -960,6 +988,10 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	}
 	if params.Name == "" {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
+		return
+	}
+	if s.localOnly {
+		s.localToolsCall(ctx, req, params)
 		return
 	}
 	if _, observation := observationToolDefinition(params.Name); observation {
@@ -1068,6 +1100,9 @@ func buildToolListOrder() []string {
 }
 
 func toolDefinitionByName(name string) toolDefinition {
+	if def, ok := localProjectToolDefinition(name); ok {
+		return def
+	}
 	if definition, ok := observationToolDefinition(name); ok {
 		return definition
 	}
@@ -1113,6 +1148,17 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 
 func (s *Server) toolRegistry() toolRegistry {
 	registry := toolRegistry{}
+	if s.localOnly {
+		for _, cap := range capability.LocalProjectCapabilities() {
+			if cap.MCP.Enabled {
+				name := cap.MCPName
+				registerTool(registry, name, func(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+					s.callLocalProject(ctx, id, name, args)
+				})
+			}
+		}
+		return registry
+	}
 	registerTool(registry, "service_observability", s.callServiceObservability)
 	registerTool(registry, "service_metrics", s.callServiceMetrics)
 	registerTool(registry, "service_events", s.callServiceEvents)
