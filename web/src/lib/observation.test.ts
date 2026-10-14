@@ -7,10 +7,10 @@ describe('bounded observation browser contract', () => {
 	it('projects only finite local phase pairs and keeps remote navigation unavailable', () => {
 		const { summary, page } = observationFixture();
 		summary.event_templates!.local_authority_phase_changed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.' };
-		summary.event_filters!.phase = ['index_job', 'knowledge_recovery', 'projection_repair'];
-		summary.event_filters!.outcome = ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted', 'prepared', 'quarantined', 'confirmed'];
+		summary.event_filters!.phase = ['index_job', 'knowledge_recovery', 'projection_repair', 'runtime'];
+		summary.event_filters!.outcome = ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted', 'prepared', 'quarantined', 'confirmed', 'serving', 'closing', 'stopped'];
 		for (const phase of summary.event_filters!.phase) {
-			const outcomes = phase === 'projection_repair' ? ['prepared', 'quarantined', 'confirmed'] : ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted'];
+			const outcomes = phase === 'runtime' ? ['serving', 'closing', 'stopped'] : phase === 'projection_repair' ? ['prepared', 'quarantined', 'confirmed'] : ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted'];
 			for (const outcome of outcomes) {
 				page.events[0] = { schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: summary.observed_at, sequence: 1, code: 'local_authority_phase_changed', stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.', project_ref: ref('project', '1'), correlation_ref: ref('correlation', '7'), phase, outcome, raw_body: 'synthetic-private-phase-bytes' };
 				const copy = JSON.parse(safeObservationContext(summary, page, { event_id: id('e') }));

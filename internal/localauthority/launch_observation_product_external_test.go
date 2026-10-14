@@ -56,7 +56,7 @@ func TestNativeProductObservedSourceRetainedAcrossRestartAndReplay(t *testing.T)
 			t.Fatal("actual native retained observation did not seal")
 		}
 		refs := observability.ProjectEntityRefs(observability.Context{Project: observability.KnownRef("project", string(fixtureProject))})
-		page, err := collector.Query(observability.Filter{ProjectRef: refs.Project}, "", 200)
+		page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: refs.Project}, "", 200)
 		if err != nil || len(page.Events) != 1 || page.Coverage.Dropped != 0 {
 			t.Fatal("native retained delivery/reload duplicated or lost actual owner proof")
 		}
@@ -68,6 +68,15 @@ func TestNativeProductObservedSourceRetainedAcrossRestartAndReplay(t *testing.T)
 			originalEvent = event
 		} else if event != originalEvent {
 			t.Fatal("parent ledger reload altered the original retained boundary")
+		}
+		runtime, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityPhaseChanged, ProjectRef: refs.Project, Phase: "runtime"}, "", 200)
+		if err != nil || len(runtime.Events) != 3*(attempt+1) || runtime.Coverage.Dropped != 0 {
+			t.Fatal("native runtime lifecycle was lost or incorrectly replayed")
+		}
+		for i, phase := range runtime.Events {
+			if phase.Outcome != []string{"serving", "closing", "stopped"}[i%3] {
+				t.Fatal("actual native owner changed confirmed runtime boundaries")
+			}
 		}
 		body, _ := json.Marshal(page)
 		for _, private := range []string{dir, ledger, string(fixtureProject), string(original.Citation.EntityID), "synthetic-private-native", "Synthetic private native", "unrelated-native-parent"} {
@@ -99,8 +108,17 @@ func TestNativeObservedProcessCloseJoinsRetainedReader(t *testing.T) {
 		t.Fatal("parent process did not join reader before collector seal")
 	}
 	ref := observability.BindLocalProject(observed, string(fixtureProject)).ProjectRef()
-	page, err := collector.Query(observability.Filter{ProjectRef: ref}, "", 200)
+	page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: ref}, "", 200)
 	if err != nil || len(page.Events) != 1 || page.Coverage.Dropped != 0 {
 		t.Fatal("parent process close overtook final retained kernel buffers")
+	}
+	runtime, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityPhaseChanged, ProjectRef: ref, Phase: "runtime"}, "", 200)
+	if err != nil || len(runtime.Events) != 3 || runtime.Coverage.Dropped != 0 {
+		t.Fatal("parent process did not join final runtime lifecycle proof")
+	}
+	for i, phase := range runtime.Events {
+		if phase.Outcome != []string{"serving", "closing", "stopped"}[i] {
+			t.Fatal("parent process changed actual runtime lifecycle")
+		}
 	}
 }

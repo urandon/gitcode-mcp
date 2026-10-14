@@ -123,7 +123,7 @@ export function eventProjection(value: unknown, summary: ServiceSummary): EventR
 	if (e.code === 'local_authority_committed' || e.code === 'local_authority_phase_changed') {
 		const validPhase = e.code === 'local_authority_committed'
 			? member(e.phase, ['authority_commit', 'document_commit']) && e.outcome === 'committed'
-			: member(e.phase, ['index_job', 'knowledge_recovery']) && member(e.outcome, ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted']) || e.phase === 'projection_repair' && member(e.outcome, ['prepared', 'quarantined', 'confirmed']);
+			: member(e.phase, ['index_job', 'knowledge_recovery']) && member(e.outcome, ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted']) || e.phase === 'projection_repair' && member(e.outcome, ['prepared', 'quarantined', 'confirmed']) || e.phase === 'runtime' && member(e.outcome, ['serving', 'closing', 'stopped']);
 		if (!isRef(e.project_ref, 'project') || !isRef(e.correlation_ref, 'correlation') || e.legacy || !validPhase) return;
 		if (!summary.event_filters?.phase?.includes(String(e.phase)) || !summary.event_filters?.outcome?.includes(String(e.outcome))) return;
 		for (const key of [...Object.keys(refKinds).filter(key => key !== 'project_ref' && key !== 'correlation_ref'), ...eventDetailKeys.filter(key => key !== 'phase' && key !== 'outcome')]) {

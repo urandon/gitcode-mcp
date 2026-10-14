@@ -29,6 +29,27 @@ async function mockObservation(page: Page, fixture = observationFixture(), snaps
 }
 const emit = (page: Page, kind = 'observability_changed') => page.evaluate(k => (window as any).__emitObservation(k), kind);
 
+test('local runtime history preserves safe copy without inventing current health or actions', async ({ page }) => {
+  const fixture = observationFixture();
+  fixture.summary.event_templates!.local_authority_phase_changed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.' };
+  fixture.summary.event_filters!.code.push('local_authority_phase_changed'); fixture.summary.event_filters!.component.push('authority');
+  fixture.summary.event_filters!.phase = ['runtime']; fixture.summary.event_filters!.outcome = ['serving', 'closing', 'stopped'];
+  fixture.page.events = ['serving', 'closing', 'stopped'].map((outcome, index) => ({ schema: 1, event_id: id(['e', 'f', '1'][index]), boot_id: id('a'), occurred_at: fixture.summary.observed_at, sequence: index + 1, code: 'local_authority_phase_changed', stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.', phase: 'runtime', outcome, project_ref: ref('project', '1'), correlation_ref: ref('correlation', '7'), raw_body: 'synthetic-private-runtime-content' }));
+  const mock = await mockObservation(page, fixture);
+  await page.goto(`/?view=Service&obs_project_ref=${ref('project', '1')}&obs_phase=runtime`);
+  const rows = page.getByRole('list', { name: 'Retained catalog events' }).getByRole('listitem');
+  await expect(rows).toHaveCount(3);
+  for (const [index, outcome] of ['Serving', 'Closing', 'Stopped'].entries()) { await expect(rows.nth(index)).toContainText('Runtime'); await expect(rows.nth(index)).toContainText(outcome); }
+  await page.getByRole('button', { name: 'Local Authority Phase Changed', exact: true }).nth(2).click();
+  await expect(page.getByRole('button', { name: /^Open exact/ })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy safe context', exact: true }).click();
+  const copy = JSON.parse(await page.evaluate(() => (window as any).__copiedObservation));
+  expect(copy.event.phase).toBe('runtime'); expect(copy.event.outcome).toBe('stopped'); expect(copy.event.project_ref).toBe(ref('project', '1'));
+  expect(copy.execution_state).toBe(fixture.summary.execution_health.state);
+  expect(JSON.stringify(copy)).not.toContain('synthetic-private'); expect(await page.locator('body').innerText()).not.toContain('synthetic-private');
+  expect(mock.requests.every(request => request.startsWith('GET '))).toBe(true);
+});
+
 test('local phase state copy preserves proof without asserting remote authority', async ({ page }) => {
   const fixture = observationFixture();
   fixture.summary.event_templates!.local_authority_phase_changed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.' };

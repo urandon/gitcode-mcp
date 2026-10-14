@@ -218,7 +218,7 @@ func TestNativeObservedHandshakeCancellationAndChannelLossPreserveAuthority(t *t
 				t.Fatal("observed handshake retention did not join")
 			}
 			ref := observability.BindLocalProject(observed, string(testProject)).ProjectRef()
-			page, err := collector.Query(observability.Filter{ProjectRef: ref}, "", 200)
+			page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: ref}, "", 200)
 			if err != nil {
 				t.Fatal("observed handshake evidence unavailable")
 			}
@@ -228,6 +228,13 @@ func TestNativeObservedHandshakeCancellationAndChannelLossPreserveAuthority(t *t
 				}
 			} else if len(page.Events) != 1 || page.Coverage.Dropped != 0 {
 				t.Fatal("cancelled startup deadline leaked into retained observation lifetime")
+			}
+			if !disconnect {
+				runtime, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityPhaseChanged, ProjectRef: ref, Phase: "runtime"}, "", 200)
+				// Activation without a listener must not invent serving.
+				if err != nil || len(runtime.Events) != 2 || runtime.Events[0].Outcome != "closing" || runtime.Events[1].Outcome != "stopped" {
+					t.Fatal("activated owner without a listener lost joined shutdown proof")
+				}
 			}
 		})
 	}

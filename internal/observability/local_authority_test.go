@@ -19,6 +19,7 @@ func TestLocalAuthorityPhaseCatalogFiltersReplayAndCopy(t *testing.T) {
 		"index_job":          {"queued", "running", "cancelling", "cancelled", "succeeded", "failed", "interrupted"},
 		"knowledge_recovery": {"queued", "running", "cancelling", "cancelled", "succeeded", "failed", "interrupted"},
 		"projection_repair":  {"prepared", "quarantined", "confirmed"},
+		"runtime":            {"serving", "closing", "stopped"},
 	}
 	for phase, outcomes := range pairs {
 		for _, outcome := range outcomes {
@@ -33,6 +34,7 @@ func TestLocalAuthorityPhaseCatalogFiltersReplayAndCopy(t *testing.T) {
 		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "index_job", Outcome: "confirmed"},
 		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "projection_repair", Outcome: "running"},
 		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "document_commit", Outcome: "committed"},
+		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "runtime", Outcome: "running"},
 		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, JobRef: KnownRef("job", "synthetic-job").value},
 	} {
 		if _, err := ValidateFilter(bad); err == nil {
@@ -42,7 +44,7 @@ func TestLocalAuthorityPhaseCatalogFiltersReplayAndCopy(t *testing.T) {
 	flush(t, c, true)
 	filter := Filter{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value}
 	page, err := c.Query(filter, "", 200)
-	if err != nil || len(page.Events) != 17 {
+	if err != nil || len(page.Events) != 20 {
 		t.Fatal("confirmed phase catalog evidence missing")
 	}
 	summary, err := (&Reader{Collector: c}).Summary(context.Background())

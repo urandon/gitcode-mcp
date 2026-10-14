@@ -169,7 +169,7 @@ func buildFilterCatalogShapes() []Event {
 			ProviderAttempt: {"fetch", "embedding"}, SyncCommitted: {"commit"}, RetryAdmitted: {"retry"},
 			WriterContended: {"writer"}, SyncStageChanged: {"staging"}, AdminRequestCompleted: {"admin"}, MaintenanceStateChanged: {"maintenance"},
 			LocalAuthorityCommitted:    {"authority_commit", "document_commit"},
-			LocalAuthorityPhaseChanged: {"index_job", "knowledge_recovery", "projection_repair"},
+			LocalAuthorityPhaseChanged: {"index_job", "knowledge_recovery", "projection_repair", "runtime"},
 		}[code]
 		collections := []string{""}
 		if code == ProviderAttempt || code == SyncCommitted || code == RetryAdmitted || code == SyncStageChanged {
@@ -196,7 +196,7 @@ func buildFilterCatalogShapes() []Event {
 				e.Phase = phase
 				for _, collection := range collections {
 					e.Collection = collection
-					for _, outcome := range []string{"queued", "succeeded", "cancelled", "interrupted", "superseded", "failed", "resumed", "reconciled", "rejected", "timeout", "rate_limited", "forbidden", "invalid", "admitted", "denied", "staged", "committing", "committed", "waiting_commit", "enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked", "registered", "not_indexed", "identity_conflict", "cache_clone_conflict", "identity_unresolved", "config_snapshot_invalid", "cache_inspection_timeout", "running", "cancelling", "prepared", "quarantined", "confirmed"} {
+					for _, outcome := range []string{"queued", "succeeded", "cancelled", "interrupted", "superseded", "failed", "resumed", "reconciled", "rejected", "timeout", "rate_limited", "forbidden", "invalid", "admitted", "denied", "staged", "committing", "committed", "waiting_commit", "enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked", "registered", "not_indexed", "identity_conflict", "cache_clone_conflict", "identity_unresolved", "config_snapshot_invalid", "cache_inspection_timeout", "running", "cancelling", "prepared", "quarantined", "confirmed", "serving", "closing", "stopped"} {
 						e.Outcome = outcome
 						for _, failure := range []string{"", "cancelled", "timeout", "rate_limited", "forbidden", "invalid", "operation_failed", "provider_failed", "interrupted", "writer_busy", "superseded", "cache", "identity", "content", "frontier", "embedding", "retry", "sync_schedule", "rag_schedule", "repository_docs", "cache_schema_blocked"} {
 							e.FailureClass = failure

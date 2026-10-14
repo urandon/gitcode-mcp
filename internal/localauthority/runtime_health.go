@@ -41,8 +41,14 @@ func (l *RuntimeServingLease) Close() {
 // AdmitServing follows validated listener admission; construction/bootstrap is
 // not serving proof. The caller closes the lease only after handler join.
 func (c *Coordinator) AdmitServing(ctx context.Context) (*RuntimeServingLease, error) {
+	lease, publication, err := c.admitServing(ctx)
+	publication.publish()
+	return lease, err
+}
+
+func (c *Coordinator) admitServing(ctx context.Context) (*RuntimeServingLease, *runtimePublication, error) {
 	if c == nil || c.lifetime == nil || c.done == nil {
-		return nil, authority.Error{Code: authority.Unavailable}
+		return nil, nil, authority.Error{Code: authority.Unavailable}
 	}
 	ctx, cancel := context.WithTimeout(ctx, CoordinatorCallBudget)
 	defer cancel()
@@ -54,21 +60,27 @@ func (c *Coordinator) AdmitServing(ctx context.Context) (*RuntimeServingLease, e
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 	}
 	defer c.mu.Unlock()
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}
 	if !c.jobsStarted || c.closing || c.lifetime.Err() != nil {
-		return nil, authority.Error{Code: authority.Unavailable}
+		return nil, nil, authority.Error{Code: authority.Unavailable}
 	}
 	if c.serving != nil && !c.serving.released.Load() {
-		return nil, authority.Error{Code: authority.Conflict}
+		return nil, nil, authority.Error{Code: authority.Conflict}
 	}
 	c.serving = &RuntimeServingLease{}
-	return c.serving, nil
+	publication := c.runtimePublication("serving")
+	if publication != nil {
+		// Add before releasing admission, never after shutdown can enter Wait.
+		c.active.Add(1)
+		publication.joined = &c.active
+	}
+	return c.serving, publication, nil
 }
 
 func healthDegradation(code Code) string {

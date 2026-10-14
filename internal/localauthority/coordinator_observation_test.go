@@ -107,7 +107,7 @@ func TestCoordinatorObservesOnlyNewConfirmedSourceAndGitCommits(t *testing.T) {
 		t.Fatal("observed owners did not join")
 	}
 	known := observability.ProjectEntityRefs(observability.Context{Project: observability.KnownRef("project", string(testProject))})
-	page, err := collector.Query(observability.Filter{ProjectRef: known.Project}, "", 200)
+	page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: known.Project}, "", 200)
 	if err != nil || len(page.Events) != 2 {
 		t.Fatal("new commits were lost, duplicated or invented")
 	}
@@ -236,11 +236,11 @@ func TestCoordinatorObservationUsesCommitProofNotCallerAcknowledgement(t *testin
 					}
 				}
 			}
-			if !resume() || c.Close(context.Background()) != nil || !collector.Close(context.Background(), true) {
+			if c.Close(context.Background()) != nil || !resume() || !collector.Close(context.Background(), true) {
 				t.Fatal("commit proof observation owners did not join")
 			}
 			known := observability.ProjectEntityRefs(observability.Context{Project: observability.KnownRef("project", string(testProject))})
-			page, err := collector.Query(observability.Filter{ProjectRef: known.Project}, "", 200)
+			page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: known.Project}, "", 200)
 			if err != nil {
 				t.Fatal("commit proof evidence unavailable")
 			}

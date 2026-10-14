@@ -46,6 +46,15 @@ func phaseEvidence(t *testing.T, c *Coordinator, collector *observability.Collec
 	if err != nil {
 		t.Fatal("retained phase evidence unavailable")
 	}
+	// These controls qualify durable index/recovery/repair publication. Runtime
+	// owner boundaries have their own complete lifecycle/restart controls.
+	selected := page.Events[:0]
+	for _, event := range page.Events {
+		if event.Phase != "runtime" {
+			selected = append(selected, event)
+		}
+	}
+	page.Events = selected
 	return page
 }
 
@@ -289,6 +298,7 @@ func TestLocalPhaseJoinedReleaseKeepsCanonicalProofAcrossClose(t *testing.T) {
 		t.Fatal("actual joined source proof unavailable")
 	}
 	closed := make(chan error, 1)
+	c.runtimeClosingPublished = make(chan struct{})
 	go func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -298,6 +308,14 @@ func TestLocalPhaseJoinedReleaseKeepsCanonicalProofAcrossClose(t *testing.T) {
 	case <-c.lifetime.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("actual owner close did not cancel admission")
+	}
+	// Pause-writer does not serialize concurrent producers. Qualify this
+	// canonical-retention control after the actual closing emitter unwinds;
+	// separate runtime controls conserve genuine concurrent admission loss.
+	select {
+	case <-c.runtimeClosingPublished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("actual closing publication did not unwind")
 	}
 	select {
 	case <-closed:

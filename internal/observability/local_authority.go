@@ -64,6 +64,8 @@ func ValidLocalProjectPhase(phase, outcome string) bool {
 		}
 	case "projection_repair":
 		return outcome == "prepared" || outcome == "quarantined" || outcome == "confirmed"
+	case "runtime":
+		return outcome == "serving" || outcome == "closing" || outcome == "stopped"
 	}
 	return false
 }

@@ -453,9 +453,18 @@ func TestNativeAuthorityStrictProcessNetworkIsolation(t *testing.T) {
 		t.Fatal("strict native retained observation did not seal")
 	}
 	refs := observability.ProjectEntityRefs(observability.Context{Project: observability.KnownRef("project", string(fixtureProject))})
-	page, err := collector.Query(observability.Filter{ProjectRef: refs.Project}, "", 200)
+	page, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityCommitted, ProjectRef: refs.Project}, "", 200)
 	if err != nil || len(page.Events) != 1 || page.Coverage.Dropped != 0 || page.Events[0].Code != observability.LocalAuthorityCommitted {
 		t.Fatal("strict native observed graph did not retain actual source evidence")
+	}
+	runtime, err := collector.Query(observability.Filter{Code: observability.LocalAuthorityPhaseChanged, ProjectRef: refs.Project, Phase: "runtime"}, "", 200)
+	if err != nil || len(runtime.Events) != 3 || runtime.Coverage.Dropped != 0 {
+		t.Fatal("strict native observed graph lost runtime lifecycle proof")
+	}
+	for i, phase := range runtime.Events {
+		if phase.Outcome != []string{"serving", "closing", "stopped"}[i] {
+			t.Fatal("strict native lifecycle fabricated owner order")
+		}
 	}
 	e := observed.snapshot(true)
 	if e.Partial || e.RoleRead == 0 || e.INETSocket != 0 || e.INETOperation != 0 || e.UnixConnect != 0 {

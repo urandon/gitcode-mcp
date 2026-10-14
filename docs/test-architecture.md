@@ -267,6 +267,25 @@ phase/outcome catalog is tested through ledger replay, filters, safe-copy and
 semantic browser rendering without a remote navigation bridge. These are
 shared-core controls, not native retained-delivery/current-health qualification.
 
+Runtime lifecycle controls use actual serving admission, listener refusal and
+borrowed-server exit, joined writer shutdown, replacement leases and repeated
+Close. A held admitted operation preserves the real caller deadline while later
+successful join still records stopped. A captured-but-delayed serving boundary
+holds joined lifetime registration until publication, without owning admission
+or storage locks. An actual close failure on the second cohort owner's retained
+descriptor suppresses stopped for the entire cohort and records bounded partial
+coverage. Unobserved/rejected admission never allocates or invents proof.
+Actual native product restart retains one new serving/closing/stopped history
+per owner without duplicating the original canonical commit event. The traced
+strict product also qualifies these events. Catalog/filter/reload/safe-copy,
+browser unit and semantic DOM controls retain the closed runtime grammar but
+do not derive current health or remote actions from historical lifecycle events.
+The exact canonical-retention/Close control waits for the real closing emitter
+to finish before releasing its source publication. Pausing the collector writer
+does not serialize concurrent producers. A separate concurrent-emitter control
+conserves retained boundaries plus counted admission loss and reopens the
+canonical citation unchanged; it does not relax the ordered retention assertion.
+
 Current-owner health controls use actual source/catalog/job/repair state, not
 retained observations. They distinguish qualified source sequence zero from a
 missing catalog and publication generation, preserve canonical/lexical reads

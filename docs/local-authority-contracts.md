@@ -990,6 +990,25 @@ order is historical observation order, not a current job state or durable
 generation sequence. Current-health and later protected local
 workflow qualification remain explicit rollout gates.
 
+The runtime lifecycle uses the same closed code with phase `runtime` and only
+`serving`, `closing`, `stopped` outcomes. Serving records each successfully
+admitted private listener lease after worker activation, including an explicit
+replacement; a rejected listener is quiet. Borrowed listener loss ends current
+serving proof but never implies writer shutdown. Closing is captured once at
+the actual shared admission fence. Stopped is emitted only after all admitted
+operations/workers join and the entire cohort's component/store close loop
+succeeds. A close failure records partial coverage for the observed cohort,
+not a fabricated stopped event; a bounded Close caller's deadline alone does
+not decide the eventual owner outcome.
+
+Serving publication is registered under admission ownership before unlocking;
+shutdown joins that publication before its final proof and native relay seal.
+Emission is outside owner/admission locks. Previously admitted serving and
+closing proof can arrive out of order, so the timeline and safe copy remain
+historical observations, never a current-health projection. The embedded Admin
+accepts exactly these finite pairs and does not invent remote navigation or
+writer actions from them.
+
 The trusted native launcher optionally binds an existing parent collector into
 the authenticated launch frame as `local_project_observation.v1`. An absent
 collector preserves unobserved launch; an unsupported requested capability is
@@ -1019,8 +1038,9 @@ process exit, allows a one-second kernel-buffer drain before closing the FD and
 joining the reader. Missing/invalid seal means incomplete observation, not
 owner health. Actual product tests retain/reload canonical commit observations
 and prove original-key replay quiet across restart. The Linux strict-process
-syscall observer exercises this observed graph. Runtime phase observation,
-current-owner health qualification, real foreign-user/platform and restricted-provider qualification remain
+syscall observer exercises this observed graph, including actual runtime
+lifecycle delivery and current-health reads. Complete real foreign-user/platform
+and restricted-provider qualification remain
 mandatory; retained history alone cannot certify those gates.
 
 ### Fixed-channel native launch (L4 in progress)

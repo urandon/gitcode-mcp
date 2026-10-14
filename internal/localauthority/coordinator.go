@@ -58,6 +58,9 @@ type Coordinator struct {
 	serving        *RuntimeServingLease // guarded by mu; only validated server admission
 	done           chan struct{}
 	closeErr       error
+	// Private deterministic fixture boundary, installed before cancellation.
+	// Production never allocates or waits on this channel.
+	runtimeClosingPublished chan struct{}
 }
 
 // Available is a non-mutating core-admission check, not native launch/network
@@ -212,7 +215,12 @@ func (c *Coordinator) shutdown() {
 	<-c.lifetime.Done()
 	c.mu.Lock()
 	c.closing = true
+	closing := c.runtimePublication("closing")
 	c.mu.Unlock()
+	closing.publish()
+	if c.runtimeClosingPublished != nil {
+		close(c.runtimeClosingPublished)
+	}
 	// Add is protected by the same admission mutex and closing/lifetime fence.
 	// Keep writer ownership until every admitted operation has joined, even if
 	// a caller's bounded Close has already reported a deadline.
@@ -243,6 +251,13 @@ func (c *Coordinator) shutdown() {
 			c.closeErr = err
 		}
 	}
+	outcome := "stopped"
+	if c.closeErr != nil {
+		// A partial cohort release is not proof that the complete runtime
+		// stopped safely. Preserve bounded partial observation coverage.
+		outcome = ""
+	}
+	c.runtimePublication(outcome).publish()
 	close(c.done)
 }
 
