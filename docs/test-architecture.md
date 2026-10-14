@@ -181,7 +181,17 @@ content/inode/source/ledger changes and exclude timestamp-only metadata. Actual
 queued intent and an unjoined attempt block planning; retained ambiguous
 publication remains blocked across owner reopen. Cancellation, contention and
 impossible result fields cannot authorize effects. These tests do not qualify
-durable quarantine execution/replay, which remains required before rollout.
+public repair transport rollout, which remains gated by its cohort acceptance.
+The shared apply tests use genuine canonical/index publication followed by
+corruption, bounded quarantine, original-key replay, qualified owner reopen and
+explicit new indexing. A 22-cut matrix covers prepared/staged publication,
+exclusive move, file/directory/root sync, readback and receipt acknowledgement.
+At every cut original index-ledger bytes, canonical citation and real lexical
+retrieval are preserved. Native no-replace collision, pending-key conflict,
+stale image, cancellation/joined writer ownership, bounded history quota and
+corrupt/unsafe repair/quarantine intake are deterministic offline regressions.
+These do not substitute for protected IPC/CLI/MCP/Admin or real embedding
+acceptance; no user provider or repository is used by the fixtures.
 
 The index private-IPC cohort validates exact caller-request admission digests,
 typed unknown jobs, generation-fenced cancel/retry, missing-ledger observation,

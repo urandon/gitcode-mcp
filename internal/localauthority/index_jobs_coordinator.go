@@ -76,6 +76,12 @@ func (c *Coordinator) EnqueueIndex(ctx context.Context, req IndexJobRequest, act
 		return IndexJobView{}, err
 	}
 	defer done()
+	if p.repair == nil {
+		return IndexJobView{}, Error{RepairUncertain}
+	}
+	if err := p.repair.allowIndex(effect); err != nil {
+		return IndexJobView{}, err
+	}
 	status, err := s.Status(effect)
 	if err != nil {
 		return IndexJobView{}, err
@@ -138,11 +144,30 @@ func (c *Coordinator) indexAction(ctx context.Context, req IndexJobAction, actor
 	if r.Generation != req.ExpectedGeneration {
 		return IndexJobView{}, authority.Error{Code: authority.Conflict}
 	}
+	if retry && r.State == "succeeded" {
+		return indexJobView(r), nil
+	}
 	if retry && r.State != "succeeded" && r.State != "failed" && r.State != "interrupted" && r.State != "cancelled" {
 		return IndexJobView{}, authority.Error{Code: authority.Conflict}
 	}
 	if retry && (r.State == "failed" || r.State == "interrupted" || r.State == "cancelled") && r.Attempts >= maxIndexAttempts {
 		return IndexJobView{}, Error{Capacity}
+	}
+	if retry {
+		// Historical permission replay above grants no new attempt. Only an
+		// actual new retry is serialized against repair's owned source turn.
+		_, retryCall, done, err := c.begin(call, req.ProjectID)
+		if err != nil {
+			return IndexJobView{}, err
+		}
+		defer done()
+		call = retryCall
+		if p.repair == nil {
+			return IndexJobView{}, Error{RepairUncertain}
+		}
+		if err := p.repair.allowIndex(call); err != nil {
+			return IndexJobView{}, err
+		}
 	}
 	changed := false
 	ambiguous := false

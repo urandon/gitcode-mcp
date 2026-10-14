@@ -562,13 +562,14 @@ only compared during SQL revalidation. Content-free filesystem guards may read
 that immutable identity without taking the source SQL mutex; manifest changes
 are corruption, never permission to replace the admitted policy at runtime.
 
-### Explicit derived-repair planning foundation (L4 in progress)
+### Explicit derived-repair service (L4 in progress)
 
 The shared coordinator can render a read-only `ProjectionRepairPlan`. This is
 an internal service contract, not an advertised CLI/MCP/Admin or private-IPC
-action and not a completed repair receipt. Durable apply, original-key replay,
-quarantine phase recovery and verified post-effect owner reopen remain required
-before that capability is enabled. Planning never creates, repairs or syncs a
+action and not a completed repair receipt. Shared apply/replay described below
+does not yet activate the private-IPC, CLI/MCP or Admin cohorts. Their protected
+response and complete runtime acceptance remain required before rollout.
+Planning never creates, repairs or syncs a
 missing namespace or initializes the separate index-intent ledger.
 
 The plan binds project UUID, current canonical sequence, immutable source and
@@ -603,6 +604,67 @@ proposal. Confirmation must independently revalidate under owned execution and
 preserve bounded quarantine plus durable intent; this planner alone grants no
 permission to mutate. CLI/MCP #184, Admin #185 and backup/recovery #186 retain
 the complete explicit plan/confirm/degraded/restart UX and evidence gates.
+
+`ApplyProjectionRepair` requires project UUID, exact plan digest, explicit
+`write_mode: local`, a bounded caller key and a valid private actor. Source
+turn and repair metadata are held within the joined coordinator lifetime;
+pending/new effects additionally qualify and hold retained index intent.
+Fresh admission revalidates the proposal and refuses
+stale/blocked intake. Separate `runtime-projection-repair` metadata conserves
+original hashed intent/actor, source/root/namespace guards and all prior repair
+records; it never rewrites the index-job ledger or canonical tracker/Git.
+Caller/actor keys, physical guards, names and bodies are absent from the view.
+
+The causal phases are `prepared` (1), `quarantined` (2), `confirmed` (3).
+Each phase uses a bounded staged metadata snapshot, durable publication and
+exact readback. Prepared intent is confirmed before the source namespace is
+renamed to its opaque quarantine identity. Native Linux `RENAME_NOREPLACE` or
+Darwin `RENAME_EXCL` refuses an existing destination; no recursive deletion or
+replacement fallback exists. Exact location-independent inode/content guards,
+file/directory/root barriers and readback qualify quarantine before later
+phases can publish. Timeout or failed acknowledgement after effect fences the
+live repair owner; an error does not certify rollback or permit a new key.
+
+Qualified owner reopen preserves each phase. Repeating the original key and
+plan reconciles the same retained operation: it either qualifies the original
+source namespace before the one move, or verifies the exact already moved
+quarantine with no second effect. Source content may have advanced after
+prepared admission, but replay cannot select a different derived inode,
+index intent or catalog. An incompatible replacement, simultaneous source
+and quarantine, corrupt metadata or unknown object remains recovery-required.
+Different plan/actor with the same key conflicts; a different key cannot take
+over pending intent. Canonical reads and lexical search remain available even
+when repair metadata cannot be admitted. Historical index successes and
+cancellations replay independently; new index admission/retry is fenced while
+repair is pending or the current owner requires restart.
+Confirmed original-key repair replay is qualified by its own conserved intent,
+source binding and exact quarantine proofs before unrelated index-ledger
+qualification. A later damaged index ledger cannot erase that historical
+outcome; pending/new repair remains fenced and replay grants no new index work.
+
+Confirmed quarantine reports `restart_required`, not index readiness. The
+current owner never swaps its admitted projection descriptors or silently
+rebuilds. Explicit joined close and qualified reopen are required before a
+new, separately keyed build can be admitted. A retained confirmed repair view
+continues to describe its original effect, not current catalog coverage.
+Planning exposes `repair_pending` or `repair_restart_required` without granting
+another action; missing/unknown repair ownership returns fixed typed errors.
+
+Retention is bounded: at most four conserved repair records/quarantines,
+each with the planner's five-file/10 MiB bound; one 64 KiB final repair snapshot,
+at most four staging files/256 KiB total and nine namespace entries. Capacity
+failure does not evict an original intent or recovery point. Missing
+observation creates nothing; prepublication stages are inert evidence, not
+permission to execute. Quarantine and both intent ledgers are part of #186's
+verified backup/recovery boundary, separate from disposable catalog rebuilding.
+An existing repair namespace with no final intent snapshot is ambiguous even
+when empty: interrupted first provisioning and loss of an acknowledged final
+cannot be distinguished. Reopen refuses it with `recovery_required`; it never
+manufactures empty history or permits a different key. Preserve staged/final
+evidence for explicit verified recovery. Only a completely absent namespace
+can be admitted as never provisioned. Cancellation/deadline during inspection
+propagates as interruption, not proof of corrupt bytes; after a possible move
+the live owner remains fenced until qualified reopen.
 
 ### Protected index control protocol
 

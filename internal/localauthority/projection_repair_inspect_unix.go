@@ -100,6 +100,25 @@ func inspectProjectionRepair(ctx context.Context, s *Store) (projectionRepairIma
 		return projectionRepairImage{State: "missing", Fingerprint: hash([]byte("missing\x00" + rootID))}, nil
 	}
 	defer directory.Close()
+	image, err := inspectRepairDirectory(ctx, s, rootID, directory)
+	if err != nil {
+		return zero, err
+	}
+	current, _, err := openProjectionNamespace(root, false)
+	if err != nil || current == nil {
+		return zero, Error{ProjectionCorrupt}
+	}
+	defer current.Close()
+	id, err := physicalIdentity(current)
+	if err != nil || id != image.DirectoryIdentity || s.verifyPhysicalBinding() != nil {
+		return zero, Error{ProjectionCorrupt}
+	}
+	return image, nil
+}
+
+// Location-independent inode/content guard survives only the exact owned move.
+func inspectRepairDirectory(ctx context.Context, s *Store, rootID string, directory *os.File) (projectionRepairImage, error) {
+	var zero projectionRepairImage
 	directoryID, err := physicalIdentity(directory)
 	if err != nil {
 		return zero, err
@@ -109,7 +128,7 @@ func inspectProjectionRepair(ctx context.Context, s *Store) (projectionRepairIma
 		return zero, err
 	}
 	files := make([]projectionRepairFile, 0, len(names))
-	image := projectionRepairImage{State: "corrupt", Files: len(names)}
+	image := projectionRepairImage{State: "corrupt", Files: len(names), DirectoryIdentity: directoryID}
 	stages, stageBytes := 0, int64(0)
 	for _, name := range names {
 		f, body, err := readProjectionRepairFile(ctx, directory, name)
@@ -157,12 +176,7 @@ func inspectProjectionRepair(ctx context.Context, s *Store) (projectionRepairIma
 			return zero, Error{ProjectionCorrupt}
 		}
 	}
-	current, _, err := openProjectionNamespace(root, false)
-	if err != nil || current == nil {
-		return zero, Error{ProjectionCorrupt}
-	}
-	defer current.Close()
-	id, err := physicalIdentity(current)
+	id, err := physicalIdentity(directory)
 	if err != nil || id != directoryID || s.verifyPhysicalBinding() != nil {
 		return zero, Error{ProjectionCorrupt}
 	}

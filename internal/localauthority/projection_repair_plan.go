@@ -46,7 +46,9 @@ func (p ProjectionRepairPlan) Validate() error {
 			return nil
 		}
 	case "blocked":
-		if p.Action == "none" && (p.Blocker == "index_active" || p.Blocker == "index_uncertain") && p.LedgerState == "ready" && p.LedgerGeneration >= 2 && !p.RestartRequired && p.Files == 0 && p.Bytes == 0 {
+		index := (p.Blocker == "index_active" || p.Blocker == "index_uncertain") && p.LedgerState == "ready" && p.LedgerGeneration >= 2
+		repair := p.Blocker == "repair_pending" || p.Blocker == "repair_restart_required"
+		if p.Action == "none" && (index || repair) && !p.RestartRequired && p.Files == 0 && p.Bytes == 0 {
 			return nil
 		}
 	}
@@ -54,10 +56,11 @@ func (p ProjectionRepairPlan) Validate() error {
 }
 
 type projectionRepairImage struct {
-	State       string
-	Fingerprint string
-	Files       int
-	Bytes       int64
+	State             string
+	Fingerprint       string
+	DirectoryIdentity string
+	Files             int
+	Bytes             int64
 }
 
 // Planning holds the source turn and intent mutex only for a finite read. It
@@ -65,7 +68,7 @@ type projectionRepairImage struct {
 // Apply must independently revalidate this same intake under joined ownership.
 func (c *Coordinator) PlanProjectionRepair(ctx context.Context, project authority.UUID) (ProjectionRepairPlan, error) {
 	var zero ProjectionRepairPlan
-	s, call, release, err := c.begin(ctx, project)
+	_, call, release, err := c.begin(ctx, project)
 	if err != nil {
 		return zero, err
 	}
@@ -84,6 +87,21 @@ func (c *Coordinator) PlanProjectionRepair(ctx context.Context, project authorit
 		return zero, err
 	}
 	defer q.mu.Unlock()
+	if p.repair == nil {
+		return zero, Error{RepairUncertain}
+	}
+	if err := p.repair.lock(call); err != nil {
+		return zero, err
+	}
+	defer p.repair.mu.Unlock()
+	return c.planProjectionRepairOwned(call, p, nil)
+}
+
+// Source turn, index intent and repair mutex are already owned by the caller.
+func (c *Coordinator) planProjectionRepairOwned(call context.Context, p *coordinatedProject, observed *projectionRepairImage) (ProjectionRepairPlan, error) {
+	var zero ProjectionRepairPlan
+	s, q := p.store, p.indexJobs
+	project := s.manifest.ID
 	status, err := s.Status(call)
 	if err != nil {
 		return zero, err
@@ -112,11 +130,19 @@ func (c *Coordinator) PlanProjectionRepair(ctx context.Context, project authorit
 		uncertain = uncertain || r.Code == "outcome_uncertain" || r.Code == string(ProjectionUncertain)
 	}
 	image := projectionRepairImage{}
-	if uncertain {
+	if p.repair.pending() || p.repair.restartRequired {
+		plan.State, plan.Blocker = "blocked", "repair_pending"
+		if !p.repair.pending() {
+			plan.Blocker = "repair_restart_required"
+		}
+	} else if uncertain {
 		plan.State, plan.Blocker = "blocked", "index_uncertain"
 	} else if active {
 		plan.State, plan.Blocker = "blocked", "index_active"
 	} else {
+		if _, _, err := p.repair.inventory(call); err != nil {
+			return zero, err
+		}
 		if p.projection != nil {
 			if !p.projection.mu.TryLock() {
 				return zero, authority.Error{Code: authority.Conflict}
@@ -148,17 +174,21 @@ func (c *Coordinator) PlanProjectionRepair(ctx context.Context, project authorit
 		return zero, call.Err()
 	}
 	guard, err := json.Marshal(struct {
-		Domain                                               string
-		Plan                                                 ProjectionRepairPlan
-		Tracker                                              authority.UUID
-		Manifest, Root, LedgerFile, LedgerDigest, Projection string
-	}{"projection-repair-plan-v1", plan, s.instance, manifestHash(s.manifest), q.rootIdentity, q.fileIdentity, q.fileHash, image.Fingerprint})
+		Domain                                                                         string
+		Plan                                                                           ProjectionRepairPlan
+		Tracker                                                                        authority.UUID
+		Manifest, Root, LedgerFile, LedgerDigest, Projection, RepairFile, RepairDigest string
+		RepairGeneration                                                               uint64
+	}{"projection-repair-plan-v2", plan, s.instance, manifestHash(s.manifest), q.rootIdentity, q.fileIdentity, q.fileHash, image.Fingerprint, p.repair.fileIdentity, p.repair.fileHash, p.repair.state.Generation})
 	if err != nil {
 		return zero, authority.Error{Code: authority.InvalidContract}
 	}
 	plan.PlanID = hash(guard)
 	if err := plan.Validate(); err != nil {
 		return zero, err
+	}
+	if observed != nil {
+		*observed = image
 	}
 	return plan, nil
 }

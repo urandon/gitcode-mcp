@@ -27,6 +27,8 @@ type coordinatedProject struct {
 	projectionError           Code
 	indexJobs                 *indexQueue
 	indexJobsError            Code
+	repair                    *projectionRepairStore
+	repairError               Code
 	activeIndex               authority.UUID
 	indexCancel               context.CancelFunc
 	indexAttemptGeneration    uint64
@@ -133,6 +135,9 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 				if p.projection != nil {
 					_ = p.projection.close()
 				}
+				if p.repair != nil {
+					_ = p.repair.close()
+				}
 				_ = p.store.Close()
 			}
 		}
@@ -168,6 +173,10 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 		p.indexJobs, err = openIndexQueue(bootstrap, p.store)
 		if err != nil {
 			p.indexJobsError = indexStorageErrorCode(err, IndexJobsUncertain)
+		}
+		p.repair, err = openProjectionRepair(bootstrap, p.store)
+		if err != nil {
+			p.repairError = indexStorageErrorCode(err, RepairUncertain)
 		}
 	}
 	if bootstrap.Err() != nil {
@@ -207,6 +216,11 @@ func (c *Coordinator) shutdown() {
 		}
 		if p.projection != nil {
 			if err := p.projection.close(); err != nil && c.closeErr == nil {
+				c.closeErr = err
+			}
+		}
+		if p.repair != nil {
+			if err := p.repair.close(); err != nil && c.closeErr == nil {
 				c.closeErr = err
 			}
 		}

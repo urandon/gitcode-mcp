@@ -311,6 +311,8 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 				return localauthority.Error{Code: storage}
 			case localauthority.ProjectionCorrupt, localauthority.ProjectionUncertain, localauthority.IndexJobsCorrupt, localauthority.IndexJobsUncertain, localauthority.IndexJobNotFound:
 				return localauthority.Error{Code: storage}
+			case localauthority.RepairCorrupt, localauthority.RepairUncertain:
+				return localauthority.Error{Code: storage}
 			default:
 				return authority.Error{Code: authority.Unsupported}
 			}

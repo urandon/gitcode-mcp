@@ -47,7 +47,7 @@ func TestAuthorityIndexAuthenticatedForgedResponsesRejectedWhenDiscarded(t *test
 }
 
 func TestAuthorityIndexErrorsDoNotEchoPeerProse(t *testing.T) {
-	for _, code := range []localauthority.Code{localauthority.IndexJobsCorrupt, localauthority.IndexJobsUncertain, localauthority.IndexJobNotFound, localauthority.ProjectionCorrupt, localauthority.ProjectionUncertain, "synthetic-private-unknown"} {
+	for _, code := range []localauthority.Code{localauthority.IndexJobsCorrupt, localauthority.IndexJobsUncertain, localauthority.IndexJobNotFound, localauthority.ProjectionCorrupt, localauthority.ProjectionUncertain, localauthority.RepairCorrupt, localauthority.RepairUncertain, "synthetic-private-unknown"} {
 		client, done := recoveryPeerFixture(t, authorityRuntimeCapabilities(), nil, &RPCError{Code: -32000, DiagnosticCode: string(code), Message: "synthetic-private-peer-body"})
 		err := client.Call(context.Background(), "AuthorityV1.IndexJob", indexIPCRequests()["AuthorityV1.IndexJob"], nil)
 		<-done
