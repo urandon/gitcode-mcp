@@ -15,6 +15,12 @@ func authorityRuntimeResult(method string, params any, raw json.RawMessage) (any
 		return nil, invalid
 	}
 	switch method {
+	case "AuthorityV1.RuntimeHealth":
+		var result localauthority.RuntimeHealthView
+		if len(raw) > localauthority.MaxRuntimeHealthBytes || authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyRuntimeHealth(params.(localauthority.RuntimeHealthRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
 	case "AuthorityV1.Read":
 		req := params.(authority.ReadRequest)
 		if req.Operation == "status" {

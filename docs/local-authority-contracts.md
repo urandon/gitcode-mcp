@@ -803,7 +803,8 @@ The dedicated server negotiates implemented Read, Mutate, MutateDocument,
 KnowledgeStatus, Search, EnqueueRecovery, RecoveryJob, RecoveryJobs,
 CancelRecovery, RetryRecovery, EnqueueIndex, IndexJob, IndexJobs, CancelIndex
 and RetryIndex, plus PlanProjectionRepair, ApplyProjectionRepair,
-ProjectionRepair and ProjectionRepairs methods. Exact implemented-method inventory
+ProjectionRepair, ProjectionRepairs and RuntimeHealth methods (20 total).
+Exact implemented-method inventory
 is required before an operation; contracts-only stays unavailable and an old,
 incomplete, reordered or unknown inventory is unsupported, never auto-started
 or routed to remote state. Concrete responses are validated even when
@@ -813,6 +814,57 @@ revision and document outcome/ref expectations; another well-formed receipt is
 not sufficient. Raw fault/driver/OS bodies and unknown codes never become error
 prose. Replies retain the total 512 KiB ceiling, including RPC envelope; protected
 results and continuation cursors reserve finite headroom inside that ceiling.
+
+### Current owner health (private L4 cohort)
+
+`RuntimeHealth` accepts exactly an admitted project UUID and an expected
+`runtime_binding`. The native parent retains that opaque launch/cohort epoch
+only after successful activation and startup-deadline handoff; the child
+installs its own immutable bootstrap binding before serving. It does not learn
+its epoch from a health request. The ordinary remote daemon stays contracts-only.
+
+The trusted process health handle retains the original Unix socket and private
+parent-directory identities independently of its generic mutable RPC client.
+It rechecks the endpoint before connection, after connection and before exposing
+a response, and rejects known process exit or a changed epoch. Cleanup preserves
+a replacement endpoint. These are consistency/routing controls under the
+cooperating-local-user model, not resistance to hostile same-UID filesystem
+races or protocol impersonation. Peer UID and an echoed binding alone are not
+proof of the original child; inherited-listener peer PID is not assumed.
+
+The content-free DTO is capped at 16 KiB, including its transport response, and
+contains project/epoch, retrieval time, starting/serving/not-serving phase, tracker writer
+readiness and qualified source sequence, knowledge readiness/pending boolean,
+content-catalog state/as-of sequence, bounded retained recovery/index job counts
+and active-attempt flags, and repair readiness. It excludes entity/operation
+IDs, Git OIDs, source bytes, caller keys, actors, paths and raw errors. A qualified
+sequence zero is distinct from absent/unqualified generation. Catalog
+publication generation is not source sequence; catalog currency is not semantic
+vector coverage. Retained observations, PID and last activity are not inputs.
+
+One admitted source turn takes existing source, recovery, index-intent, repair
+and projection locks in a fixed nonblocking order. It verifies current source
+and retained component identities/bounds without provisioning, reopening,
+synchronizing, repairing or enqueuing work. Contention returns a typed conflict;
+closing/unknown owners refuse rather than yield a ready image. Git inspection
+is cancellable. Tracker status is read after knowledge qualification, which can
+discover SQL corruption and fence the global writer. Intact tracker/lexical
+reads remain independent of damaged derived metadata. Live logical, uncertain
+index and repair-restart fences cannot be cleared by valid-looking files or a
+terminal job row; active-attempt lifetime is reported separately.
+
+Writer admission is rechecked against current SQLite durability settings. A
+temporarily unqualified writer is `read_only`/`unavailable` with a qualified
+canonical sequence, not ready/owned or a fabricated persistent recovery fence.
+Serving proof belongs to an opaque listener lease: listener loss seals the
+proof immediately, but replacement admission remains held until old handlers
+join, preserving the global 32-handler bound. Releasing an old lease cannot
+clear a replacement. `not_serving` does not mean writer ownership has stopped.
+
+Public CLI/MCP and Admin current-health workflows remain #184/#185. Historical
+runtime phase observations and remaining native/foreign-user/restricted-provider
+qualification remain #183 gates; this private read contract is not whole-feature
+acceptance or a product rollout claim.
 Response DTOs are complete snapshots: the client validates a fresh object and
 only then replaces the caller's result. Omitted optional terminal codes,
 receipts or cursors cannot survive an older response; invalid replies cannot
@@ -967,8 +1019,8 @@ process exit, allows a one-second kernel-buffer drain before closing the FD and
 joining the reader. Missing/invalid seal means incomplete observation, not
 owner health. Actual product tests retain/reload canonical commit observations
 and prove original-key replay quiet across restart. The Linux strict-process
-syscall observer exercises this observed graph. Runtime phase/current-owner
-health, real foreign-user/platform and restricted-provider qualification remain
+syscall observer exercises this observed graph. Runtime phase observation,
+current-owner health qualification, real foreign-user/platform and restricted-provider qualification remain
 mandatory; retained history alone cannot certify those gates.
 
 ### Fixed-channel native launch (L4 in progress)

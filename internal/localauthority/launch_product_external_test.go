@@ -45,9 +45,10 @@ func buildNativeProduct(t *testing.T) string {
 }
 
 type productChild struct {
-	cmd    *exec.Cmd
-	done   chan struct{}
-	client *servicectl.RPCClient
+	cmd     *exec.Cmd
+	done    chan struct{}
+	client  *servicectl.RPCClient
+	binding string
 }
 
 func spawnProductChild(t *testing.T, executable string, p *localauthority.PreparedRegistry, dir, misuse string, instrument ...func(*exec.Cmd)) productChild {
@@ -161,7 +162,7 @@ func spawnProductChildObserved(t *testing.T, executable string, p *localauthorit
 	_ = childFile.Close()
 	_ = registry.Close()
 	_ = listenFile.Close()
-	child := productChild{cmd, make(chan struct{}), &servicectl.RPCClient{Network: "unix", Address: path}}
+	child := productChild{cmd: cmd, done: make(chan struct{}), client: &servicectl.RPCClient{Network: "unix", Address: path}}
 	go func() {
 		_ = cmd.Wait()
 		<-observationReady
@@ -201,6 +202,10 @@ func spawnProductChildObserved(t *testing.T, executable string, p *localauthorit
 		reader, err := prepared.SendObserved(startup, parent)
 		if err != nil {
 			t.Fatal("real product early entry did not activate existing authority")
+		}
+		child.binding, err = prepared.ActivatedRuntimeBinding()
+		if err != nil {
+			t.Fatal("completed product preparation did not retain its expected epoch")
 		}
 		if reader != nil {
 			keepBootstrap, observationStarted = true, true

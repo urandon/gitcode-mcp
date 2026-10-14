@@ -202,6 +202,11 @@ func (s extraScanner) Scan(values ...any) error { return s.row.Scan(append(value
 func (s *Store) Status(ctx context.Context) (authority.ProjectStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.statusLocked(ctx)
+}
+
+// Caller owns Store.mu; no filesystem or identity qualification is implied.
+func (s *Store) statusLocked(ctx context.Context) (authority.ProjectStatus, error) {
 	if s.closed {
 		return authority.ProjectStatus{}, Error{ReadOnly}
 	}

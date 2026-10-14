@@ -127,6 +127,7 @@ func (r *ReceivedLaunch) Activate(lifetime, handshake context.Context) (*Coordin
 		}
 		admission = observability.WithLocalProjectRelay(admission, r.relay)
 	}
+	admission = context.WithValue(admission, runtimeBindingKey{}, launchBinding(r.frame))
 	r.core, err = newStrictCoordinator(admission, r.prepared, r.bindings, false)
 	if err != nil {
 		cancel()

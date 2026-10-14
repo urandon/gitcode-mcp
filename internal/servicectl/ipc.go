@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,9 @@ type RPCClient struct {
 	Address    string
 	SocketPath string
 	nextID     atomic.Int64
+	// Trusted native health handle only; never transport/config selectors.
+	authoritySocketIdentity os.FileInfo
+	authorityParentIdentity os.FileInfo
 }
 
 var memoryRPC = struct {

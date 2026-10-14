@@ -64,11 +64,12 @@ func launchPath(path string) bool {
 // opaque PreparedRegistry can create it; there is no root/config constructor.
 // Duplicated descriptors have separate lifetime ownership, not another writer.
 type NativePreparation struct {
-	mu     sync.Mutex
-	file   *os.File
-	frame  launchFrame
-	used   bool
-	closed bool
+	mu               sync.Mutex
+	file             *os.File
+	frame            launchFrame
+	used             bool
+	closed           bool
+	activatedBinding string
 }
 
 func (p *PreparedRegistry) PrepareLaunch(ctx context.Context, bindings []ProjectBinding) (*NativePreparation, error) {
@@ -205,6 +206,20 @@ func (p *NativePreparation) SendObserved(ctx context.Context, conn *net.UnixConn
 	return p.send(ctx, conn, true)
 }
 
+// ActivatedRuntimeBinding is available only after successful trusted handshake
+// cleanup. Never learn an expected owner epoch from a health response.
+func (p *NativePreparation) ActivatedRuntimeBinding() (string, error) {
+	if p == nil {
+		return "", authority.Error{Code: authority.InitializationRequired}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !validDigest(p.activatedBinding) {
+		return "", authority.Error{Code: authority.InitializationRequired}
+	}
+	return p.activatedBinding, nil
+}
+
 func (p *NativePreparation) send(ctx context.Context, conn *net.UnixConn, observe bool) (_ *NativeObservationReader, resultErr error) {
 	if p == nil {
 		return nil, authority.Error{Code: authority.InitializationRequired}
@@ -218,6 +233,7 @@ func (p *NativePreparation) send(ctx context.Context, conn *net.UnixConn, observ
 	f := p.frame
 	p.mu.Unlock()
 	var observation *NativeObservationReader
+	binding := ""
 	handoff := false
 	if observe {
 		observation = newNativeObservationReader(ctx, conn, f.Projects)
@@ -239,6 +255,11 @@ func (p *NativePreparation) send(ctx context.Context, conn *net.UnixConn, observ
 		if resultErr != nil && observation != nil && handoff {
 			observation.lossOwner.UnconfirmedCommit()
 		}
+		if resultErr == nil && validDigest(binding) {
+			p.mu.Lock()
+			p.activatedBinding = binding
+			p.mu.Unlock()
+		}
 	}()
 	var challenge launchMessage
 	if err = readLaunch(conn, &challenge); err != nil || challenge.Phase != "challenge" || challenge.Generation != "" || challenge.Binding != "" {
@@ -252,7 +273,7 @@ func (p *NativePreparation) send(ctx context.Context, conn *net.UnixConn, observ
 	if writeLaunch(conn, f) != nil {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
-	binding := launchBinding(f)
+	binding = launchBinding(f)
 	if observation != nil {
 		observation.binding = binding
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,11 +19,13 @@ import (
 const AuthorityRuntimeSelector = "__local_authority_runtime"
 
 type AuthorityProcess struct {
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	done   chan struct{}
-	exit   error
-	client *RPCClient
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
+	done          chan struct{}
+	exit          error
+	client        *RPCClient
+	healthClient  *RPCClient
+	healthBinding string
 }
 
 // StartAuthorityRuntime is explicit trusted launch, never invoked by a read.
@@ -51,6 +54,10 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 	}
 	listener.SetUnlinkOnClose(false)
 	defer listener.Close()
+	parentIdentity, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return nil, authority.Error{Code: authority.Unavailable}
+	}
 	cleanup := func() {
 		if current, e := os.Lstat(path); e == nil && os.SameFile(identity, current) {
 			_ = os.Remove(path)
@@ -91,6 +98,7 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 	cmd.ExtraFiles = []*os.File{registry, listenFile, child}
 	lifetime, cancel := context.WithCancel(ctx)
 	p := &AuthorityProcess{cmd: cmd, cancel: cancel, done: make(chan struct{}), client: &RPCClient{Network: "unix", Address: path}}
+	p.healthClient = &RPCClient{Network: "unix", Address: path, authoritySocketIdentity: identity, authorityParentIdentity: parentIdentity}
 	if cmd.Start() != nil {
 		cancel()
 		return nil, authority.Error{Code: authority.Unavailable}
@@ -133,6 +141,9 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 		}
 	}()
 	observation, err := preparation.SendObserved(ctx, parent)
+	if err == nil {
+		p.healthBinding, err = preparation.ActivatedRuntimeBinding()
+	}
 	if err != nil {
 		close(observationDone)
 		close(observationReady)

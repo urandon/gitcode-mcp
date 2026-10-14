@@ -77,6 +77,10 @@ func (s *Store) validateRecoveryJobTargets(ctx context.Context, snapshot recover
 		return authority.Error{Code: authority.Conflict}
 	}
 	defer s.mu.Unlock()
+	return s.validateRecoveryJobTargetsLocked(ctx, snapshot)
+}
+
+func (s *Store) validateRecoveryJobTargetsLocked(ctx context.Context, snapshot recoveryJobSnapshot) error {
 	for _, r := range snapshot.Jobs {
 		if ctx.Err() != nil {
 			return ctx.Err()

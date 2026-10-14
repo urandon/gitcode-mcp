@@ -267,6 +267,27 @@ phase/outcome catalog is tested through ledger replay, filters, safe-copy and
 semantic browser rendering without a remote navigation bridge. These are
 shared-core controls, not native retained-delivery/current-health qualification.
 
+Current-owner health controls use actual source/catalog/job/repair state, not
+retained observations. They distinguish qualified source sequence zero from a
+missing catalog and publication generation, preserve canonical/lexical reads
+through derived damage, retain logical and repair-restart fences, and observe
+an actual live index attempt separately from its published catalog. Protected
+Unix controls reject wrong project/epoch, malformed or oversized DTOs even when
+discarded, and old inventories before the operation. Actual native restart
+changes the immutable epoch; live socket replacement by an echo responder is
+rejected before contact and preserved on original-owner cleanup. Mutable generic
+client coordinates cannot retarget the trusted health handle. These are
+cooperating-user routing controls, not hostile same-UID impersonation proof.
+
+Independent-review regressions require an actually unqualified SQLite writer
+to stop reporting ready/owned, reject contradictory protected DTO combinations,
+and expire serving proof when a real borrowed server stops while its owner
+remains alive. Serving lease controls retain replacement admission until handler
+join and prevent an old lease from clearing a later one. Restoring transient
+durability settings must not require fabricated source recovery. The traced
+strict product gate also performs the current-health read using its completed
+preparation's retained expected epoch, not an epoch learned from a response.
+
 The explicit Linux strict-process network gate builds the real product from
 the current checkout with `python3 scripts/ci/run_native_authority_network.py`.
 Direct opt-in tests may use a separately built artifact only with an explicit

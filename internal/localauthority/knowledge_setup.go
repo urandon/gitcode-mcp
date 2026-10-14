@@ -176,6 +176,12 @@ func (s *Store) KnowledgeStatus(ctx context.Context, project authority.UUID) (Kn
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.knowledgeStatusLocked(ctx, project)
+}
+
+// Caller owns Store.mu; composite owner inspection must not recursively lock.
+func (s *Store) knowledgeStatusLocked(ctx context.Context, project authority.UUID) (KnowledgeState, error) {
+	var zero KnowledgeState
 	if ctx.Err() != nil {
 		return zero, ctx.Err()
 	}

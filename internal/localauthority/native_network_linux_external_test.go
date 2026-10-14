@@ -416,6 +416,28 @@ func TestNativeAuthorityStrictProcessNetworkIsolation(t *testing.T) {
 	if child.client.Call(ctx, "AuthorityV1.Search", localauthority.SearchRequest{ProjectID: fixtureProject, Query: "canonical issue", Mode: "hybrid", Limit: 8}, &search) != nil || search.FallbackReason != "policy_denied" || search.EffectiveMode != "full_text" || len(search.Hits) != 1 {
 		t.Fatal("observed strict product search fabricated semantic readiness")
 	}
+	healthRequest := localauthority.RuntimeHealthRequest{ProjectID: fixtureProject, RuntimeBinding: child.binding}
+	var health localauthority.RuntimeHealthView
+	healthTick := time.NewTicker(10 * time.Millisecond)
+	defer healthTick.Stop()
+	for {
+		err := child.client.Call(ctx, "AuthorityV1.RuntimeHealth", healthRequest, &health)
+		if err == nil {
+			break
+		}
+		var domain authority.Error
+		if !errors.As(err, &domain) || domain.Code != authority.Conflict {
+			t.Fatal("observed strict health failed outside finite busy admission")
+		}
+		select {
+		case <-healthTick.C:
+		case <-ctx.Done():
+			t.Fatal("observed strict health never completed its actual read turn")
+		}
+	}
+	if localauthority.VerifyRuntimeHealth(healthRequest, health) != nil || health.Phase != "serving" || health.Tracker.State != "ready" || health.Tracker.Writer != "owned" || health.Tracker.SourceSequence == nil || *health.Tracker.SourceSequence != 1 {
+		t.Fatal("observed actual strict product did not qualify current owner health")
+	}
 	if target.signal(unix.SIGTERM) != nil {
 		t.Fatal("observed actual child could not receive owned stop")
 	}

@@ -31,7 +31,7 @@ func NewAuthorityServer(core *localauthority.Coordinator) (*AuthorityServer, err
 }
 
 func authorityRuntimeCapabilities() authority.Negotiation {
-	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery", "AuthorityV1.EnqueueIndex", "AuthorityV1.IndexJob", "AuthorityV1.IndexJobs", "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex", "AuthorityV1.PlanProjectionRepair", "AuthorityV1.ApplyProjectionRepair", "AuthorityV1.ProjectionRepair", "AuthorityV1.ProjectionRepairs"}}
+	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery", "AuthorityV1.EnqueueIndex", "AuthorityV1.IndexJob", "AuthorityV1.IndexJobs", "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex", "AuthorityV1.PlanProjectionRepair", "AuthorityV1.ApplyProjectionRepair", "AuthorityV1.ProjectionRepair", "AuthorityV1.ProjectionRepairs", "AuthorityV1.RuntimeHealth"}}
 }
 
 type authorityProjectRequest struct {
@@ -50,12 +50,17 @@ func (s *AuthorityServer) Serve(ctx context.Context, l *net.UnixListener) error 
 	if err != nil {
 		return err
 	}
+	serving, err := s.core.AdmitServing(ctx)
+	if err != nil {
+		return err
+	}
+	defer serving.Close()
 	l.SetUnlinkOnClose(false)
 	ctx, cancel := context.WithCancel(ctx)
 	var handlers sync.WaitGroup
 	slots := make(chan struct{}, authorityHandlerLimit)
 	closed := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() { _ = l.Close(); close(closed) })
+	stop := context.AfterFunc(ctx, func() { serving.Seal(); _ = l.Close(); close(closed) })
 	defer func() {
 		cancel()
 		if !stop() {
@@ -71,6 +76,7 @@ func (s *AuthorityServer) Serve(ctx context.Context, l *net.UnixListener) error 
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
+			serving.Seal()
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -131,9 +137,11 @@ func (s *AuthorityServer) handle(ctx context.Context, conn *net.UnixConn) {
 		return
 	}
 	response := RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32602, Message: "invalid local authority contract", DiagnosticCode: string(authority.InvalidContract)}}
+	responseLimit := authorityResponseBytes
 	if strictAuthorityEnvelope(raw) == nil {
 		var req RPCRequest
 		if authority.DecodeJSON(raw, &req) == nil && req.JSONRPC == jsonrpcVersion {
+			responseLimit = authorityResponseLimit(req.Method)
 			response.ID = req.ID
 			result, err := s.dispatch(ctx, req.Method, req.Params)
 			if err != nil {
@@ -145,7 +153,7 @@ func (s *AuthorityServer) handle(ctx context.Context, conn *net.UnixConn) {
 		}
 	}
 	body, err := json.Marshal(response)
-	if err != nil || len(body) > authorityResponseBytes {
+	if err != nil || len(body) > responseLimit {
 		return
 	}
 	_, _ = io.Copy(conn, bytes.NewReader(append(body, '\n')))
@@ -174,6 +182,8 @@ func (s *AuthorityServer) dispatch(ctx context.Context, method string, raw []byt
 		return s.core.MutateDocument(ctx, params.(authority.DocumentMutationRequest), localauthority.Actor{ID: "local-user"})
 	case "AuthorityV1.KnowledgeStatus":
 		return s.core.KnowledgeStatus(ctx, params.(authorityProjectRequest).ProjectID)
+	case "AuthorityV1.RuntimeHealth":
+		return s.core.RuntimeHealth(ctx, params.(localauthority.RuntimeHealthRequest))
 	case "AuthorityV1.Search":
 		return s.core.Search(ctx, params.(localauthority.SearchRequest))
 	case "AuthorityV1.EnqueueRecovery":

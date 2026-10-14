@@ -18,6 +18,13 @@ import (
 const authorityResponseBytes = 512 << 10
 const authorityCallBudget = 10 * time.Second
 
+func authorityResponseLimit(method string) int {
+	if method == "AuthorityV1.RuntimeHealth" {
+		return localauthority.MaxRuntimeHealthBytes
+	}
+	return authorityResponseBytes
+}
+
 type authorityRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -64,6 +71,12 @@ func authorityParams(method string, raw []byte) (any, error) {
 		return r, nil
 	case "AuthorityV1.Search":
 		var r localauthority.SearchRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.RuntimeHealth":
+		var r localauthority.RuntimeHealthRequest
 		if err := authority.DecodeJSON(raw, &r); err != nil {
 			return nil, err
 		}
@@ -264,6 +277,9 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		}
 		data, err = json.Marshal(s.handleRequest(ctx, req))
 	} else {
+		if err := c.verifyAuthorityEndpoint(address); err != nil {
+			return err
+		}
 		var dialer net.Dialer
 		conn, dialErr := dialer.DialContext(ctx, "unix", address)
 		if dialErr != nil {
@@ -271,6 +287,9 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		}
 		defer conn.Close()
 		if err := sameAuthorityUser(conn); err != nil {
+			return err
+		}
+		if err := c.verifyAuthorityEndpoint(address); err != nil {
 			return err
 		}
 		done := make(chan struct{})
@@ -287,7 +306,8 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 		if _, err := io.Copy(conn, bytes.NewReader(append(encoded, '\n'))); err != nil {
 			return authoritySocketError(ctx, err)
 		}
-		limited := &io.LimitedReader{R: conn, N: authorityResponseBytes + 1}
+		responseLimit := authorityResponseLimit(method)
+		limited := &io.LimitedReader{R: conn, N: int64(responseLimit + 1)}
 		decoder := json.NewDecoder(limited)
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
@@ -296,7 +316,7 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			}
 			return authoritySocketError(ctx, err)
 		}
-		if decoder.InputOffset() > authorityResponseBytes {
+		if decoder.InputOffset() > int64(responseLimit) {
 			return authority.Error{Code: authority.InvalidContract}
 		}
 		tail, _ := io.ReadAll(decoder.Buffered())
@@ -304,11 +324,14 @@ func (c *RPCClient) authorityRoundTrip(ctx context.Context, method string, param
 			return authority.Error{Code: authority.InvalidContract}
 		}
 		data = raw
+		if err := c.verifyAuthorityEndpoint(address); err != nil {
+			return err
+		}
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if err != nil || len(data) > authorityResponseBytes {
+	if err != nil || len(data) > authorityResponseLimit(method) {
 		return authority.Error{Code: authority.InvalidContract}
 	}
 	var reply authorityRPCResponse

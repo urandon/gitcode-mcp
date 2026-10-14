@@ -45,17 +45,19 @@ type coordinatedProject struct {
 // factory, Admin listener, provider setup, network client or implicit enrollment.
 // Native launch and authenticated private transport must preserve its origin.
 type Coordinator struct {
-	mu          releaseMutex
-	projects    map[authority.UUID]*coordinatedProject
-	order       []*coordinatedProject
-	lifetime    context.Context
-	cancel      context.CancelFunc
-	active      sync.WaitGroup
-	jobWorkers  sync.WaitGroup
-	jobsStarted bool
-	closing     bool
-	done        chan struct{}
-	closeErr    error
+	mu             releaseMutex
+	projects       map[authority.UUID]*coordinatedProject
+	order          []*coordinatedProject
+	lifetime       context.Context
+	cancel         context.CancelFunc
+	active         sync.WaitGroup
+	jobWorkers     sync.WaitGroup
+	jobsStarted    bool
+	closing        bool
+	runtimeBinding string               // immutable trusted construction/launch epoch, not a credential
+	serving        *RuntimeServingLease // guarded by mu; only validated server admission
+	done           chan struct{}
+	closeErr       error
 }
 
 // Available is a non-mutating core-admission check, not native launch/network
@@ -86,6 +88,17 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 		return nil, authority.Error{Code: authority.InitializationRequired}
 	}
 	if len(bindings) < 1 || len(bindings) > CoordinatorProjectLimit {
+		return nil, authority.Error{Code: authority.InvalidContract}
+	}
+	binding, _ := ctx.Value(runtimeBindingKey{}).(string)
+	if binding == "" {
+		epoch, err := authority.NewUUID()
+		if err != nil {
+			return nil, authority.Error{Code: authority.Unavailable}
+		}
+		binding = hash([]byte("in_process_owner\x00" + string(epoch)))
+	}
+	if !validDigest(binding) {
 		return nil, authority.Error{Code: authority.InvalidContract}
 	}
 	if !prepared.mu.TryLock() {
@@ -122,7 +135,7 @@ func newStrictCoordinator(ctx context.Context, prepared *PreparedRegistry, bindi
 		}
 	}
 	lifetime, stop := context.WithCancel(ctx)
-	c := &Coordinator{projects: map[authority.UUID]*coordinatedProject{}, lifetime: lifetime, cancel: stop, done: make(chan struct{})}
+	c := &Coordinator{projects: map[authority.UUID]*coordinatedProject{}, lifetime: lifetime, cancel: stop, done: make(chan struct{}), runtimeBinding: binding}
 	ok := false
 	defer func() {
 		if !ok {
