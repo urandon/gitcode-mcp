@@ -444,6 +444,10 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 	if !embeddingResponseMatchesNamespace(response, namespace) {
 		return nil, SemanticProviderContractError{code: "semantic_provider_namespace_changed"}
 	}
+	query, err = rag.NormalizeFloat32Vector(query)
+	if err != nil {
+		return nil, SemanticProviderContractError{code: "query_embedding_vector_invalid"}
+	}
 	snapshot, err := r.store.LoadRepositoryDocSearchSnapshot(ctx, req.RepoID, set.ID, set.NamespaceID)
 	if err != nil {
 		return nil, err
@@ -459,8 +463,15 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		if candidate.Dimensions != len(query) {
 			return nil, SemanticProviderContractError{code: "query_embedding_dimension_mismatch"}
 		}
+		if candidate.DType != rag.DefaultEmbeddingDType || candidate.DType != namespace.DType || candidate.VectorHash != digestBytes(candidate.Vector) {
+			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
+		}
 		vector, err := rag.DecodeFloat32Vector(candidate.Vector, candidate.Dimensions)
 		if err != nil || len(vector) != len(query) {
+			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
+		}
+		vector, err = rag.NormalizeFloat32Vector(vector)
+		if err != nil {
 			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
 		}
 		score := cosine(query, vector)
