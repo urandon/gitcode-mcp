@@ -3,7 +3,7 @@ import type { ObservationRefs, ObservationSnapshot } from './admin';
 export const observationProtocol = 'observability.v1';
 export const filterKeys = ['stream', 'severity', 'component', 'code', 'phase', 'collection', 'outcome', 'failure_class'] as const;
 export const eventDetailKeys = ['phase', 'collection', 'outcome', 'failure_class', 'work_kind', 'admin_route', 'maintenance_scope', 'previous_state', 'previous_failure_class'] as const;
-export const refKinds = { job_ref: 'job', registration_ref: 'registration', cache_ref: 'cache', repo_ref: 'repo', source_ref: 'source', correlation_ref: 'correlation', stage_ref: 'stage', previous_registration_ref: 'registration' } as const;
+export const refKinds = { job_ref: 'job', registration_ref: 'registration', cache_ref: 'cache', repo_ref: 'repo', source_ref: 'source', correlation_ref: 'correlation', stage_ref: 'stage', previous_registration_ref: 'registration', project_ref: 'project' } as const;
 export type RefKey = keyof typeof refKinds;
 export type ServiceQuery = Partial<Record<typeof filterKeys[number] | RefKey | 'since' | 'until' | 'cursor' | 'event_id' | 'incident_ref', string>>;
 // Page-session state only: no retained event bytes or browser storage. Keep the
@@ -78,6 +78,9 @@ export type ObservationTarget = { kind: 'job'; id: string } | { kind: 'maintenan
 // Join only to already-listed authority. Source is strict and wins over its
 // parent: disappearing or ambiguous sources must never select the first source.
 export function observationTarget(snapshot: ObservationSnapshot, refs: ObservationRefs): ObservationTarget | undefined {
+	// Local project navigation is a separate gated cohort. Never fall through
+	// to a remote resource on an unsupported or mixed project bridge.
+	if (refs.project_ref) return;
   const matches: ObservationTarget[] = [];
   if (refs.source_ref) {
     for (const cache of snapshot.caches) for (const repo of cache.repositories) for (const source of repo.documentation.sources || []) {
@@ -107,6 +110,7 @@ function validRefs(value: Record<string, unknown>): boolean {
 const incidentReasons = ['operation_failed', 'provider_timeout', 'provider_unavailable', 'provider_forbidden', 'provider_rate_limited', 'provider_invalid', 'cache_authority', 'configuration_invalid', 'embedding_failed', 'interrupted', 'writer_wait', 'retry_wait', 'succeeded', 'source_unavailable', 'source_policy_invalid', 'source_state_unavailable', 'source_inspection_unobserved'];
 export function incidentProjection(value: unknown): Incident | undefined {
   const i = records(value);
+	if (i.project_ref !== undefined) return; // existing incidents are remote-only
   if (!validRefs(i) || !isRef(i.incident_ref, 'correlation') || !member(i.origin, ['sync', 'rag', 'repository_docs', 'maintenance', 'other']) || !member(i.collection, ['issues', 'issue_comments', 'wiki', 'pulls', 'pr_comments', 'other']) || !member(i.state, ['active', 'recovered', 'retrying', 'waiting_writer', 'interrupted']) || !member(i.coverage, ['retained', 'partial']) || !member(i.reason, incidentReasons) || !isTime(i.first_observed_at) || !isTime(i.last_observed_at) || Date.parse(i.last_observed_at) < Date.parse(i.first_observed_at)) return;
   if (i.phase && (!member(i.phase, ['inspection', 'indexing']) || i.origin !== 'repository_docs')) return;
   const out = { incident_ref: i.incident_ref, origin: i.origin, collection: i.collection, state: i.state, reason: i.reason, coverage: i.coverage, first_observed_at: i.first_observed_at, last_observed_at: i.last_observed_at, ...refProjection(i) } as Incident;
@@ -116,6 +120,14 @@ export function incidentProjection(value: unknown): Incident | undefined {
 }
 export function eventProjection(value: unknown, summary: ServiceSummary): EventRecord | undefined {
   const e = records(value);
+	if (e.code === 'local_authority_committed') {
+		if (!isRef(e.project_ref, 'project') || !isRef(e.correlation_ref, 'correlation') || e.legacy || !member(e.phase, ['authority_commit', 'document_commit']) || e.outcome !== 'committed') return;
+		if (!summary.event_filters?.phase?.includes(String(e.phase)) || !summary.event_filters?.outcome?.includes('committed')) return;
+		for (const key of [...Object.keys(refKinds).filter(key => key !== 'project_ref' && key !== 'correlation_ref'), ...eventDetailKeys.filter(key => key !== 'phase' && key !== 'outcome')]) {
+			if (e[key] !== undefined && e[key] !== '') return;
+		}
+		if (e.attempt !== undefined && e.attempt !== 0 || e.observed_bytes !== undefined && e.observed_bytes !== 0) return;
+	} else if (e.project_ref !== undefined) return;
   if (!Object.hasOwn(summary.event_templates || {}, String(e.code))) return;
   const template = summary.event_templates?.[String(e.code)];
   if (!validRefs(e) || !template || !isID(e.event_id) || !isID(e.boot_id) || !isTime(e.occurred_at) || !count(e.sequence) || !e.sequence || e.schema !== 1 || e.message !== template.message || e.severity !== template.severity || e.component !== template.component || (e.stream !== template.stream && !(e.legacy === true && member(e.stream, ['stdout', 'stderr'])))) return;

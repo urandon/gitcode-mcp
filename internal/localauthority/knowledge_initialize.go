@@ -206,6 +206,9 @@ func (s *Store) SetupKnowledge(ctx context.Context, project authority.UUID, key 
 }
 
 func (s *Store) commitKnowledge(ctx context.Context, tx *sql.Tx, phase string) error {
+	if phase == "knowledge_document_settled" {
+		captureCanonical(ctx, s.manifest.ID, true, false)
+	}
 	if err := tx.Commit(); err != nil {
 		s.fenced = true
 		if ctx.Err() != nil {
@@ -216,6 +219,9 @@ func (s *Store) commitKnowledge(ctx context.Context, tx *sql.Tx, phase string) e
 	if err := s.publishBarrier(); err != nil {
 		s.fenced = true
 		return err
+	}
+	if phase == "knowledge_document_settled" {
+		captureCanonical(ctx, s.manifest.ID, true, true)
 	}
 	return s.inject(phase)
 }

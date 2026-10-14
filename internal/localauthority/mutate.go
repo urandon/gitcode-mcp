@@ -276,6 +276,7 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 	if err = s.inject("generation"); err != nil {
 		return zero, err
 	}
+	captureCanonical(ctx, s.manifest.ID, false, false)
 	if err = tx.Commit(); err != nil {
 		s.fenced = true
 		if ctx.Err() != nil {
@@ -287,6 +288,7 @@ func (s *Store) Mutate(ctx context.Context, m authority.MutationRequest, actor A
 		s.fenced = true
 		return zero, err
 	}
+	captureCanonical(ctx, s.manifest.ID, false, true)
 	// Loss of caller acknowledgement after commit does not roll back. The same
 	// key recovers the settled original receipt without another mutation.
 	if err = s.inject("acknowledgement"); err != nil {

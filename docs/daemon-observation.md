@@ -65,7 +65,9 @@ Finite selectors are `stream`, `severity`, `component`, `code`, `phase`,
 with an admitted event shape, not merely contain individually valid strings.
 
 Identity selectors are `job_ref`, `registration_ref`, `cache_ref`, `repo_ref`,
-`correlation_ref`, `stage_ref`, `source_ref`, and `previous_registration_ref`.
+`correlation_ref`, `stage_ref`, `source_ref`, `previous_registration_ref`, and
+`project_ref`. Local-project events use true project scope, never cache or
+repository aliases; incompatible mixed scopes are rejected before reading.
 Use only opaque refs already returned on listed local entities, incidents, or
 events. These filters never resolve a private coordinate, filesystem path,
 repository id, or caller-provided label. Unknown local authority omits
@@ -76,6 +78,26 @@ sources publish their known cache, repository and registration refs alongside
 the source ref, matching the same authority carried by retained source events.
 The browser requires every supplied parent ref to match; an incomplete or
 ambiguous bridge is unavailable, not permission to relax the join.
+
+The initial `local_authority_committed` catalog observes newly proof-confirmed
+tracker and Git-document commits with `authority_commit`/`document_commit`
+phases and `committed` outcome. Private per-call capture records the actual
+canonical transaction attempt/proof, not inference from the caller's return
+code. The trusted coordinator emits only after the execution turn unwinds.
+A proved commit with lost acknowledgement remains historical confirmation;
+uncertain publication contributes count-only incomplete coverage, not success.
+Precommit rollback, reads and settled original-key replay create no throughput.
+Resuming pending document intent can first confirm its canonical commit, and
+observes that actual effect once. Each event has an opaque admitted-project ref and a
+fresh collector-owned correlation, with no source/entity UUID, key, actor,
+payload or private coordinate. Collector contention/loss never changes the
+canonical receipt. This historical evidence does not infer current project,
+job or index health; existing remote incident projection rejects project scope.
+Native retained delivery, local job/repair/runtime phases and exact local
+health remain #183 work. Public local workflow/navigation remains gated in
+#184/#185; the Service view cannot fall through to a remote entity when a
+project bridge is unavailable. Stdio/HTTP discovery can accept the opaque
+`project_ref` selector; no read starts or enrolls a local runtime.
 
 `since` and `until` must be supplied together as ordered RFC3339Nano UTC (`Z`)
 timestamps spanning at most seven days. Omit both to read retained evidence only.

@@ -26,6 +26,7 @@ func validateFilter(f Filter) (Filter, error) {
 	for _, r := range []struct{ value, kind string }{
 		{f.JobRef, "job"}, {f.RegistrationRef, "registration"}, {f.CacheRef, "cache"}, {f.RepoRef, "repo"},
 		{f.CorrelationRef, "correlation"}, {f.StageRef, "stage"}, {f.SourceRef, "source"}, {f.PreviousRegistrationRef, "registration"},
+		{f.ProjectRef, "project"},
 	} {
 		if !validRef(r.value, r.kind) {
 			return f, invalid
@@ -48,6 +49,8 @@ func validateFilter(f Filter) (Filter, error) {
 		if f.Stream != "" && f.Stream != e.Stream || f.Code != "" && f.Code != e.Code || f.Component != "" && f.Component != e.Component || f.Severity != "" && f.Severity != e.Severity ||
 			f.Phase != "" && f.Phase != e.Phase || f.Collection != "" && f.Collection != e.Collection || f.Outcome != "" && f.Outcome != e.Outcome || f.FailureClass != "" && f.FailureClass != e.FailureClass ||
 			f.SourceRef != "" && e.SourceRef == "" || f.StageRef != "" && e.StageRef == "" || f.PreviousRegistrationRef != "" && e.PreviousRegistrationRef == "" ||
+			f.ProjectRef != "" && e.ProjectRef == "" ||
+			e.Code == LocalAuthorityCommitted && (f.JobRef != "" || f.CacheRef != "" || f.RepoRef != "" || f.RegistrationRef != "") ||
 			f.JobRef != "" && (e.Code == MaintenanceStateChanged || e.Code == AdminRequestCompleted) ||
 			(f.CacheRef != "" || f.RepoRef != "" || f.RegistrationRef != "") && e.Code == AdminRequestCompleted {
 			continue
@@ -63,7 +66,7 @@ func (f Filter) matchSelectors(e Event) bool {
 	return (f.Stream == "" || e.Stream == f.Stream) && (f.Severity == "" || e.Severity == f.Severity) && (f.Component == "" || e.Component == f.Component) && (f.Code == "" || e.Code == f.Code) &&
 		(f.Phase == "" || e.Phase == f.Phase) && (f.Collection == "" || e.Collection == f.Collection) && (f.Outcome == "" || e.Outcome == f.Outcome) && (f.FailureClass == "" || e.FailureClass == f.FailureClass) &&
 		(f.JobRef == "" || e.JobRef == f.JobRef) && (f.RegistrationRef == "" || e.RegistrationRef == f.RegistrationRef) && (f.CacheRef == "" || e.CacheRef == f.CacheRef) && (f.RepoRef == "" || e.RepoRef == f.RepoRef) &&
-		(f.CorrelationRef == "" || e.CorrelationRef == f.CorrelationRef) && (f.StageRef == "" || e.StageRef == f.StageRef) && (f.SourceRef == "" || e.SourceRef == f.SourceRef) && (f.PreviousRegistrationRef == "" || e.PreviousRegistrationRef == f.PreviousRegistrationRef)
+		(f.CorrelationRef == "" || e.CorrelationRef == f.CorrelationRef) && (f.StageRef == "" || e.StageRef == f.StageRef) && (f.SourceRef == "" || e.SourceRef == f.SourceRef) && (f.PreviousRegistrationRef == "" || e.PreviousRegistrationRef == f.PreviousRegistrationRef) && (f.ProjectRef == "" || e.ProjectRef == f.ProjectRef)
 }
 
 // These finite candidates are accepted only through the execution owner's
@@ -137,6 +140,9 @@ func buildFilterCatalogShapes() []Event {
 			continue
 		}
 		base.CorrelationRef = KnownRef("correlation", "catalog").value
+		if code == LocalAuthorityCommitted {
+			base.ProjectRef = KnownRef("project", "catalog").value
+		}
 		switch code {
 		case JobAdmitted, JobTerminal, JobRecovered, SyncCommitted, RetryAdmitted, SyncStageChanged:
 			base.JobRef = KnownRef("job", "catalog").value
@@ -162,6 +168,7 @@ func buildFilterCatalogShapes() []Event {
 			JobAdmitted: {"admission"}, JobTerminal: {"completion"}, JobRecovered: {"recovery"},
 			ProviderAttempt: {"fetch", "embedding"}, SyncCommitted: {"commit"}, RetryAdmitted: {"retry"},
 			WriterContended: {"writer"}, SyncStageChanged: {"staging"}, AdminRequestCompleted: {"admin"}, MaintenanceStateChanged: {"maintenance"},
+			LocalAuthorityCommitted: {"authority_commit", "document_commit"},
 		}[code]
 		collections := []string{""}
 		if code == ProviderAttempt || code == SyncCommitted || code == RetryAdmitted || code == SyncStageChanged {

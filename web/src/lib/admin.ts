@@ -1,6 +1,6 @@
 export const adminApiVersion = '1';
 
-export type ObservationRefs = Partial<Record<'job_ref' | 'registration_ref' | 'cache_ref' | 'repo_ref' | 'source_ref', string>>;
+export type ObservationRefs = Partial<Record<'job_ref' | 'registration_ref' | 'cache_ref' | 'repo_ref' | 'source_ref' | 'project_ref', string>>;
 
 export type CoverageLane = {
   state: string;

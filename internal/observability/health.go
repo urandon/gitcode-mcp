@@ -206,6 +206,9 @@ func healthSignalRank(signal string) int {
 	return 0
 }
 func validHealthEvidence(e HealthEvidence) bool {
+	if e.Refs.Project.value != "" {
+		return false // local current-owner health is a separate gated projection
+	}
 	if e.Cohort.value == "" || !validRef(e.Cohort.value, "correlation") || e.At.IsZero() && e.Signal != "unknown" {
 		return false
 	}

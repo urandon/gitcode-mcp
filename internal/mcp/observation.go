@@ -107,7 +107,7 @@ func observationToolDefinition(name string) (toolDefinition, bool) {
 		props["history_minutes"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(60), Default: 60}
 	case "service_events":
 		description = "Read a bounded retained execution ledger page. Severity is not outcome; filter explicit outcome/failure_class and use opaque refs from listed resources/summary incidents. Cursor binds all selectors, boot generation and loss; on snapshot_required restart without cursor. No live sync, cache bootstrap, credential resolution, or daemon start."
-		for _, key := range []string{"stream", "severity", "component", "code", "phase", "collection", "outcome", "failure_class", "job_ref", "registration_ref", "cache_ref", "repo_ref", "correlation_ref", "stage_ref", "source_ref", "previous_registration_ref", "since", "until", "cursor"} {
+		for _, key := range []string{"stream", "severity", "component", "code", "phase", "collection", "outcome", "failure_class", "job_ref", "registration_ref", "cache_ref", "repo_ref", "correlation_ref", "stage_ref", "source_ref", "previous_registration_ref", "project_ref", "since", "until", "cursor"} {
 			props[key] = schemaProp{Type: "string", Description: "Opaque ref from already returned local entity/event/incident evidence; never a repository id, filesystem path, or private coordinate."}
 		}
 		for key, values := range observability.FilterValues() {

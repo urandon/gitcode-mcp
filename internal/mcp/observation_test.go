@@ -94,6 +94,8 @@ func TestMCPObservationStrictBeforeClientOrBootstrap(t *testing.T) {
 		{"service_events", `{"limit":0}`},
 		{"service_events", `{"limit":1.5}`},
 		{"service_events", `{"source_ref":"synthetic-private"}`},
+		{"service_events", `{"project_ref":"synthetic-private"}`},
+		{"service_events", `{"project_ref":"project-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","code":"daemon_boot"}`},
 		{"service_events", `{"since":"2026-01-01T00:00:00Z"}`},
 		{"service_events", `{"limit":50,"limit":10}`},
 		{"service_events", `{"write_mode":"live"}`},
@@ -278,6 +280,9 @@ func TestMCPObservationDiscoveryFiniteReadOnlySchemas(t *testing.T) {
 			t.Fatal("metric discovery lost finite catalog")
 		}
 		if d.Name == "service_events" {
+			if d.InputSchema.Properties["project_ref"].Type != "string" {
+				t.Fatal("event discovery omitted real opaque project scope")
+			}
 			for key, values := range observability.FilterValues() {
 				if !reflect.DeepEqual(d.InputSchema.Properties[key].Enum, values) {
 					t.Fatal("event discovery diverged from admitted filter catalog")

@@ -881,6 +881,39 @@ capability/restart, foreign-user, zero-network or complete L4 acceptance receipt
 Those qualifications and bounded projection jobs, restricted embedding
 profiles and opaque lifecycle observations remain mandatory before #183 closure.
 
+### Safe project commit observations (L4 in progress)
+
+The shared coordinator may consume a trusted existing concrete #101 collector
+from its constructor context. It binds only the admitted immutable project UUID
+to a true opaque `project_ref`; no caller context labels or cache/repository
+bridges are inherited. New confirmed tracker and Git-document mutations emit
+the closed `local_authority_committed` event after store and project-turn
+release. A private per-call admitted-project/kind/finite-state capture marks
+the real canonical transaction attempt and existing publication proof; it holds
+no callback or source bytes. Confirmed proof remains observable when the later
+acknowledgement fails. Uncertain canonical publication counts incomplete
+execution-boundary coverage without a success event. Settled replay, precommit
+rollback/rejection and reads create no throughput; resuming pending document
+intent can first confirm one real canonical commit. Finite phases are
+`authority_commit` and `document_commit`, with outcome `committed`; a fresh
+collector-owned correlation distinguishes actual boundaries without exposing
+operation/entity UUID, source text, actor, key or private coordinates.
+
+Admission/replay, whole-filter cursor, CLI/MCP/Admin selector decoding and safe
+copy understand project scope. Local events reject remote resource refs and
+unrelated execution dimensions; remote/lifecycle events reject project refs.
+The existing remote incident projection cannot silently relabel a local
+project. The browser preserves opaque project evidence and refuses unavailable
+or mixed remote navigation rather than guessing an entity.
+
+Observation is one nonblocking best-effort emission, not a commit dependency,
+retry loop or health authority. Actual read-lock contention counts diagnostic
+loss while the canonical receipt and replay remain unchanged. No collector is
+constructed by authority discovery, mutation or native child startup. This
+shared-core increment does not qualify native retained delivery, local
+index/recovery/repair/runtime phase coverage, exact owner-state health or
+public local workflows. Those remain mandatory #183/#184/#185 rollout gates.
+
 ### Fixed-channel native launch (L4 in progress)
 
 Explicit trusted setup can derive a single-use native preparation from the

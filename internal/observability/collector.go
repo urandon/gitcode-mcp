@@ -53,6 +53,7 @@ type Collector struct {
 	admissionDrops         atomic.Uint64
 	adminRequests          atomic.Uint64
 	maintenanceTransitions atomic.Uint64
+	authorityTransitions   atomic.Uint64
 	config                 Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open                  func(string) (*storage, []Event, bool, error)
@@ -126,7 +127,7 @@ func (c *Collector) Emit(code Code, refs Context) bool {
 	}
 	e := Event{Schema: 1, EventID: c.boot, OccurredAt: time.Now().UTC(), BootID: c.boot, Sequence: 1, Stream: t.stream, Severity: t.severity, Component: t.component, Code: code, Message: t.message,
 		ExecutionDetails: refs.ExecutionDetails,
-		JobRef:           refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value, StageRef: refs.Stage.value, SourceRef: refs.Source.value, PreviousRegistrationRef: refs.PreviousRegistration.value}
+		JobRef:           refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value, StageRef: refs.Stage.value, SourceRef: refs.Source.value, PreviousRegistrationRef: refs.PreviousRegistration.value, ProjectRef: refs.Project.value}
 	b, err := marshalEvent(e)
 	if err != nil {
 		return false
@@ -430,7 +431,7 @@ func (c *Collector) write(s *storage, p pending) {
 	e := Event{Schema: 1, EventID: randomID(), OccurredAt: p.at, BootID: c.boot, Sequence: sequence, Stream: t.stream, Severity: t.severity, Component: t.component, Code: p.code, Message: t.message,
 		ExecutionDetails: p.refs.ExecutionDetails,
 		Legacy:           p.legacy, ObservedBytes: p.observedBytes,
-		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value, StageRef: p.refs.Stage.value, SourceRef: p.refs.Source.value, PreviousRegistrationRef: p.refs.PreviousRegistration.value}
+		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value, StageRef: p.refs.Stage.value, SourceRef: p.refs.Source.value, PreviousRegistrationRef: p.refs.PreviousRegistration.value, ProjectRef: p.refs.Project.value}
 	if p.legacy {
 		e.Stream = p.legacyStream
 	}

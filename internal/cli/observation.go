@@ -41,7 +41,7 @@ func executeObservationCommand(ctx context.Context, args []string, stdout, stder
 			value *string
 		}{
 			{"stream", &events.Stream}, {"severity", &events.Severity}, {"component", &events.Component}, {"phase", &events.Phase}, {"collection", &events.Collection}, {"outcome", &events.Outcome}, {"failure-class", &events.FailureClass},
-			{"job-ref", &events.JobRef}, {"registration-ref", &events.RegistrationRef}, {"cache-ref", &events.CacheRef}, {"repo-ref", &events.RepoRef}, {"correlation-ref", &events.CorrelationRef}, {"stage-ref", &events.StageRef}, {"source-ref", &events.SourceRef}, {"previous-registration-ref", &events.PreviousRegistrationRef},
+			{"job-ref", &events.JobRef}, {"registration-ref", &events.RegistrationRef}, {"cache-ref", &events.CacheRef}, {"repo-ref", &events.RepoRef}, {"correlation-ref", &events.CorrelationRef}, {"stage-ref", &events.StageRef}, {"source-ref", &events.SourceRef}, {"previous-registration-ref", &events.PreviousRegistrationRef}, {"project-ref", &events.ProjectRef},
 			{"since", &events.Since}, {"until", &events.Until}, {"cursor", &events.Cursor},
 		} {
 			flags.StringVar(f.value, f.name, "", "bounded event selector")

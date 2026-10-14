@@ -216,6 +216,22 @@ responses even when discarded; finite errors omit peer prose. These tests do
 not certify corrupt reset, semantic vectors, safe observation or full native
 network isolation.
 
+Local-project observation fixtures commit actual tracker and Git-only document
+bytes through the shared coordinator, replay exact original keys across owner
+reopen, and reject conflicted/unknown/cancelled requests. Actual source/document
+acknowledgement loss retains proved commit evidence, pre-proof barrier faults
+retain only count-based incomplete coverage, and precommit rollback emits none.
+Pending original document intent records its first actual canonical publication
+when resumed; settled replay never invents another. A qualification-only
+collector idle window makes successful one-shot emission deterministic without
+retrying writes or replacing the real queue/persistence. Another actual reader
+holds the collector mutex while a canonical commit succeeds, proving counted
+admission loss without changing receipt, readback or replay. Catalog/reload,
+project-filter cursor, safe-copy and browser unit tests reject mixed remote
+bridges and private input; event presence never invents current health. These
+tests do not substitute for native retained delivery, all local phase coverage,
+exact owner-state health or the later public workflow cohort.
+
 The explicit Linux strict-process network gate builds the real product from
 the current checkout with `python3 scripts/ci/run_native_authority_network.py`.
 Direct opt-in tests may use a separately built artifact only with an explicit

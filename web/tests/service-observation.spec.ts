@@ -29,6 +29,27 @@ async function mockObservation(page: Page, fixture = observationFixture(), snaps
 }
 const emit = (page: Page, kind = 'observability_changed') => page.evaluate(k => (window as any).__emitObservation(k), kind);
 
+test('local project commit copy preserves opaque scope without remote navigation or writes', async ({ page }) => {
+  const fixture = observationFixture();
+  fixture.summary.event_templates!.local_authority_committed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project source commit was confirmed.' };
+  fixture.summary.event_filters!.code.push('local_authority_committed'); fixture.summary.event_filters!.component.push('authority');
+  fixture.summary.event_filters!.phase = ['authority_commit', 'document_commit']; fixture.summary.event_filters!.outcome = ['committed'];
+  fixture.page.events = [{ schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: fixture.summary.observed_at, sequence: 1, code: 'local_authority_committed', stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project source commit was confirmed.', phase: 'authority_commit', outcome: 'committed', project_ref: ref('project', '1'), correlation_ref: ref('correlation', '7'), raw_body: 'synthetic-private-project-content' }];
+  const mock = await mockObservation(page, fixture);
+  await page.goto(`/?view=Service&obs_project_ref=${ref('project', '1')}`);
+  const row = page.getByRole('list', { name: 'Retained catalog events' }).getByRole('listitem');
+  await expect(row).toContainText('Authority Commit'); await expect(row).toContainText('Committed');
+  await page.getByRole('button', { name: 'Local Authority Committed', exact: true }).click();
+  await expect(page.getByText('Entity authority unavailable or ambiguous. No arbitrary locator or sibling was resolved.')).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Open exact/ })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy safe context', exact: true }).click();
+  const copy = JSON.parse(await page.evaluate(() => (window as any).__copiedObservation));
+  expect(copy.event.project_ref).toBe(ref('project', '1')); expect(copy.event.phase).toBe('authority_commit');
+  expect(JSON.stringify(copy)).not.toContain('synthetic-private'); expect(await page.locator('body').innerText()).not.toContain('synthetic-private');
+  expect(mock.requests.every(request => request.startsWith('GET '))).toBe(true);
+  expect(mock.requests.filter(request => request.includes('/observability/events')).every(request => request.includes(`project_ref=${ref('project', '1')}`))).toBe(true);
+});
+
 test('one typed busy timeline read after invalidation recovers selected safe-copy without Refresh', async ({ page }) => {
   const mock = await mockObservation(page);
   await page.goto('/?view=Service');

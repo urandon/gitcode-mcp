@@ -27,6 +27,7 @@ type Filter struct {
 	StageRef                string `json:"stage_ref,omitempty"`
 	SourceRef               string `json:"source_ref,omitempty"`
 	PreviousRegistrationRef string `json:"previous_registration_ref,omitempty"`
+	ProjectRef              string `json:"project_ref,omitempty"`
 	Since                   string `json:"since,omitempty"`
 	Until                   string `json:"until,omitempty"`
 }

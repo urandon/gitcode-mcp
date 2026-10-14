@@ -34,6 +34,8 @@ func TestObservationCLIRejectsBeforeConfigOrBootstrap(t *testing.T) {
 		{"service", "metrics", "--history-minutes", "0"}, {"service", "metrics", "--history-minutes", "61"}, {"service", "metrics", "--name", "synthetic-private-name"},
 		{"service", "events", "--limit", "0"}, {"service", "events", "--limit", "201"}, {"service", "events", "--limit", "50", "--limit", "20"},
 		{"service", "events", "--source-ref", "synthetic-private-path"}, {"service", "events", "--outcome", "succeeded", "--failure-class", "timeout"},
+		{"service", "events", "--project-ref", "synthetic-private-project"},
+		{"service", "events", "--project-ref", "project-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--code", "daemon_boot"},
 		{"service", "events", "--since", "2026-01-01T00:00:00Z"},
 		{"service", "events", "--stream", "stderr", "--code", "job_terminal"},
 	} {
@@ -118,6 +120,11 @@ func TestObservationCLIActualIPCParityWithoutCacheFactory(t *testing.T) {
 	if err != nil {
 		t.Fatal("events fixture unavailable")
 	}
+	project := "project-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	wantProject, err := r.Events(ctx, observability.EventsRequest{Filter: observability.Filter{ProjectRef: project}, Limit: 50})
+	if err != nil {
+		t.Fatal("project event fixture unavailable")
+	}
 	for _, test := range []struct {
 		args []string
 		want any
@@ -125,6 +132,7 @@ func TestObservationCLIActualIPCParityWithoutCacheFactory(t *testing.T) {
 		{[]string{"service", "observe", "--format", "json"}, wantSummary},
 		{[]string{"service", "metrics", "--name", "runtime_heap", "--history-minutes", "3", "--format", "json"}, wantMetrics},
 		{[]string{"service", "events", "--format", "json"}, wantEvents},
+		{[]string{"service", "events", "--project-ref", project, "--format", "json"}, wantProject},
 	} {
 		var out, errOut bytes.Buffer
 		code := executeWithFactoryAndDepsContext(ctx, test.args, &out, &errOut, func(context.Context, string) (queryService, func() error, error) {

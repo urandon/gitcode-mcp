@@ -4,6 +4,22 @@ import { boundedObservationRead, catalogServiceQuery, eventProjection, eventRequ
 import { id, observationFixture, ref } from '../../tests/fixtures/observation';
 
 describe('bounded observation browser contract', () => {
+	 it('keeps opaque local project evidence without a fabricated remote join', () => {
+		const { summary, page } = observationFixture();
+		summary.event_templates!.local_authority_committed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project source commit was confirmed.' };
+		summary.event_filters!.phase = ['authority_commit', 'document_commit']; summary.event_filters!.outcome = ['committed'];
+		page.events[0] = { schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: summary.observed_at, sequence: 1, code: 'local_authority_committed', stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project source commit was confirmed.', project_ref: ref('project', '1'), correlation_ref: ref('correlation', '7'), phase: 'authority_commit', outcome: 'committed', raw_body: 'synthetic-private-content' };
+		const query = readServiceQuery(new URLSearchParams({ obs_project_ref: ref('project', '1'), obs_phase: 'authority_commit' }));
+		expect(query.invalid).toBe(false); expect(eventRequest(query.query)).toContain(`project_ref=${ref('project', '1')}`);
+		const copy = JSON.parse(safeObservationContext(summary, page, { event_id: id('e') }));
+		expect(copy.event.project_ref).toBe(ref('project', '1')); expect(copy.event.phase).toBe('authority_commit'); expect(JSON.stringify(copy)).not.toContain('synthetic-private');
+		expect(observationTarget(emptySnapshot, { project_ref: ref('project', '1'), cache_ref: ref('cache', '2') })).toBeUndefined();
+		for (const bad of [{ project_ref: 'synthetic-private-project' }, { job_ref: ref('job', '2') }, { cache_ref: ref('cache', '2') }, { phase: 'fetch' }, { failure_class: 'operation_failed' }, { observed_bytes: 1 }, { attempt: 1 }]) {
+			expect(eventProjection({ ...page.events[0], ...bad }, summary)).toBeUndefined();
+		}
+		expect(eventProjection({ ...page.events[0], code: 'daemon_boot' }, summary)).toBeUndefined();
+		expect(incidentProjection({ ...summary.execution_health.incidents[0], project_ref: ref('project', '1') })).toBeUndefined();
+	 });
   it('round trips only bounded opaque URL selectors and never echoes rejected coordinates', () => {
     const params = new URLSearchParams({ obs_job_ref: ref('job', '5'), obs_code: 'job_admitted', obs_cursor: 'e30', obs_event_id: id('e'), other: 'private-coordinate' });
     const parsed = readServiceQuery(params); expect(parsed.invalid).toBe(false);

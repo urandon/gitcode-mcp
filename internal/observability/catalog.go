@@ -44,6 +44,7 @@ const (
 	SyncStageChanged        Code = "sync_stage_changed"
 	AdminRequestCompleted   Code = "admin_request_completed"
 	MaintenanceStateChanged Code = "maintenance_state_changed"
+	LocalAuthorityCommitted Code = "local_authority_committed"
 )
 
 type template struct{ stream, severity, component, message string }
@@ -84,6 +85,7 @@ var catalog = map[Code]template{
 	SyncStageChanged:        {"stdout", "info", "sync", "A sync stage reached a confirmed journal state."},
 	AdminRequestCompleted:   {"stdout", "info", "admin", "An Admin HTTP request completed."},
 	MaintenanceStateChanged: {"stdout", "info", "maintenance", "Maintenance reached a confirmed state transition."},
+	LocalAuthorityCommitted: {"stdout", "info", "authority", "A local project source commit was confirmed."},
 }
 
 // Ref is opaque and cannot be constructed by assigning an unchecked string.
@@ -96,7 +98,7 @@ func KnownRef(kind, authorityID string) Ref {
 		return Ref{}
 	}
 	switch kind {
-	case "job", "registration", "cache", "repo", "correlation", "stage", "source":
+	case "job", "registration", "cache", "repo", "correlation", "stage", "source", "project":
 	default:
 		return Ref{}
 	}
@@ -108,6 +110,7 @@ type Context struct {
 	Job, Registration, Cache, Repo, Correlation Ref
 	Stage, Source                               Ref
 	PreviousRegistration                        Ref
+	Project                                     Ref
 	ExecutionDetails
 }
 type Event struct {
@@ -132,6 +135,7 @@ type Event struct {
 	StageRef                string    `json:"stage_ref,omitempty"`
 	SourceRef               string    `json:"source_ref,omitempty"`
 	PreviousRegistrationRef string    `json:"previous_registration_ref,omitempty"`
+	ProjectRef              string    `json:"project_ref,omitempty"`
 }
 
 var hexID = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -147,7 +151,7 @@ func (e Event) valid() bool {
 	}
 	return ok && e.validExecution() && e.ObservedBytes >= 0 && e.ObservedBytes <= MaxPageBytes && (e.Legacy || e.ObservedBytes == 0) && e.Schema == 1 && e.Sequence > 0 && hexID.MatchString(e.BootID) && hexID.MatchString(e.EventID) &&
 		!e.OccurredAt.IsZero() && streamOK && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
-		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage") && validRef(e.SourceRef, "source") && validRef(e.PreviousRegistrationRef, "registration")
+		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage") && validRef(e.SourceRef, "source") && validRef(e.PreviousRegistrationRef, "registration") && validRef(e.ProjectRef, "project")
 }
 func marshalEvent(e Event) ([]byte, error) {
 	if !e.valid() {
