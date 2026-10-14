@@ -14,6 +14,9 @@ from run_go_tests import exit_status, run_clean
 
 
 def main():
+    if sys.platform != "linux":
+        print("Native authority observer qualification requires Linux", file=sys.stderr)
+        return 2
     try:
         with tempfile.TemporaryDirectory(prefix="native-authority-qualification-") as fixture:
             product = os.path.join(fixture, "product")

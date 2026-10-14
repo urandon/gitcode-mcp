@@ -8,6 +8,19 @@ import run_native_authority_network as gate
 
 
 class NativeAuthorityNetworkGateTest(unittest.TestCase):
+    def setUp(self):
+        platform = mock.patch.object(gate.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
+    def test_non_linux_refuses_before_build_instead_of_no_tests_success(self):
+        output = io.StringIO()
+        with mock.patch.object(gate.sys, "platform", "darwin"), mock.patch.object(gate, "run_clean") as execute:
+            with contextlib.redirect_stderr(output):
+                self.assertEqual(gate.main(), 2)
+            execute.assert_not_called()
+        self.assertEqual(output.getvalue(), "Native authority observer qualification requires Linux\n")
+
     def test_fixed_current_checkout_build_and_observation(self):
         with mock.patch.object(gate, "run_clean") as execute:
             def build_and_observe(argv, **options):

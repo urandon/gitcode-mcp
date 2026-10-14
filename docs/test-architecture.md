@@ -202,8 +202,10 @@ of zero network activity. Neither raw syscall output nor browser artifacts are
 written or uploaded. The CI runner installs only this test observer; it does not
 set up an embedding provider or the operator's canonical service. Default
 offline tests skip the external observer explicitly; selecting this gate makes
-an unavailable observer fatal. This Linux evidence does not qualify macOS,
-foreign-UID access or real semantic retrieval. Immediate-close-after-launch
+an unavailable observer fatal. The fixed runner refuses non-Linux before build
+rather than accepting a successful Go invocation with no matching Linux-only
+tests. This Linux evidence does not qualify macOS, foreign-UID access or real
+semantic retrieval. Immediate-close-after-launch
 tests separately reacquire canonical ownership and restart without an extra IPC
 readiness turn. No production lifetime fix is inferred merely from a hypothesis.
 The observer requires strace's `--kill-on-exit` (6.6 or newer); missing support
