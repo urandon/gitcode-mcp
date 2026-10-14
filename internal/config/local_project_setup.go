@@ -78,7 +78,7 @@ func RegisterLocalProject(src Source, selector string, binding LocalProjectConfi
 		projects.Content = append(projects.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: selector}, &node)
 	}
 	out, err := yaml.Marshal(&doc)
-	if err != nil {
+	if err != nil || len(out) > 1<<20 {
 		return LocalProjectConfigError{}
 	}
 	parsed, _, err := parseYAMLConfig(out, "")

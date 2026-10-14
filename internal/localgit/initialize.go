@@ -36,10 +36,11 @@ func Initialize(ctx context.Context, path, projectID, ref string) (_ *Store, err
 		}
 		return nil, fail("unavailable", "store")
 	}
-	// Only this fresh, exclusively claimed directory is removed on failure.
-	// Once initialization succeeds the Git repository survives registration errors.
+	// Cleanup is safe only before any ref publication is attempted. A cancelled
+	// command can have published a ref another setup call already registered.
+	publishing := false
 	defer func() {
-		if err != nil {
+		if err != nil && !publishing {
 			_ = os.RemoveAll(path)
 		}
 	}()
@@ -71,13 +72,16 @@ func Initialize(ctx context.Context, path, projectID, ref string) (_ *Store, err
 	if !oidValid(commit) {
 		return nil, fail("unavailable", "commit")
 	}
-	if _, err = s.run(ctx, 128, "update-ref", "--no-deref", ref, commit, strings.Repeat("0", len(commit))); err != nil {
+	if _, err = s.Snapshot(ctx, commit); err != nil {
 		return nil, err
 	}
 	if _, err = s.run(ctx, 128, "symbolic-ref", "HEAD", ref); err != nil {
 		return nil, err
 	}
-	if _, err = s.Snapshot(ctx, ref); err != nil {
+	// Make the validated commit visible last. Preserve even an ambiguous result:
+	// explicit register can validate/recover it without risking durable data.
+	publishing = true
+	if _, err = s.run(ctx, 128, "update-ref", "--no-deref", ref, commit, strings.Repeat("0", len(commit))); err != nil {
 		return nil, err
 	}
 	return s, nil

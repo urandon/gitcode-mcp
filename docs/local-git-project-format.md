@@ -284,7 +284,11 @@ candidate config under the existing trusted-config writer lock. Existing
 selectors cannot be silently retargeted. Setup takes no arbitrary destination
 URL; storage references resolve only in the managed local store directory.
 There is no second operation journal. Successfully initialized Git data is not
-deleted when a later registration fails.
+deleted when a later registration fails. Initialization also preserves the store
+once ref publication is attempted, even if cancellation leaves the result
+unacknowledged: inspect it and explicitly register a valid schema-1 store rather
+than retrying `init` over it. Config registration rejects rendered YAML above its
+1 MiB intake limit before changing the selected file.
 
 Local MCP discovery is side-effect-free and advertises only:
 
