@@ -562,6 +562,50 @@ only compared during SQL revalidation. Content-free filesystem guards may read
 that immutable identity without taking the source SQL mutex; manifest changes
 are corruption, never permission to replace the admitted policy at runtime.
 
+### Explicit derived-repair planning foundation (L4 in progress)
+
+The shared coordinator can render a read-only `ProjectionRepairPlan`. This is
+an internal service contract, not an advertised CLI/MCP/Admin or private-IPC
+action and not a completed repair receipt. Durable apply, original-key replay,
+quarantine phase recovery and verified post-effect owner reopen remain required
+before that capability is enabled. Planning never creates, repairs or syncs a
+missing namespace or initializes the separate index-intent ledger.
+
+The plan binds project UUID, current canonical sequence, immutable source and
+physical root identity, retained index-ledger generation/file digest/identity
+and one stable bounded catalog inventory. Only its opaque plan digest, fixed
+state/action/blocker labels and bounded file/byte counts are returned; corrupt
+body, source text, actor/key, filename and coordinates never enter the view.
+Missing or valid catalogs report `not_needed` only with a compatible current
+owner. Valid replacement bytes cannot clear an existing publication/physical
+fence: they require qualified owner reopen, not permission to purge.
+A qualified owned corrupt final
+or namespace lacking a final catalog can propose `quarantine`, not purge or
+index readiness. Its plan explicitly requires joined owner reopen before new
+catalog admission. A namespace with unsafe types/links/modes, unknown objects
+or excess capacity is refused, not recursively followed or assumed disposable.
+
+Queued/running/cancelling intent and an actual attempt whose lifetime has not
+joined produce `blocked/index_active`. Retained ambiguous publication produces
+`blocked/index_uncertain`, including after owner reopen; a terminal row is not
+proof that uncertain intent can be discarded. Corrupt/uncertain ledger admission
+returns its typed fixed error. The durable caller/cancellation/publication
+history is not rewritten by a proposal. Canonical reads and lexical retrieval
+remain separate from the damaged catalog.
+
+Inspection admits at most five fixed-name owned regular files, each at most
+2 MiB, with at most four stages/8 MiB and 10 MiB total. Reads are root-relative,
+no-follow and nonblocking; special files are refused before reading. Stable
+sorted inventory and exact inode/content identities are rechecked rather than
+combining changed physical generations. Timestamp-only metadata does not change
+the fingerprint; content, inode, source or ledger changes invalidate a prior
+proposal. Confirmation must independently revalidate under owned execution and
+preserve bounded quarantine plus durable intent; this planner alone grants no
+permission to mutate. CLI/MCP #184, Admin #185 and backup/recovery #186 retain
+the complete explicit plan/confirm/degraded/restart UX and evidence gates.
+
+### Protected index control protocol
+
 The dedicated private server also implements EnqueueIndex, IndexJob, IndexJobs,
 CancelIndex and RetryIndex over this shared owner. Admission requires project
 UUID, exact source sequence, bounded caller key and `write_mode: local`. Its

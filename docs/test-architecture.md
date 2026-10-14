@@ -172,6 +172,17 @@ Actual completed-catalog controls hold ledger or projection locks beyond a
 short private proof deadline: terminal exit remains bounded, controls seal
 uncertainty without blocking, source/catalog remain intact, and verified reopen
 reconciles the original build without another attempt.
+Derived-repair planning tests use actual canonical stores/catalogs and original
+index admission/cancellation/publication history. Missing/valid state is a
+no-effect observation; corrupt known metadata gives a bounded quarantine
+proposal, not a reset receipt. Tests reject FIFO/link/mode/unknown/oversize
+inventory, preserve confirmed citations and caller/cancellation bytes, fence
+content/inode/source/ledger changes and exclude timestamp-only metadata. Actual
+queued intent and an unjoined attempt block planning; retained ambiguous
+publication remains blocked across owner reopen. Cancellation, contention and
+impossible result fields cannot authorize effects. These tests do not qualify
+durable quarantine execution/replay, which remains required before rollout.
+
 The index private-IPC cohort validates exact caller-request admission digests,
 typed unknown jobs, generation-fenced cancel/retry, missing-ledger observation,
 bounded sorted pages and generation/digest/count/offset continuation. Real Unix
