@@ -42,6 +42,7 @@ func normalizeLimits(l Limits) (Limits, error) {
 type Store struct {
 	dir, git string
 	limits   Limits
+	hooks    *mutationHooks // package-private deterministic test barriers; nil in production.
 }
 
 func Open(ctx context.Context, path string, limits Limits) (*Store, error) {
@@ -109,14 +110,23 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 // run is deliberately private: public callers cannot supply Git subcommands.
 // The same store-bound environment can be used by G2's typed plumbing writes.
 func (s *Store) run(ctx context.Context, maxBytes int, args ...string) ([]byte, error) {
+	return s.runInput(ctx, maxBytes, nil, args...)
+}
+
+func (s *Store) runInput(ctx context.Context, maxBytes int, input []byte, args ...string) ([]byte, error) {
+	if len(input) > s.limits.TreeBytes {
+		return nil, fail("limit_exceeded", "git_input")
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	child, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	prefix := []string{"--no-pager", "--no-replace-objects", "--git-dir=" + s.dir, "-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.attributesFile=" + os.DevNull, "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
+	prefix = append(prefix, "-c", "user.name=gitcode-mcp", "-c", "user.email=local@example.invalid")
 	cmd := exec.CommandContext(child, s.git, append(prefix, args...)...)
 	cmd.Dir = s.dir
+	cmd.Stdin = bytes.NewReader(input)
 	cmd.Env = []string{"PATH=" + filepath.Dir(s.git), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_NO_REPLACE_OBJECTS=1", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GIT_COMMON_DIR=" + s.dir, "GIT_OBJECT_DIRECTORY=" + filepath.Join(s.dir, "objects")}
 	out := &boundedOutput{limit: maxBytes, cancel: cancel}
 	cmd.Stdout = out
