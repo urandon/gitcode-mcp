@@ -198,6 +198,10 @@ func localProjectIndexPath(cfg config.Config) string {
 }
 
 func (s *LocalProjects) Index(ctx context.Context, q LocalProjectIndexRequest) (LocalProjectIndexResult, error) {
+	return s.indexAt(ctx, q, "")
+}
+
+func (s *LocalProjects) indexAt(ctx context.Context, q LocalProjectIndexRequest, expectedCommit string) (LocalProjectIndexResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var zero LocalProjectIndexResult
@@ -221,6 +225,9 @@ func (s *LocalProjects) Index(ctx context.Context, q LocalProjectIndexRequest) (
 	snap, err := projectSnapshot(ctx, b)
 	if err != nil {
 		return zero, err
+	}
+	if expectedCommit != "" && snap.Commit() != expectedCommit {
+		return zero, localProjectError("stale_plan", "commit")
 	}
 	repo, _, err := snap.SearchCorpus(ctx)
 	if err != nil {

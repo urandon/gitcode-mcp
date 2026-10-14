@@ -599,7 +599,7 @@ export type ObservationSnapshot = {
   feedback: FeedbackObservation;
 };
 
-export type AdminView = 'Overview' | 'Service' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics';
+export type AdminView = 'Overview' | 'Service' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics' | 'Local projects';
 export type RepositoryTab = 'coverage' | 'collections' | 'documentation' | 'search' | 'activity';
 
 export const emptySnapshot: ObservationSnapshot = {

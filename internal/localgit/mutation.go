@@ -57,65 +57,9 @@ func (s *Store) MutateProject(ctx context.Context, ref, projectID string, req Mu
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	var zero MutationResult
-	kind := operationKind(req.Operation)
-	if kind == "" || req.WriteMode != "local" || !strings.HasPrefix(ref, "refs/heads/") {
-		return zero, fail("invalid_argument", "local_intent")
-	}
-	if !validText(req.IdempotencyKey, 256) {
-		return zero, fail("invalid_argument", "idempotency_key")
-	}
-	if len(req.Body) > s.limits.FileBytes || !utf8.ValidString(req.Body) || strings.ContainsRune(req.Body, 0) {
-		return zero, fail("invalid_argument", "body")
-	}
-	if req.ExpectedHead != "" && !oidValid(req.ExpectedHead) || req.ExpectedRevision != "" && !oidValid(req.ExpectedRevision) {
-		return zero, fail("invalid_argument", "revision")
-	}
-	if creating(req.Operation) {
-		if req.ID != "" || req.ExpectedHead == "" || req.ExpectedRevision != "" {
-			return zero, fail("invalid_argument", "create_guard")
-		}
-		if kind == Comment {
-			if _, err := idNumber(Issue, req.ParentID); err != nil {
-				return zero, err
-			}
-		} else if req.ParentID != "" {
-			return zero, fail("invalid_argument", "parent_id")
-		}
-	} else {
-		if _, err := idNumber(kind, req.ID); err != nil {
-			return zero, err
-		}
-		if req.ParentID != "" || req.ExpectedHead == "" && req.ExpectedRevision == "" {
-			return zero, fail("invalid_argument", "update_guard")
-		}
-	}
-	if deleting(req.Operation) && (req.Title != "" || req.Body != "" || req.State != "" || len(req.Labels) > 0 || req.Milestone != "" || len(req.Links) > 0) {
-		return zero, fail("invalid_argument", "delete_payload")
-	}
-	// Bound every caller-controlled metadata field before hashing or acquiring
-	// the writer lane. Generated identity and an update's immutable parent are
-	// placeholders here; the actual entity is validated again before publication.
-	if !deleting(req.Operation) {
-		id := req.ID
-		if creating(req.Operation) {
-			id = map[Kind]string{Issue: "ISSUE-1", Comment: "COMMENT-1", Wiki: "DOC-1"}[kind]
-		}
-		parent, state := req.ParentID, req.State
-		if kind == Comment && parent == "" {
-			parent = "ISSUE-1"
-		}
-		if creating(req.Operation) && state == "" {
-			state = "active"
-			if kind == Issue {
-				state = "open"
-			}
-		}
-		if state == "deleted" {
-			return zero, fail("invalid_argument", "state")
-		}
-		if err := validateMetadata(Metadata{Schema: SchemaVersion, Kind: kind, ID: id, ParentID: parent, Title: req.Title, State: state, Labels: req.Labels, Milestone: req.Milestone, Links: req.Links}); err != nil {
-			return zero, err
-		}
+	kind, err := s.validateMutationInput(ref, req)
+	if err != nil {
+		return zero, err
 	}
 	unlock, err := s.writerLock(ctx)
 	if err != nil {
@@ -155,73 +99,13 @@ func (s *Store) MutateProject(ctx context.Context, ref, projectID string, req Mu
 	if !errors.As(err, &absent) || absent.Code != "not_found" {
 		return zero, err
 	}
-	if req.ExpectedHead != "" && req.ExpectedHead != snap.commit {
-		return zero, fail("write_conflict", "head")
-	}
-	p := snap.project
-	var e Entity
-	if creating(req.Operation) {
-		next := map[Kind]*int64{Issue: &p.NextIssue, Comment: &p.NextComment, Wiki: &p.NextDocument}[kind]
-		if *next >= maxID {
-			return zero, fail("limit_exceeded", "counters")
-		}
-		prefix := map[Kind]string{Issue: "ISSUE-", Comment: "COMMENT-", Wiki: "DOC-"}[kind]
-		e.Metadata = Metadata{Schema: SchemaVersion, Kind: kind, ID: prefix + strconv.FormatInt(*next, 10), ParentID: req.ParentID}
-		(*next)++
-		if kind == Comment {
-			parent, err := snap.Get(ctx, Issue, req.ParentID)
-			if err != nil {
-				return zero, err
-			}
-			if parent.Metadata.State == "deleted" {
-				return zero, fail("write_conflict", "parent_deleted")
-			}
-		}
-	} else {
-		e, err = snap.Get(ctx, kind, req.ID)
-		if err != nil {
-			return zero, err
-		}
-		if req.ExpectedRevision != "" && req.ExpectedRevision != e.Citation.Blob {
-			return zero, fail("write_conflict", "revision")
-		}
-		if e.Metadata.State == "deleted" {
-			return zero, fail("write_conflict", "deleted")
-		}
-	}
-	if deleting(req.Operation) {
-		e.Metadata.State = "deleted"
-		e.Body = ""
-	} else {
-		e.Metadata.Title = req.Title
-		e.Metadata.State = req.State
-		if creating(req.Operation) && e.Metadata.State == "" {
-			e.Metadata.State = "active"
-			if kind == Issue {
-				e.Metadata.State = "open"
-			}
-		}
-		if e.Metadata.State == "deleted" {
-			return zero, fail("invalid_argument", "state")
-		}
-		e.Metadata.Labels = req.Labels
-		e.Metadata.Milestone = req.Milestone
-		e.Metadata.Links = req.Links
-		e.Body = req.Body
-	}
-	if err := validateMetadata(e.Metadata); err != nil {
+	p, e, err := snap.prepareMutationEntity(ctx, req, kind)
+	if err != nil {
 		return zero, err
 	}
-	entityYAML, err := yaml.Marshal(e.Metadata)
+	entityBytes, err := s.renderMutationEntity(e)
 	if err != nil {
-		return zero, fail("invalid_schema", "metadata")
-	}
-	if len(entityYAML) > s.limits.MetadataBytes {
-		return zero, fail("limit_exceeded", "metadata")
-	}
-	entityBytes := []byte("---\n" + string(entityYAML) + "---\n" + e.Body)
-	if len(entityBytes) > s.limits.FileBytes {
-		return zero, fail("limit_exceeded", "file_bytes")
+		return zero, err
 	}
 	path, _ := entityPath(kind, e.Metadata.ID, e.Metadata.ParentID)
 	blob, err := s.writeBlob(ctx, entityBytes)
@@ -450,4 +334,175 @@ func (s *Snapshot) resultAt(ctx context.Context, commit string, receipt Receipt)
 		return Entity{}, fail("invalid_schema", "receipt_result")
 	}
 	return e, nil
+}
+
+func (s *Store) validateMutationInput(ref string, req Mutation) (Kind, error) {
+	kind := operationKind(req.Operation)
+	if kind == "" || req.WriteMode != "local" || !strings.HasPrefix(ref, "refs/heads/") {
+		return "", fail("invalid_argument", "local_intent")
+	}
+	if !validText(req.IdempotencyKey, 256) {
+		return "", fail("invalid_argument", "idempotency_key")
+	}
+	if len(req.Body) > s.limits.FileBytes || !utf8.ValidString(req.Body) || strings.ContainsRune(req.Body, 0) {
+		return "", fail("invalid_argument", "body")
+	}
+	if req.ExpectedHead != "" && !oidValid(req.ExpectedHead) || req.ExpectedRevision != "" && !oidValid(req.ExpectedRevision) {
+		return "", fail("invalid_argument", "revision")
+	}
+	if creating(req.Operation) {
+		if req.ID != "" || req.ExpectedHead == "" || req.ExpectedRevision != "" {
+			return "", fail("invalid_argument", "create_guard")
+		}
+		if kind == Comment {
+			if _, err := idNumber(Issue, req.ParentID); err != nil {
+				return "", err
+			}
+		} else if req.ParentID != "" {
+			return "", fail("invalid_argument", "parent_id")
+		}
+	} else {
+		if _, err := idNumber(kind, req.ID); err != nil {
+			return "", err
+		}
+		if req.ParentID != "" || req.ExpectedHead == "" && req.ExpectedRevision == "" {
+			return "", fail("invalid_argument", "update_guard")
+		}
+	}
+	if deleting(req.Operation) && (req.Title != "" || req.Body != "" || req.State != "" || len(req.Labels) > 0 || req.Milestone != "" || len(req.Links) > 0) {
+		return "", fail("invalid_argument", "delete_payload")
+	}
+	// Bound every caller-controlled metadata field before hashing or acquiring
+	// the writer lane. Generated identity and an update's immutable parent are
+	// placeholders here; the actual entity is validated again before publication.
+	if !deleting(req.Operation) {
+		id := req.ID
+		if creating(req.Operation) {
+			id = map[Kind]string{Issue: "ISSUE-1", Comment: "COMMENT-1", Wiki: "DOC-1"}[kind]
+		}
+		parent, state := req.ParentID, req.State
+		if kind == Comment && parent == "" {
+			parent = "ISSUE-1"
+		}
+		if creating(req.Operation) && state == "" {
+			state = "active"
+			if kind == Issue {
+				state = "open"
+			}
+		}
+		if state == "deleted" {
+			return "", fail("invalid_argument", "state")
+		}
+		if err := validateMetadata(Metadata{Schema: SchemaVersion, Kind: kind, ID: id, ParentID: parent, Title: req.Title, State: state, Labels: req.Labels, Milestone: req.Milestone, Links: req.Links}); err != nil {
+			return "", err
+		}
+	}
+	return kind, nil
+}
+
+func (snap *Snapshot) prepareMutationEntity(ctx context.Context, req Mutation, kind Kind) (Project, Entity, error) {
+	var err error
+	if req.ExpectedHead != "" && req.ExpectedHead != snap.commit {
+		return Project{}, Entity{}, fail("write_conflict", "head")
+	}
+	p := snap.project
+	var e Entity
+	if creating(req.Operation) {
+		next := map[Kind]*int64{Issue: &p.NextIssue, Comment: &p.NextComment, Wiki: &p.NextDocument}[kind]
+		if *next >= maxID {
+			return Project{}, Entity{}, fail("limit_exceeded", "counters")
+		}
+		prefix := map[Kind]string{Issue: "ISSUE-", Comment: "COMMENT-", Wiki: "DOC-"}[kind]
+		e.Metadata = Metadata{Schema: SchemaVersion, Kind: kind, ID: prefix + strconv.FormatInt(*next, 10), ParentID: req.ParentID}
+		(*next)++
+		if kind == Comment {
+			parent, err := snap.Get(ctx, Issue, req.ParentID)
+			if err != nil {
+				return Project{}, Entity{}, err
+			}
+			if parent.Metadata.State == "deleted" {
+				return Project{}, Entity{}, fail("write_conflict", "parent_deleted")
+			}
+		}
+	} else {
+		e, err = snap.Get(ctx, kind, req.ID)
+		if err != nil {
+			return Project{}, Entity{}, err
+		}
+		if req.ExpectedRevision != "" && req.ExpectedRevision != e.Citation.Blob {
+			return Project{}, Entity{}, fail("write_conflict", "revision")
+		}
+		if e.Metadata.State == "deleted" {
+			return Project{}, Entity{}, fail("write_conflict", "deleted")
+		}
+	}
+	if deleting(req.Operation) {
+		e.Metadata.State = "deleted"
+		e.Body = ""
+	} else {
+		e.Metadata.Title = req.Title
+		e.Metadata.State = req.State
+		if creating(req.Operation) && e.Metadata.State == "" {
+			e.Metadata.State = "active"
+			if kind == Issue {
+				e.Metadata.State = "open"
+			}
+		}
+		if e.Metadata.State == "deleted" {
+			return Project{}, Entity{}, fail("invalid_argument", "state")
+		}
+		e.Metadata.Labels = req.Labels
+		e.Metadata.Milestone = req.Milestone
+		e.Metadata.Links = req.Links
+		e.Body = req.Body
+	}
+	if err := validateMetadata(e.Metadata); err != nil {
+		return Project{}, Entity{}, err
+	}
+	return p, e, nil
+}
+
+func (s *Store) renderMutationEntity(e Entity) ([]byte, error) {
+	entityYAML, err := yaml.Marshal(e.Metadata)
+	if err != nil {
+		return nil, fail("invalid_schema", "metadata")
+	}
+	if len(entityYAML) > s.limits.MetadataBytes {
+		return nil, fail("limit_exceeded", "metadata")
+	}
+	entityBytes := []byte("---\n" + string(entityYAML) + "---\n" + e.Body)
+	if len(entityBytes) > s.limits.FileBytes {
+		return nil, fail("limit_exceeded", "file_bytes")
+	}
+	return entityBytes, nil
+}
+
+// PreviewMutation validates the same typed intent and current Git guards as a
+// write, but creates no objects, receipts, locks or ref updates. Apply still
+// delegates to MutateProject so known receipts resolve before stale guards.
+func (s *Store) PreviewMutation(ctx context.Context, ref, projectID string, req Mutation) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	kind, err := s.validateMutationInput(ref, req)
+	if err != nil {
+		return "", err
+	}
+	snap, err := s.Snapshot(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	if snap.Project().ID != projectID {
+		return "", fail("invalid_configuration", "project")
+	}
+	if err := s.ValidateLocalBranch(ctx, ref); err != nil {
+		return "", err
+	}
+	_, e, err := snap.prepareMutationEntity(ctx, req, kind)
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.renderMutationEntity(e); err != nil {
+		return "", err
+	}
+	return snap.Commit(), nil
 }

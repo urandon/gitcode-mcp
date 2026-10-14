@@ -15,6 +15,7 @@ import (
 type localProjectStore struct {
 	store          *localgit.Store
 	projectID, ref string
+	authority      string                 // private canonical registration identity; never a DTO.
 	conflict       atomic.Pointer[string] // last outcome, never durable authority.
 }
 type localProjectBinding struct {
@@ -76,7 +77,7 @@ func NewLocalProjects(ctx context.Context, cfg map[string]config.LocalProjectCon
 			if snapshot.Project().ID != p.ProjectID {
 				return nil, config.LocalProjectConfigError{}
 			}
-			runtime = &localProjectStore{store: store, projectID: p.ProjectID, ref: p.Ref}
+			runtime = &localProjectStore{store: store, projectID: p.ProjectID, ref: p.Ref, authority: canonical}
 			stores[canonical] = runtime
 		}
 		host.bindings[selector] = localProjectBinding{runtime: runtime, readOnly: p.ReadOnly, profile: p.RAGProfile}

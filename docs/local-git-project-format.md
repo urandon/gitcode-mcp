@@ -1,8 +1,8 @@
 # Local Git project format (schema 1)
 
-This is the isolated implementation of epic #200. The G4 CLI/MCP checkpoint
-and G5 search/index slice below are usable on this branch; Admin and whole-feature
-rollout remain gated by the later children. Its child PRs integrate into
+This is the isolated implementation of epic #200. The G4 CLI/MCP checkpoint,
+G5 search/index and G6 explicit protected Admin slice are usable on this branch;
+whole-feature rollout remains gated by G7. Its child PRs integrate into
 `codex/epic-200-git-backed-harness`; the whole cohort enters `main` together.
 Git owns all project content and history. No cache database is required by the
 adapter, and no source or chunk bytes are copied into an index by this package.
@@ -189,12 +189,15 @@ explicit `service.mode: local`; a missing/mistyped mode cannot silently start a
 remote host. Repository-owned config cannot set either field.
 
 `Manager.Run` takes the local branch before creating remote jobs, maintenance,
-cache authority, credential reporters, embedding providers or Admin controllers.
+cache authority, credential reporters or embedding providers. By default it
+does not construct an Admin controller either.
 It reuses the existing runtime state, private socket, handler cancellation and
 shutdown joining. The control socket is mode 0600 in its private runtime area.
 TCP, redirected socket addresses, live remote intent and implicit Admin are
 rejected. An already-live daemon is not replaced/cohosted. Explicit protected
-loopback Admin remains the separate #206 cohort and is not a zero-network claim.
+loopback Admin is separately explicit through `service run --admin` (G6 below),
+and is not a zero-network claim. `admin open` cannot turn a strict-private local
+host into an HTTP host; restart with the explicit opt-in first.
 There is no new daemon/coordinator, ownership ledger or OS-level sandbox.
 
 Existing private JSON-RPC exposes the following shared-service calls, reused by
@@ -223,13 +226,15 @@ responses are capped at 64 MiB over the reader's 8 MiB source budget. Only
 registered selectors and typed fields are accepted; unknown routes/methods,
 malformed input and transport failures return finite diagnostics without raw
 paths/provider bodies. The local host's lifecycle health/status remains readable;
-remote job/maintenance/Admin/doctor RPC actions are unavailable, not fallback.
+remote job/maintenance/doctor RPC actions are unavailable, not fallback. Admin
+open/status are unavailable in strict-private mode; the explicit protected G6
+host reuses those existing lifecycle calls.
 After a lost reply/restart, retrying the same key returns the Git receipt's
 original result even if the entity was subsequently edited.
 
 Reader, writer and private-service tests create real temporary Git stores
 without credentials or external network. G5 adds explicit search/index below;
-protected Admin and bundle restore remain required children of #200.
+G6 adds protected Admin below; bundle restore remains the required G7 child.
 
 ## CLI/MCP first usable checkpoint (G4)
 
@@ -416,5 +421,65 @@ and explicit index rebuilds it. Cache/schema failures and invalid derived
 citations cannot hide valid current lexical matches. Historical Git citations
 remain independent of derived-cache retention.
 
-Protected Admin search/effective-mode/index controls are the explicit #206
-cohort; complete feature rollout and backup/restore remain gated by #207.
+## Protected Local projects Admin (G6)
+
+Strict-private `service run` starts no Admin HTTP listener, not even after an
+`admin open` request. To opt into the existing protected loopback console using
+the trusted local configuration:
+
+```sh
+gitcode-mcp service run --admin
+# In another terminal, with the same trusted configuration/runtime:
+gitcode-mcp admin open
+```
+
+Only loopback IP binds are accepted in local mode. A bind without `--admin`,
+non-loopback address, or unsafe override is rejected. This does not change the
+remote/cache host's existing lazy-Admin behavior. There is no second daemon.
+Default local startup still does not discover credentials, load remote caches,
+register maintenance or provision an embedding provider. The opted-in local
+snapshot contains only lifecycle state and the local capability catalog.
+
+**Local projects** uses the same shared Git service for configured selector
+availability, read-only state, bounded issue/comment/wiki list/read, exact
+commit/blob/tree citations, history, editing, tombstones and search. Search
+shows requested/effective mode, missing/stale/partial/failed index state and
+lexical fallback. Ordinary reads never create an index. Source content is
+escaped text, not executed HTML/Markdown. Drafts and retry intents stay in
+browser memory only, never URLs or browser storage.
+
+The authenticated `/api/admin/v1/local-projects` GET returns status. Fixed POST
+suffixes `list`, `get`, `history`, `search`, `mutation-plan`, `mutation-apply`,
+`index-plan`, `index-apply` accept closed typed JSON, not URL selectors. Even
+content reads use session/Origin/Fetch Metadata/CSRF protection. Every operation
+inherits a ten-second context, 1 MiB request cap and 64 MiB escaped-response cap.
+The normal/cache host advertises this cohort as unavailable.
+
+Mutation plans are stateless content-free digests of the exact intent and
+trusted registration; they are not another journal. Preview uses the writer's
+validation and guards without creating objects, receipts, counters or commits.
+Apply checks the confirmed digest, then delegates to the existing writer, where
+known Git receipts resolve **before stale guards**. Creation requires full
+expected HEAD; edit/tombstone requires the inspected blob. Changing editor
+inputs invalidates a plan. Conflict retains the draft and original guard;
+explicit current-entity inspection and revision adoption can prepare a new
+review without overwriting the draft. Uncertain delivery locks editing and
+retains the exact confirmed intent/key for an explicit retry. No automatic
+write retry occurs. A replay receipt names the original result, not current
+HEAD; current state is refreshed separately.
+
+Index plans pin commit, configured profile/provider and bounded new-chunk cap.
+Confirmation calls the existing foreground indexer, with metadata-only result
+receipts in the existing Admin control receipt store. These receipts never
+contain source bodies, chunks or filesystem paths and are disposable; Git is
+the sole project authority. The chunk cap is per foreground attempt; interrupted
+derived work can resume/reuse existing vectors, not claim exactly-once provider
+execution. Completed index requests replay their original metadata receipt.
+Provider setup/download/start, storage selection, import/restore and history
+rewriting remain CLI handoffs. No browser-entered destination/path is accepted.
+
+Deterministic tests exercise a real Git store through Unix IPC plus authenticated
+HTTP, independent of credentials or external network, and semantic browser
+tests cover confirmation/cancel, lost replies, conflict/draft recovery,
+read-only/unavailable projects, lexical fallback, themes and narrow layout.
+Complete feature rollout and backup/restore remain gated by #207.

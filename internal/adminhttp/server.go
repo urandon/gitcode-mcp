@@ -82,6 +82,7 @@ type Config struct {
 	Metrics                            *observability.Metrics
 	Observation                        *observability.Collector
 	Observability                      *observability.Reader
+	LocalProjects                      LocalProjectProvider
 }
 
 type Controller struct {
@@ -248,6 +249,10 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/observability", c.getObservability)
 	mux.HandleFunc("GET /api/admin/v1/observability/metrics", c.getObservabilityMetrics)
 	mux.HandleFunc("GET /api/admin/v1/observability/events", c.getObservabilityEvents)
+	mux.HandleFunc("GET /api/admin/v1/local-projects", c.localProjectStatus)
+	for _, operation := range []string{"list", "get", "history", "search", "mutation-plan", "mutation-apply", "index-plan", "index-apply"} {
+		mux.HandleFunc("POST /api/admin/v1/local-projects/"+operation, c.localProjectRequest(operation))
+	}
 	mux.HandleFunc("/", c.serveAsset)
 	return c.observeRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)

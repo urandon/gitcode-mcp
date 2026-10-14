@@ -7,10 +7,12 @@
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
   import ServiceView from '$lib/ServiceView.svelte';
+  import LocalProjectsView from '$lib/LocalProjectsView.svelte';
+  import { emptyLocalQuery, readLocalQuery, writeLocalQuery, type LocalQuery } from '$lib/local-projects';
   import { isRef, readServiceQuery, refProjection, writeServiceQuery, type ObservationTarget, type ServiceQuery } from '$lib/observation';
 
   const navigation: Array<{ name: AdminView; icon: typeof CircleGauge }> = [
-    { name: 'Overview', icon: CircleGauge }, { name: 'Caches', icon: Database }, { name: 'Jobs', icon: Activity }, { name: 'Maintenance', icon: Wrench }, { name: 'Diagnostics', icon: HeartPulse }, { name: 'Service', icon: Gauge }
+    { name: 'Overview', icon: CircleGauge }, { name: 'Caches', icon: Database }, { name: 'Jobs', icon: Activity }, { name: 'Maintenance', icon: Wrench }, { name: 'Diagnostics', icon: HeartPulse }, { name: 'Service', icon: Gauge }, { name: 'Local projects', icon: GitFork }
   ];
   const repositoryTabs: Array<{ value: RepositoryTab; label: string }> = [
     { value: 'coverage', label: 'Coverage' }, { value: 'collections', label: 'Collections' }, { value: 'documentation', label: 'Documentation' }, { value: 'search', label: 'Search status' }, { value: 'activity', label: 'Activity' }
@@ -127,6 +129,7 @@
   let requestedDocsSourceRef = '';
   let serviceReady = false;
   let serviceQuery: ServiceQuery = {};
+  let localQuery: LocalQuery = emptyLocalQuery();
   // Retain the restart barrier across cohort navigation, not event pages.
   let serviceBoundary = { frozen: false };
   let serviceQueryInvalid = false;
@@ -279,8 +282,9 @@
     jobSyncHealthFilter = params.get('job_sync_health') || '';
     jobCollectionFilter = params.get('job_collection') || '';
     const parsedObservation = readServiceQuery(params); serviceQuery = parsedObservation.query; serviceQueryInvalid = parsedObservation.invalid;
+    localQuery = readLocalQuery(params);
     requestedDocsSourceRef = isRef(params.get('doc_source_ref'), 'source') ? params.get('doc_source_ref')! : '';
-    if (active === 'Service') {
+    if (active === 'Service' || active === 'Local projects') {
       selectedCacheRef = ''; selectedRepoID = ''; selectedJobID = ''; requestedRegistrationID = ''; requestedDocsSourceRef = '';
       updateLocation(true);
     }
@@ -294,6 +298,7 @@
     if (selectedRepoID && repoTab !== 'coverage') params.set('tab', repoTab);
     if (active === 'Caches' && repoTab === 'documentation' && requestedDocsSourceRef) params.set('doc_source_ref', requestedDocsSourceRef);
     if (active === 'Service') writeServiceQuery(params, serviceQuery);
+    if (active === 'Local projects') writeLocalQuery(params, localQuery);
     if (selectedRepoID && repoTab === 'search') {
       if (searchQuery) params.set('q', searchQuery);
       if (searchKind) params.set('kind', searchKind);
@@ -327,6 +332,7 @@
     updateLocation();
   }
   function changeServiceQuery(next: ServiceQuery): void { serviceQuery = next; serviceQueryInvalid = false; updateLocation(); }
+  function changeLocalQuery(next: LocalQuery): void { if (JSON.stringify(localQuery) !== JSON.stringify(next)) { localQuery = next; updateLocation(); } }
   function openObservation(refs: unknown): void {
     serviceQuery = refProjection(refs); serviceQueryInvalid = false; active = 'Service';
     requestedRegistrationID = ''; selectedCacheRef = ''; selectedRepoID = ''; selectedJobID = ''; updateLocation();
@@ -787,7 +793,9 @@
         {#if eventConnection === 'disconnected'}<section class="state-panel warning-panel" role="status" aria-label="Live observation connection"><AlertTriangle size={21} /><div><strong>Live updates disconnected</strong><p>The browser is retrying the local event stream. Refresh the snapshot before acting if this state persists.</p><button class="text-action" onclick={refresh} disabled={loading}>Refresh snapshot</button></div></section>{/if}
         {#if stale}<section class="state-panel warning-panel" role="status"><Clock3 size={21} /><div><strong>Snapshot may be stale</strong><p>Last observation was {new Date(snapshot.generated_at).toLocaleString()}. Recheck before acting.</p></div></section>{/if}
 
-        {#if active === 'Overview'}
+        {#if active === 'Local projects'}
+          <LocalProjectsView ready={serviceReady && !loading} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
+        {:else if active === 'Overview'}
           <div class="intro"><p class="eyebrow">LOCAL ADMIN</p><h1>Local operator console</h1><p>Readiness, coverage, active work, and the next safe action across every managed local cache.</p></div>
           {#if loading && !snapshot.revision}<div class="loading-grid" aria-label="Loading operator snapshot"><span></span><span></span><span></span></div>
           {:else}

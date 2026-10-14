@@ -243,7 +243,9 @@ func TestLocalProjectsAliasReadOnlyRoutingAndSanitizedFailures(t *testing.T) {
 func TestLocalProjectsRejectInvalidAuthorityAndHosting(t *testing.T) {
 	m, _ := localFixtureManager(t)
 	for _, edit := range []func(*Manager){
-		func(m *Manager) { m.AdminAutoStart = true },
+		func(m *Manager) { m.AdminAutoStart = true; m.AdminBind = "0.0.0.0:0" },
+		func(m *Manager) { m.AdminAutoStart = true; m.AdminAllowNonLoopback = true },
+		func(m *Manager) { m.AdminBind = "127.0.0.1:0" },
 		func(m *Manager) {
 			m.Source = localPoisonSource{testSource{env: map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "tcp"}}}
 		},

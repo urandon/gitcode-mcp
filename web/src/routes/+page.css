@@ -575,6 +575,33 @@ table small { font-size: var(--type-micro); }
   font-size: var(--type-control);
 }
 
+/* Local projects reuse the console shell and workbench tokens. Source text is
+   plain escaped content, not executable Markdown or a second editor system. */
+.local-projects { min-width: 0; }
+.local-projects p, .local-projects li { font-size: var(--type-body); line-height: 1.55; }
+.local-identity, .local-actions { margin-top: 16px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; }
+.local-identity code, .local-citation, .local-history code, .local-projects .state-panel p { overflow-wrap: anywhere; word-break: break-word; }
+.local-citation, .local-history { font-size: var(--type-micro); color: var(--muted); }
+.local-entity-list, .local-results { margin: 18px 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.local-entity-list button { width: 100%; min-height: var(--control-height); display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--surface); text-align: left; cursor: pointer; }
+.local-entity-list button[aria-current='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.local-entity-list span { min-width: 0; overflow-wrap: anywhere; display: grid; gap: 4px; }
+.local-entity-list small { font-size: var(--type-micro); color: var(--muted); }
+.local-body { max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-body); line-height: 1.6; }
+.local-draft { border: 0; padding: 0; min-width: 0; display: grid; gap: 16px; }
+.local-draft label { display: grid; gap: 8px; font-size: var(--type-micro); }
+.local-draft input, .local-draft select, .local-draft textarea { width: 100%; min-width: 0; min-height: var(--control-height); border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: inherit; font-size: var(--type-control); color: var(--text); background: var(--surface); }
+.local-draft textarea { resize: vertical; }
+.local-history { padding-left: 20px; }
+.local-history li { margin-top: 12px; display: grid; gap: 5px; }
+.local-confirmation dd { overflow-wrap: anywhere; white-space: normal; font-size: var(--type-micro); }
+.local-confirmation dt { font-size: var(--type-micro); }
+.local-projects button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 600px) {
+  .local-projects .control-heading, .local-projects .section-heading { flex-wrap: wrap; }
+  .local-projects .control-workbench { padding: 16px; }
+}
+
 .unit-input span { height: var(--control-height); }
 .search-lab .section-heading p:not(.section-kicker),
 .control-heading p:not(.section-kicker),
@@ -679,7 +706,7 @@ table small { font-size: var(--type-micro); }
   .shell { display: block; }
   .sidebar { width: 100%; min-height: auto; padding: 10px; border-right: 0; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; flex-direction: row; align-items: center; gap: 8px; }
   .brand { margin: 0 5px 0 0; }
-  .sidebar nav { display: flex; flex: 1; justify-content: space-between; gap: 2px; }
+  .sidebar nav { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; justify-content: flex-start; gap: 2px; }
   .sidebar nav button { width: 42px; height: 42px; }
   .theme-control { display: none; }
   .content { width: calc(100% - 32px); margin-left: 16px; padding-top: 54px; }
