@@ -26,7 +26,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		}
 	}
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "project init|register|status|get|list|history|mutate|search|index --project SELECTOR [--format json]\nSetup: --project-id ID --storage-ref REF --confirm; global YAML only. Mutate: --operation OP --write-mode local --idempotency-key KEY --expected-head OID or --expected-revision OID. Search: --query TEXT [--mode fulltext|hybrid]; index: --write-mode local [--max-chunks 64]. No implicit daemon start.")
+		fmt.Fprintln(stdout, "project init|register|status|get|list|history|mutate|search|index|export|restore --project SELECTOR [--format json]\nSetup: --project-id ID --storage-ref REF --confirm; global YAML only. Mutate: --operation OP --write-mode local --idempotency-key KEY --expected-head OID or --expected-revision OID. Search: --query TEXT [--mode fulltext|hybrid]; index: --write-mode local [--max-chunks 64]. Backup: --bundle FILE --confirm; restore also requires new storage/selector, exact project-id/ref/expected-head and inactive daemon. Private Git bundles, no overwrite. No implicit daemon start.")
 		return 0
 	}
 	verb := args[0]
@@ -37,6 +37,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	var setup service.LocalProjectSetupRequest
 	var search service.LocalProjectSearchRequest
 	var index service.LocalProjectIndexRequest
+	var bundle string
 	var format, kind, labels, links, bodyFile string
 	fs.StringVar(&q.Project, "project", "", "opaque project selector")
 	fs.StringVar(&format, "format", "json", "json or text")
@@ -51,6 +52,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	fs.BoolVar(&setup.ReadOnly, "read-only", false, "read-only registration")
 	fs.BoolVar(&setup.Confirm, "confirm", false, "confirm setup and strict-local configuration")
 	fs.StringVar(&setup.RAGProfile, "rag-profile", "disabled", "optional existing pre-provisioned embedding profile; never setup/download")
+	fs.StringVar(&bundle, "bundle", "", "CLI-only private Git bundle file")
 	fs.StringVar(&mut.Operation, "operation", "", "fixed typed mutation")
 	fs.StringVar(&mut.ParentID, "parent-id", "", "parent issue for new comment")
 	fs.StringVar(&mut.Title, "title", "", "entity title")
@@ -90,6 +92,10 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		fields = "query mode limit"
 	case "index":
 		fields = "max-chunks write-mode"
+	case "export":
+		fields = "bundle confirm"
+	case "restore":
+		fields = "bundle confirm project-id storage-ref ref read-only rag-profile expected-head"
 	default:
 		return writeError(stderr, format, invalid())
 	}
@@ -136,6 +142,33 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	}
 	if bad || (q.Project == "" && verb != "status") {
 		return writeError(stderr, format, invalid())
+	}
+	if verb == "export" || verb == "restore" {
+		setup.Project = q.Project
+		req := service.LocalProjectBackupRequest{LocalProjectSetupRequest: setup, Bundle: bundle, ExpectedHead: mut.ExpectedHead}
+		var r service.LocalProjectBackupResult
+		var err error
+		if verb == "restore" {
+			// Status is local process/socket observation, never remote bootstrap.
+			cfg, e := config.LocalProjectBackupConfiguration(deps.Source)
+			if e != nil {
+				return writeError(stderr, format, config.LocalProjectConfigError{})
+			}
+			st, e := (servicectl.Manager{Source: deps.Source, RuntimeDir: cfg.Service.RuntimeDir}).Status()
+			if e != nil || st.Running || st.PIDAlive {
+				return writeError(stderr, format, &localgit.Error{Code: "write_conflict", Field: "active_service"})
+			}
+			r, err = service.RestoreLocalProject(ctx, deps.Source, req)
+		} else {
+			r, err = service.ExportLocalProject(ctx, deps.Source, req)
+		}
+		if err != nil {
+			return writeError(stderr, format, err)
+		}
+		if encodeLocalProject(stdout, format, r) != nil {
+			return writeError(stderr, format, &localgit.Error{Code: "unavailable", Field: "output"})
+		}
+		return 0
 	}
 	if verb == "init" || verb == "register" {
 		setup.Project = q.Project

@@ -13,7 +13,11 @@ The isolated LocalGit epic also has an explicit `service.mode: local` profile.
 It discovers only its local project tools, not the remote/cache catalog below;
 see [Local project setup and tool contracts](local-git-project-format.md#climcp-first-usable-checkpoint-g4).
 No cache, credentials or embedding provider is bootstrapped by that profile.
-This is the epic's first usable checkpoint, not its full feature rollout.
+Final feature rollout still requires the epic's integrated review/CI evidence.
+Private Git bundle export/restore is a [confirmed CLI handoff](local-git-project-format.md#private-git-backup-and-restore-g7),
+not an MCP file-upload or storage-selector tool. After restore or derived-cache
+loss, the same project tools preserve exact citations/history and original-key
+receipt replay; source authority never moves into the derived index.
 
 Local project search defaults to cache/provider-free `fulltext` through
 `local_project_search`. Explicit `hybrid` and write-policy-gated
