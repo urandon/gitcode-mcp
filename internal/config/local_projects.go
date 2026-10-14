@@ -39,6 +39,9 @@ func (p *LocalProjectConfig) UnmarshalYAML(n *yaml.Node) error {
 			return LocalProjectConfigError{}
 		}
 		seen[key.Value] = true
+		if key.Value == "read_only" && value.Tag != "!!bool" || key.Value != "read_only" && value.Tag != "!!str" {
+			return LocalProjectConfigError{}
+		}
 	}
 	type plain LocalProjectConfig
 	if err := n.Decode((*plain)(p)); err != nil {
@@ -68,7 +71,7 @@ func (p *LocalProjectConfig) UnmarshalJSON(data []byte) error {
 		}
 		seen[name] = true
 		var v json.RawMessage
-		if d.Decode(&v) != nil {
+		if d.Decode(&v) != nil || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
 			return LocalProjectConfigError{}
 		}
 	}

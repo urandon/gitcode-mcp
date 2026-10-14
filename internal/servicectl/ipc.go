@@ -629,12 +629,11 @@ func rpcCallerError(ctx context.Context, err error) error {
 }
 
 func (c *RPCClient) callMemory(ctx context.Context, address, method string, params any, result any) error {
-	memoryRPC.Lock()
-	server, ok := memoryRPC.servers[address]
-	memoryRPC.Unlock()
-	if !ok {
-		return fmt.Errorf("service memory endpoint not found: %s", address)
+	server, ctx, release, err := memoryRequestOwner(ctx, address)
+	if err != nil {
+		return err
 	}
+	defer release()
 	id := c.nextID.Add(1)
 	req := RPCRequest{JSONRPC: jsonrpcVersion, ID: id, Method: method}
 	if params != nil {

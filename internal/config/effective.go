@@ -886,11 +886,14 @@ func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
 }
 
 func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *EffectiveConfig) error {
-	if repoConfigPath == "" || repoFile.RAG == nil && repoFile.Service == nil {
+	if repoConfigPath == "" {
 		return nil
 	}
 	if err := validateRepoLocalRuntimeStorage(root, repoConfigPath, repoFile); err != nil {
 		return err
+	}
+	if repoFile.RAG == nil && repoFile.Service == nil {
+		return nil
 	}
 	var err error
 	eff.Config, err = mergeRAGFile(eff.Config, repoFile.RAG)

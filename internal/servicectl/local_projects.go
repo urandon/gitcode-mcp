@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/config"
@@ -52,9 +53,17 @@ func (m Manager) runLocalProjects(ctx context.Context) error {
 	}
 	defer os.Remove(paths.PIDPath)
 	defer os.Remove(paths.StatePath)
-	server := RPCServer{Manager: m, LocalProjects: host, LocalOnly: true, runtimeContext: ctx}
+	var handlers atomic.Int64
+	server := RPCServer{Manager: m, LocalProjects: host, LocalOnly: true, runtimeContext: ctx, observationHandlers: &handlers}
 	if paths.Network == "mem" {
-		return serveMemoryRPC(ctx, paths.Address, server, nil)
+		err := serveMemoryRPC(ctx, paths.Address, server, nil)
+		// Removal from memoryRPC closes admission under its existing mutex.
+		// Every previously admitted local call owns this counter and a context
+		// linked to ctx; returning means its Git process and handler have joined.
+		for handlers.Load() > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		return err
 	}
 	if err := os.Remove(paths.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return localHostError("unavailable")

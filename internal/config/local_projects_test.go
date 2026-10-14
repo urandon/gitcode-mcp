@@ -30,9 +30,23 @@ func TestLocalProjectConfigOpaqueMachineBindings(t *testing.T) {
 	}
 }
 
+func TestLocalProjectsRepoOnlyBindingRefusesRemoteFallback(t *testing.T) {
+	src := newMemorySource(t)
+	root := filepath.Join(src.homeDir, "workspace", "repo")
+	src.cwd = root
+	src.dirs[filepath.Join(root, ".git")] = true
+	path := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	src.files[path] = []byte("local_projects:\n  lab: {backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main}\n")
+	_, err := LoadEffective(src, Overrides{})
+	var coded LocalProjectConfigError
+	if !errors.As(err, &coded) {
+		t.Fatal("repo-only local binding did not fail closed")
+	}
+}
+
 func TestLocalProjectConfigRejectsUnknownDuplicateAndPrivateFields(t *testing.T) {
 	valid := "backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main"
-	for _, binding := range []string{valid + ", path: private-coordinate", valid + ", read_only: false, Read_Only: true", valid + ", storage_ref: other", "backend: remote, project_id: lab, storage_ref: data, ref: refs/heads/main"} {
+	for _, binding := range []string{valid + ", path: private-coordinate", valid + ", read_only: false, Read_Only: true", valid + ", storage_ref: other", valid + ", read_only: null", "backend: remote, project_id: lab, storage_ref: data, ref: refs/heads/main"} {
 		src := newMemorySource(t)
 		path := filepath.Join(src.configDir, "invalid.yaml")
 		src.env[EnvMCPConfigPath] = path
@@ -46,6 +60,7 @@ func TestLocalProjectConfigRejectsUnknownDuplicateAndPrivateFields(t *testing.T)
 		`{"backend":"local_git","project_id":"lab","storage_ref":"data","ref":"refs/heads/main","path":"private-coordinate"}`,
 		`{"backend":"local_git","project_id":"lab","storage_ref":"data","ref":"refs/heads/main","Read_Only":true}`,
 		`{"backend":"local_git","project_id":"lab","storage_ref":"data","storage_ref":"other","ref":"refs/heads/main"}`,
+		`{"backend":"local_git","project_id":"lab","storage_ref":"data","ref":"refs/heads/main","read_only":null}`,
 	} {
 		src := newMemorySource(t)
 		path := filepath.Join(src.configDir, "invalid.json")

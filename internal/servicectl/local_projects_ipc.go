@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"reflect"
 	"strings"
 	"time"
 
@@ -161,14 +162,13 @@ func (c *RPCClient) callLocalProject(ctx context.Context, method string, params 
 		return localHostError("unavailable")
 	}
 	if network == "mem" {
-		memoryRPC.Lock()
-		server, ok := memoryRPC.servers[address]
-		memoryRPC.Unlock()
-		if !ok {
-			return localHostError("unavailable")
+		server, ownerCtx, release, ownerErr := memoryRequestOwner(ctx, address)
+		if ownerErr != nil {
+			return ownerErr
 		}
+		defer release()
 		sent = true
-		response, err = json.Marshal(server.handleRequest(ctx, req))
+		response, err = json.Marshal(server.handleRequest(ownerCtx, req))
 	} else {
 		var dialer net.Dialer
 		conn, dialErr := dialer.DialContext(ctx, "unix", address)
@@ -195,6 +195,9 @@ func (c *RPCClient) callLocalProject(ctx context.Context, method string, params 
 		return failure()
 	}
 	if len(response) > localProjectResponseBytes {
+		if method == "LocalProjects.Mutate" {
+			return failure()
+		}
 		return localHostError("limit_exceeded")
 	}
 	var resp observationRPCResponse
@@ -216,7 +219,8 @@ func (c *RPCClient) callLocalProject(ctx context.Context, method string, params 
 		}
 		return &localgit.Error{Code: code, Field: "service"} // never reflect peer error body.
 	}
-	if len(resp.Result) == 0 || string(resp.Result) == "null" {
+	value, valid := validateLocalProjectResult(method, resp.Result)
+	if !valid {
 		if method == "LocalProjects.Mutate" {
 			return failure()
 		}
@@ -225,12 +229,141 @@ func (c *RPCClient) callLocalProject(ctx context.Context, method string, params 
 	if result == nil {
 		return nil
 	}
-	if err := json.Unmarshal(resp.Result, result); err != nil {
-		if method == "LocalProjects.Mutate" {
-			return failure()
-		}
-		return localHostError("invalid_response")
+	// Never merge a partial response into a reused caller value. Validation is
+	// method-owned, then one fresh destination is published after full decode.
+	target := reflect.ValueOf(result)
+	if target.Kind() != reflect.Pointer || target.IsNil() {
+		return localHostError("invalid_argument")
 	}
+	fresh := reflect.New(target.Elem().Type())
+	data, _ := json.Marshal(value)
+	if strictObservationResponse(data, fresh.Interface()) != nil {
+		return localHostError("invalid_argument")
+	}
+	target.Elem().Set(fresh.Elem())
 	return nil
 }
 func mustLocalID(id int64) []byte { b, _ := json.Marshal(id); return b }
+
+// Lookup/admission share the map mutex with daemon endpoint removal. Only the
+// local cohort links execution to the daemon lifetime; legacy job ownership is
+// unchanged. The existing handler counter is an in-memory join aid, not state.
+func memoryRequestOwner(ctx context.Context, address string) (RPCServer, context.Context, func(), error) {
+	memoryRPC.Lock()
+	server, ok := memoryRPC.servers[address]
+	if ok && server.LocalOnly && server.observationHandlers != nil {
+		server.observationHandlers.Add(1)
+	}
+	memoryRPC.Unlock()
+	if !ok {
+		return RPCServer{}, ctx, nil, localHostError("unavailable")
+	}
+	if !server.LocalOnly {
+		return server, ctx, func() {}, nil
+	}
+	owned, cancel := context.WithCancel(ctx)
+	stop := func() bool { return true }
+	if server.runtimeContext != nil {
+		stop = context.AfterFunc(server.runtimeContext, cancel)
+	}
+	return server, owned, func() {
+		stop()
+		cancel()
+		if server.observationHandlers != nil {
+			server.observationHandlers.Add(-1)
+		}
+	}, nil
+}
+
+func validateLocalProjectResult(method string, raw []byte) (any, bool) {
+	switch method {
+	case "LocalProjects.Get":
+		return decodeLocalEntity(raw)
+	case "LocalProjects.List":
+		var records []json.RawMessage
+		if strictObservationResponse(raw, &records) != nil || records == nil || len(records) > 128 {
+			return nil, false
+		}
+		list := make([]localgit.Entity, 0, len(records))
+		bytes := 0
+		for _, record := range records {
+			e, ok := decodeLocalEntity(record)
+			if !ok {
+				return nil, false
+			}
+			bytes += len(e.Body)
+			if bytes > localgit.MaxReadBytes {
+				return nil, false
+			}
+			list = append(list, e)
+		}
+		return list, true
+	case "LocalProjects.History":
+		var list []localgit.Citation
+		if strictObservationResponse(raw, &list) != nil || len(list) < 1 || len(list) > localgit.MaxHistory {
+			return nil, false
+		}
+		for _, c := range list {
+			if localgit.ValidateCitationResponse(c) != nil {
+				return nil, false
+			}
+		}
+		return list, true
+	case "LocalProjects.Mutate":
+		var r struct {
+			Entity   json.RawMessage `json:"entity"`
+			Replayed *bool           `json:"replayed"`
+		}
+		if strictObservationResponse(raw, &r) != nil || r.Replayed == nil {
+			return nil, false
+		}
+		e, ok := decodeLocalEntity(r.Entity)
+		if !ok {
+			return nil, false
+		}
+		return localgit.MutationResult{Entity: e, Replayed: *r.Replayed}, true
+	case "LocalProjects.Status":
+		var status service.LocalProjectsStatus
+		if strictObservationResponse(raw, &status) != nil || len(status.Projects) < 1 || len(status.Projects) > 32 {
+			return nil, false
+		}
+		seen := map[string]bool{}
+		for _, p := range status.Projects {
+			if p.Project == "" || len(p.Project) > 64 || p.ProjectID == "" || len(p.ProjectID) > 64 || seen[p.Project] {
+				return nil, false
+			}
+			seen[p.Project] = true
+			switch p.State {
+			case "ready":
+				if !p.Readable || p.ReadOnly || p.Commit == "" {
+					return nil, false
+				}
+			case "read_only":
+				if !p.Readable || !p.ReadOnly || p.Commit == "" {
+					return nil, false
+				}
+			case "unavailable":
+				if p.Readable || p.DiagnosticCode == "" {
+					return nil, false
+				}
+			default:
+				return nil, false
+			}
+		}
+		return status, true
+	}
+	return nil, false
+}
+
+func decodeLocalEntity(raw []byte) (localgit.Entity, bool) {
+	var wire struct {
+		Metadata localgit.Metadata `json:"metadata"`
+		Body     *string           `json:"body"`
+		Citation localgit.Citation `json:"citation"`
+	}
+	if strictObservationResponse(raw, &wire) != nil || wire.Body == nil {
+		return localgit.Entity{}, false
+	}
+	e := localgit.Entity{Metadata: wire.Metadata, Body: *wire.Body, Citation: wire.Citation}
+	return e, localgit.ValidateEntityResponse(e) == nil
+}
