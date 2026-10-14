@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -323,36 +324,70 @@ func validateLocalProjectResult(method string, raw []byte) (any, bool) {
 		}
 		return localgit.MutationResult{Entity: e, Replayed: *r.Replayed}, true
 	case "LocalProjects.Status":
-		var status service.LocalProjectsStatus
-		if strictObservationResponse(raw, &status) != nil || len(status.Projects) < 1 || len(status.Projects) > 32 {
+		var wire struct {
+			Projects []struct {
+				Project        string `json:"project"`
+				ProjectID      string `json:"project_id"`
+				Readable       *bool  `json:"readable"`
+				ReadOnly       *bool  `json:"read_only"`
+				State          string `json:"state"`
+				Commit         string `json:"commit,omitempty"`
+				DiagnosticCode string `json:"diagnostic_code,omitempty"`
+				LastConflict   string `json:"last_conflict,omitempty"`
+			} `json:"projects"`
+		}
+		if strictObservationResponse(raw, &wire) != nil || len(wire.Projects) < 1 || len(wire.Projects) > 32 {
 			return nil, false
 		}
+		status := service.LocalProjectsStatus{Projects: make([]service.LocalProjectStatus, 0, len(wire.Projects))}
 		seen := map[string]bool{}
-		for _, p := range status.Projects {
-			if p.Project == "" || len(p.Project) > 64 || p.ProjectID == "" || len(p.ProjectID) > 64 || seen[p.Project] {
+		for _, w := range wire.Projects {
+			if w.Readable == nil || w.ReadOnly == nil {
+				return nil, false
+			}
+			p := service.LocalProjectStatus{Project: w.Project, ProjectID: w.ProjectID, Readable: *w.Readable, ReadOnly: *w.ReadOnly, State: w.State, Commit: w.Commit, DiagnosticCode: w.DiagnosticCode, LastConflict: w.LastConflict}
+			if !localStatusName.MatchString(p.Project) || strings.Contains(p.Project, ".") || !localStatusName.MatchString(p.ProjectID) || seen[p.Project] {
+				return nil, false
+			}
+			if p.LastConflict != "" && p.LastConflict != "local_git_write_conflict" && p.LastConflict != "local_git_writer_busy" && p.LastConflict != "local_git_idempotency_conflict" {
+				return nil, false
+			}
+			if p.DiagnosticCode != "" && !localStatusDiagnostic(p.DiagnosticCode) {
 				return nil, false
 			}
 			seen[p.Project] = true
 			switch p.State {
 			case "ready":
-				if !p.Readable || p.ReadOnly || p.Commit == "" {
+				if !p.Readable || p.ReadOnly || !localStatusOID.MatchString(p.Commit) || p.DiagnosticCode != "" {
 					return nil, false
 				}
 			case "read_only":
-				if !p.Readable || !p.ReadOnly || p.Commit == "" {
+				if !p.Readable || !p.ReadOnly || !localStatusOID.MatchString(p.Commit) || p.DiagnosticCode != "" {
 					return nil, false
 				}
 			case "unavailable":
-				if p.Readable || p.DiagnosticCode == "" {
+				if p.Readable || p.DiagnosticCode == "" || p.Commit != "" {
 					return nil, false
 				}
 			default:
 				return nil, false
 			}
+			status.Projects = append(status.Projects, p)
 		}
 		return status, true
 	}
 	return nil, false
+}
+
+var localStatusName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+var localStatusOID = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+
+func localStatusDiagnostic(code string) bool {
+	switch code {
+	case "local_git_invalid_argument", "local_git_invalid_configuration", "local_git_invalid_schema", "local_git_unsupported_schema", "local_git_unavailable", "local_git_not_found", "local_git_unsupported_store", "local_git_limit_exceeded", "local_git_history_unavailable":
+		return true
+	}
+	return false
 }
 
 func decodeLocalEntity(raw []byte) (localgit.Entity, bool) {

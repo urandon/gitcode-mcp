@@ -167,3 +167,49 @@ func TestLocalProjectsClosedResultAndFreshAssignment(t *testing.T) {
 	mutation, _ := json.Marshal(localgit.MutationResult{Entity: e})
 	localCall(t, localResultPeer(t, mutation), "LocalProjects.Mutate", service.LocalProjectMutation{Project: "lab"}, nil)
 }
+
+func TestLocalProjectsStatusFiniteRequiredScalars(t *testing.T) {
+	valid := service.LocalProjectStatus{Project: "lab", ProjectID: "lab", State: "unavailable", DiagnosticCode: "local_git_unavailable"}
+	for _, change := range []string{"valid", "diagnostic", "conflict", "commit", "read_only_null", "readable_missing", "selector"} {
+		t.Run(change, func(t *testing.T) {
+			p := valid
+			switch change {
+			case "diagnostic":
+				p.DiagnosticCode = "fixture-private-diagnostic-body"
+			case "conflict":
+				p.LastConflict = "fixture-private-conflict-body"
+			case "commit":
+				p.State = "ready"
+				p.Readable = true
+				p.DiagnosticCode = ""
+				p.Commit = "not-a-commit"
+			case "read_only_null":
+				p.State = "ready"
+				p.Readable = true
+				p.DiagnosticCode = ""
+				p.Commit = strings.Repeat("a", 40)
+			case "selector":
+				p.Project = "fixture/private-coordinate"
+			}
+			raw, _ := json.Marshal(service.LocalProjectsStatus{Projects: []service.LocalProjectStatus{p}})
+			if change == "read_only_null" {
+				raw = []byte(strings.Replace(string(raw), `"read_only":false`, `"read_only":null`, 1))
+			}
+			if change == "readable_missing" {
+				raw = []byte(strings.Replace(string(raw), `"readable":false,`, "", 1))
+			}
+			var got service.LocalProjectsStatus
+			err := localResultPeer(t, raw).Call(context.Background(), "LocalProjects.Status", nil, &got)
+			if change == "valid" {
+				if err != nil || !reflect.DeepEqual(got.Projects, []service.LocalProjectStatus{valid}) {
+					t.Fatal("genuine finite status refused")
+				}
+				return
+			}
+			localCode(t, err, "local_git_invalid_response")
+			if len(got.Projects) != 0 {
+				t.Fatal("invalid status changed caller result")
+			}
+		})
+	}
+}
