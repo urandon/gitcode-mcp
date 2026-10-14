@@ -784,6 +784,11 @@
   <main>
     <header class="topbar"><div class="crumb"><span>Admin</span><ChevronRight size={14} /><strong>{active}</strong></div><div class="version">v{snapshot.service.version || 'dev'}</div></header>
     <section class="content" aria-busy={active !== 'Service' && loading}>
+      <!-- Keep only bounded ephemeral editor/retry state across shell sections.
+           The component does no cold reads until its cohort is selected. -->
+      <div hidden={active !== 'Local projects' || snapshot.api_version !== adminApiVersion}>
+        <LocalProjectsView active={active === 'Local projects'} ready={serviceReady && !loading && snapshot.api_version === adminApiVersion} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
+      </div>
       {#if active === 'Service'}
         <ServiceView bind:boundary={serviceBoundary} ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
       {:else if snapshot.api_version !== adminApiVersion}
@@ -794,7 +799,7 @@
         {#if stale}<section class="state-panel warning-panel" role="status"><Clock3 size={21} /><div><strong>Snapshot may be stale</strong><p>Last observation was {new Date(snapshot.generated_at).toLocaleString()}. Recheck before acting.</p></div></section>{/if}
 
         {#if active === 'Local projects'}
-          <LocalProjectsView ready={serviceReady && !loading} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
+          <!-- The Local projects instance above is shell-owned, not unmounted. -->
         {:else if active === 'Overview'}
           <div class="intro"><p class="eyebrow">LOCAL ADMIN</p><h1>Local operator console</h1><p>Readiness, coverage, active work, and the next safe action across every managed local cache.</p></div>
           {#if loading && !snapshot.revision}<div class="loading-grid" aria-label="Loading operator snapshot"><span></span><span></span><span></span></div>

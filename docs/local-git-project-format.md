@@ -446,7 +446,12 @@ commit/blob/tree citations, history, editing, tombstones and search. Search
 shows requested/effective mode, missing/stale/partial/failed index state and
 lexical fallback. Ordinary reads never create an index. Source content is
 escaped text, not executed HTML/Markdown. Drafts and retry intents stay in
-browser memory only, never URLs or browser storage.
+browser memory only, never URLs or browser storage. The shell retains one
+bounded ephemeral editor instance across sections; it performs no cold local
+reads until selected. Ordinary late reads are canceled when leaving the cohort,
+while an explicitly confirmed write retains its exact retry intent. Full-page
+departure with a draft or uncertain write requests the browser's discard
+confirmation instead of silently losing that in-memory state.
 
 The authenticated `/api/admin/v1/local-projects` GET returns status. Fixed POST
 suffixes `list`, `get`, `history`, `search`, `mutation-plan`, `mutation-apply`,

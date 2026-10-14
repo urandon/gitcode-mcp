@@ -212,3 +212,60 @@ test('late local reads cannot replace another view or write after navigation', a
   await expect(page.getByRole('region', { name: 'Local entity list' })).toHaveCount(0);
   expect(fixture.applies).toHaveLength(0);
 });
+
+test('review retains exact ambiguous intent across shell navigation', async ({ page }) => {
+ const fixture=await localFixture(page,{lostReply:true});
+ await page.goto('/?view=Local+projects&project=lab&entity=ISSUE-1');
+ await page.getByRole('button',{name:'Edit entity',exact:true}).click();
+ await page.getByRole('textbox',{name:'Entity body'}).fill('Review retained draft');
+ await page.getByRole('button',{name:'Render mutation plan'}).click();
+ await page.getByRole('button',{name:'Confirm local action',exact:true}).click();
+ await page.getByRole('dialog').getByRole('button',{name:'Confirm action',exact:true}).click();
+ await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Retain the draft and confirmed key');
+ await page.getByRole('dialog').getByRole('button',{name:'Keep current state'}).click();
+ expect(fixture.applies).toHaveLength(1);
+ await page.getByRole('button',{name:'Overview',exact:true}).click();
+ // Either navigation must be refused, or the same in-memory intent must survive returning.
+ if(await page.getByRole('heading',{name:'Local operator console'}).isVisible()){
+   await page.getByRole('button',{name:'Local projects',exact:true}).click();
+ }
+ await expect(page.getByRole('button',{name:'Retry exact confirmed action'})).toBeVisible();
+ await expect(page.getByRole('textbox',{name:'Entity body'})).toHaveValue('Review retained draft');
+});
+test('review retains an unsaved conflict draft across shell navigation',async({page})=>{
+ await localFixture(page,{conflict:true});
+ await page.goto('/?view=Local+projects&project=lab&entity=ISSUE-1');
+ await page.getByRole('button',{name:'Edit entity',exact:true}).click();
+ await page.getByRole('textbox',{name:'Entity body'}).fill('Review conflict draft');
+ await page.getByRole('button',{name:'Render mutation plan'}).click();
+ await page.getByRole('button',{name:'Confirm local action',exact:true}).click();
+ await page.getByRole('dialog').getByRole('button',{name:'Confirm action',exact:true}).click();
+ await expect(page.getByRole('alert')).toContainText('Git revision changed');
+ await page.getByRole('button',{name:'Overview',exact:true}).click();
+ if(await page.getByRole('heading',{name:'Local operator console'}).isVisible()){
+   await page.getByRole('button',{name:'Local projects',exact:true}).click();
+ }
+ await expect(page.getByRole('textbox',{name:'Entity body'})).toHaveValue('Review conflict draft');
+});
+
+test('shell keeps one ephemeral editor across every section without cold local reads', async ({ page }) => {
+  const fixture = await localFixture(page);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Local operator console' })).toBeVisible();
+  expect(fixture.calls).toHaveLength(0);
+  await page.getByRole('button', { name: 'Local projects', exact: true }).click();
+  await page.getByRole('button', { name: 'New issue', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Entity body' }).fill('Ephemeral shell draft');
+  const count = fixture.calls.length;
+  for (const section of ['Overview', 'Service', 'Diagnostics']) {
+    await page.getByRole('button', { name: section, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Entity body' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Local projects', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: 'Entity body' })).toHaveValue('Ephemeral shell draft');
+  }
+  expect(fixture.calls).toHaveLength(count);
+  const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
+  expect(storage).not.toContain('Ephemeral shell draft');
+  await page.getByRole('button', { name: 'Discard draft' }).click();
+  await expect(page.getByRole('textbox', { name: 'Entity body' })).toHaveCount(0);
+});

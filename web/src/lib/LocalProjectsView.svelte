@@ -6,6 +6,7 @@
   import { localEntityID, localMutation, localRequest, localSelector, LocalProjectError, type LocalCitation, type LocalEntity, type LocalIndexIntent, type LocalKind, type LocalMutationIntent, type LocalPlan, type LocalQuery, type LocalSearch, type LocalStatus } from './local-projects';
 
   export let ready = false;
+  export let active = false;
   export let csrf = '';
   export let capabilities: Capability[] = [];
   export let query: LocalQuery;
@@ -29,6 +30,7 @@
   let receipt = '';
   let epoch = 0;
   let disposed = false;
+  let wasActive = false;
   let controller: AbortController | undefined;
   let seenQuery = '';
   let current: LocalQuery = { project: '', kind: 'issue', id: '', offset: 0 };
@@ -40,13 +42,23 @@
   $: canIndex = capabilities.some(c => c.id === 'local_project_index' && c.ui_enabled);
   $: project = projects.find(p => p.project === current.project);
   $: locked = Boolean(draft || pending?.attempted || busy);
-  $: if (ready && enabled && !loaded) { loaded = true; void refreshProjects(); }
-  $: if (loaded && projects.length && JSON.stringify(query) !== seenQuery) {
+  $: if (ready && active && enabled && !loaded) { loaded = true; void refreshProjects(); }
+  $: if (active && loaded && projects.length && JSON.stringify(query) !== seenQuery) {
     seenQuery = JSON.stringify(query);
     if (draft || pending?.attempted) {
       error = 'Finish or discard the draft before changing the target. An uncertain action must be retried with the same key.';
       onquery(current);
     } else void loadSelection(query);
+  }
+  $: {
+    if (wasActive && !active) {
+      // Shell navigation hides this one ephemeral instance, not its draft or
+      // unresolved write. Ordinary reads/plans can be canceled; a confirmed
+      // write retains its exact intent until delivery/replay resolves it.
+      if (!pending?.attempted) { epoch++; controller?.abort(); busy = false; if (!draft) seenQuery = ''; }
+      if (dialog?.open) dialog.close();
+    }
+    wasActive = active;
   }
 
   function begin(): { token: number; signal: AbortSignal } {
@@ -119,7 +131,7 @@
   async function confirm(event: MouseEvent): Promise<void> {
     trigger = event.currentTarget as HTMLButtonElement; dialog.showModal(); await tick(); cancelButton.focus();
   }
-  async function closeDialog(): Promise<void> { dialog.close(); await tick(); trigger?.focus(); }
+  async function closeDialog(): Promise<void> { dialog.close(); await tick(); if (active) trigger?.focus(); }
   async function apply(): Promise<void> {
     if (!pending || !plan || busy) return;
     const captured = structuredClone(pending); pending = { ...pending, attempted: true };
@@ -172,6 +184,8 @@
   }
   onDestroy(() => { disposed = true; epoch++; controller?.abort(); });
 </script>
+
+<svelte:window onbeforeunload={event => { if (draft || pending?.attempted) { event.preventDefault(); event.returnValue = ''; } }} />
 
 <div class="local-projects">
   <div class="intro"><p class="eyebrow">GIT-BACKED HARNESS</p><h1>Local projects</h1><p>Issues, comments and wiki in Git. No GitCode access, credential discovery or implicit setup.</p></div>
