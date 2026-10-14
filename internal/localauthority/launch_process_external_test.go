@@ -22,6 +22,12 @@ import (
 // entry. This is not a stand-in claim for product-wide startup tracing or real
 // foreign-user qualification, which remain separate native gates.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "__authority_network_probe" {
+		os.Exit(runNativeNetworkProbe())
+	}
+	if len(os.Args) == 2 && (os.Args[1] == "__authority_network_escape_probe" || os.Args[1] == "__authority_network_escape_child") {
+		os.Exit(runNativeEscapeProbe(os.Args[1]))
+	}
 	if len(os.Args) == 2 && os.Args[1] == servicectl.AuthorityRuntimeSelector {
 		os.Exit(servicectl.RunInheritedAuthority(context.Background()))
 	}
@@ -173,5 +179,33 @@ func TestNativeAuthorityColdEntryRefusesWithoutPreparation(t *testing.T) {
 	exit, ok := err.(*exec.ExitError)
 	if !ok || exit.ExitCode() == 0 {
 		t.Fatal("cold native entry did not refuse missing fixed roles")
+	}
+}
+
+func TestNativeAuthorityImmediateCloseAfterLaunchRetainsOwnership(t *testing.T) {
+	p, registry, dir := nativeLaunchFixture(t)
+	process := nativeProcess(t, p, dir)
+	// No IPC operation or readiness request may give the child an extra serving
+	// turn before this stop. The successful native launch is the tested boundary.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := process.Close(ctx); err != nil {
+		t.Fatalf("immediate native stop after successful launch failed: %v", err)
+	}
+	writer, err := localauthority.OpenWriter(ctx, registry, dir, fixtureProject)
+	if err != nil {
+		t.Fatal("joined immediate native stop retained writer ownership")
+	}
+	status, err := writer.Status(ctx)
+	if err != nil || status.ProjectID != fixtureProject || status.AuthorityGeneration != 0 || status.Readiness != "ready" {
+		t.Fatal("immediate native stop changed canonical authority")
+	}
+	if writer.Close() != nil {
+		t.Fatal("immediate-close canonical readback owner did not join")
+	}
+	next := nativeProcess(t, p, dir)
+	var observed authority.ProjectStatus
+	if next.Client().Call(ctx, "AuthorityV1.Read", authority.ReadRequest{ProjectID: fixtureProject, Operation: "status"}, &observed) != nil || observed.ProjectID != status.ProjectID || observed.AuthorityGeneration != status.AuthorityGeneration {
+		t.Fatal("immediate native stop prevented exact existing-only restart")
 	}
 }

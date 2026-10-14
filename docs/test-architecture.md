@@ -184,6 +184,39 @@ responses even when discarded; finite errors omit peer prose. These tests do
 not certify corrupt reset, semantic vectors, safe observation or full native
 network isolation.
 
+The explicit Linux strict-process network gate builds the real product from
+the current checkout with `python3 scripts/ci/run_native_authority_network.py`.
+Direct opt-in tests may use a separately built artifact only with an explicit
+SHA-256 byte identity; their output identifies those bytes, not their source.
+Current-source evidence must include the exact build checkout/command as well
+as the artifact identity (the fixed CI runner builds and hashes it itself).
+It requires `/usr/bin/strace`, `/usr/bin/cc` for the bounded non-Go process-birth
+control, and a durability-qualified fixture filesystem;
+tmpfs and overlayfs are not substitutes for ext4/XFS/Btrfs. Its positive control
+performs actual loopback TCP and fixture-owned UDP/DNS requests before checking
+the strict native entry through private IPC mutate/read/search and joined stop.
+The observer consumes a bounded transient stream (2 MiB total, 16 KiB per line),
+retains only counters and completion flags, and counts failed socket attempts.
+Missing, truncated, unknown or incomplete observation is a failure, not evidence
+of zero network activity. Neither raw syscall output nor browser artifacts are
+written or uploaded. The CI runner installs only this test observer; it does not
+set up an embedding provider or the operator's canonical service. Default
+offline tests skip the external observer explicitly; selecting this gate makes
+an unavailable observer fatal. This Linux evidence does not qualify macOS,
+foreign-UID access or real semantic retrieval. Immediate-close-after-launch
+tests separately reacquire canonical ownership and restart without an extra IPC
+readiness turn. No production lifetime fix is inferred merely from a hypothesis.
+The observer requires strace's `--kill-on-exit` (6.6 or newer); missing support
+fails rather than falling back to process-group cleanup. A real fixture child
+escapes into a new session, then owned-tracer cancellation must make its pinned
+pidfd report death. Strict observation includes process creation and refuses
+non-thread delegation and `CLONE_UNTRACED`, not just extra executable entries.
+A real C fixture creates and joins a `CLONE_UNTRACED` child with one inert INET
+socket attempt; strict observation must reject its birth rather than silently
+lose that descendant's calls. The compiler is test infrastructure only.
+These [strace lifecycle semantics](https://github.com/strace/strace/blob/master/doc/strace.1.in)
+are observer prerequisites, not product runtime dependencies.
+
 Private server fixtures qualify an actual capability handshake before exposing
 their listener to cancellation tests. A kernel backlog connect is not serving
 readiness: a deterministic cancelled-before-Serve control preserves the cold

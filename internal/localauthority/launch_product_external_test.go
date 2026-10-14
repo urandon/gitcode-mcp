@@ -49,7 +49,7 @@ type productChild struct {
 	client *servicectl.RPCClient
 }
 
-func spawnProductChild(t *testing.T, executable string, p *localauthority.PreparedRegistry, dir, misuse string) productChild {
+func spawnProductChild(t *testing.T, executable string, p *localauthority.PreparedRegistry, dir, misuse string, instrument ...func(*exec.Cmd)) productChild {
 	t.Helper()
 	prepared, err := p.PrepareLaunch(context.Background(), []localauthority.ProjectBinding{{ProjectID: fixtureProject, Directory: dir}})
 	if err != nil {
@@ -126,6 +126,9 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 		socket := os.NewFile(uintptr(fd), "synthetic-inert-stdio-control")
 		defer socket.Close()
 		cmd.Stdout = socket
+	}
+	for _, configure := range instrument {
+		configure(cmd) // test-only native observation; no production launch hook
 	}
 	assertNativeParentDescriptorHygiene(t)
 	if cmd.Start() != nil {

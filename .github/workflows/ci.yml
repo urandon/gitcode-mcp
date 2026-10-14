@@ -74,6 +74,16 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p 'test_*.py'
           python3 scripts/ci/run_go_tests.py
 
+      - name: Qualify strict native authority network isolation
+        # Real product entry plus positive TCP/UDP/DNS calibration. Trace input
+        # is bounded transient parser data, never a log or retained artifact.
+        # Install only the observer in this ephemeral Linux CI VM, not a
+        # canonical service or an embedding provider. Missing tracing fails.
+        run: |
+          sudo apt-get update -qq >/dev/null 2>&1
+          sudo apt-get install -y -qq strace >/dev/null 2>&1
+          python3 scripts/ci/run_native_authority_network.py
+
       - name: Qualify native user-systemd observation upgrade
         # ubuntu-latest is an ephemeral VM, not a container. Do not install or
         # enable the canonical service. The test runtime-links a unique fixture
