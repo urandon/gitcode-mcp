@@ -1,7 +1,8 @@
 # Local Git project format (schema 1)
 
-This is the internal foundation of epic #200, not a currently enabled CLI,
-MCP or Admin feature. Its child PRs integrate into
+This is the isolated implementation of epic #200. The G4 CLI/MCP checkpoint
+below is usable on this branch; search/RAG, Admin and whole-feature rollout
+remain gated by the later children. Its child PRs integrate into
 `codex/epic-200-git-backed-harness`; the whole cohort enters `main` together.
 Git owns all project content and history. No cache database is required by the
 adapter, and no source or chunk bytes are copied into an index by this package.
@@ -182,7 +183,7 @@ opaque `storage_ref` resolves to `<user-config-dir>/gitcode-mcp/local-projects/
 <storage_ref>.git`; it is not a path or URL input. These are dedicated Git data
 repositories, not repository-document source checkouts. Setup and registration
 are machine-local CLI handoffs, implemented by the separate vertical-slice child
-#204. G3 initializes the registered service from an already valid Git store;
+#204 below. G3 initializes the registered service from an already valid Git store;
 it never automatically adopts an experimental store. `local_projects` requires
 explicit `service.mode: local`; a missing/mistyped mode cannot silently start a
 remote host. Repository-owned config cannot set either field.
@@ -196,8 +197,8 @@ rejected. An already-live daemon is not replaced/cohosted. Explicit protected
 loopback Admin remains the separate #206 cohort and is not a zero-network claim.
 There is no new daemon/coordinator, ownership ledger or OS-level sandbox.
 
-Existing private JSON-RPC exposes the following shared-service calls; this is
-not yet CLI/MCP product tool discovery:
+Existing private JSON-RPC exposes the following shared-service calls, reused by
+the explicit G4 CLI/MCP tools below:
 
 | Method | Request/result |
 |---|---|
@@ -227,5 +228,113 @@ After a lost reply/restart, retrying the same key returns the Git receipt's
 original result even if the entity was subsequently edited.
 
 Reader, writer and private-service tests create real temporary Git stores
-without credentials or external network. CLI/MCP exposure, search/RAG, protected Admin and bundle
+without credentials or external network. Search/RAG, protected Admin and bundle
 restore remain separate required children of #200.
+
+## CLI/MCP first usable checkpoint (G4)
+
+Use a trusted global YAML selected through `GITCODE_MCP_CONFIG`, or the normal
+user configuration. Setup preserves unrelated YAML fields and atomically writes
+`service.mode: local` plus one registration. It does not start, stop or replace
+a running daemon. Stop a remote/cache daemon explicitly before using the same
+runtime, or configure a distinct machine-local `service.runtime_dir`. Strict
+local daemon hosting never cohosts remote maintenance or implicit Admin HTTP.
+JSON configuration is readable but setup requires a trusted YAML handoff.
+
+```sh
+gitcode-mcp project init --project lab --project-id example-project \
+  --storage-ref lab-data --confirm
+gitcode-mcp service run
+```
+
+Keep the daemon running; use a second terminal with the same configuration:
+
+```sh
+gitcode-mcp project status
+gitcode-mcp project mutate --project lab --operation create_issue \
+  --title 'Research question' --body 'What should we measure?' \
+  --expected-head EXPECTED_FULL_COMMIT --write-mode local \
+  --idempotency-key research-question-1
+gitcode-mcp project get --project lab --kind issue --id ISSUE-1
+gitcode-mcp project list --project lab --kind wiki --limit 20
+gitcode-mcp project history --project lab --kind issue --id ISSUE-1 --max-commits 64
+gitcode-mcp --mcp
+```
+
+Copy `EXPECTED_FULL_COMMIT` from `project status`, never guess it. Creates
+require the full expected head; update/delete accept `--expected-revision` from
+the entity's exact citation or an expected head. The operation enum is the G2
+contract above. CLI metadata flags are `--state`, `--labels` (comma-separated),
+`--milestone`, `--parent-id` for a new comment and `--links` (a JSON array of
+typed `kind`/`id` references). `--body-file` is CLI-only; `-` reads bounded stdin.
+Updates replace editable fields, including empty body/labels/links; explicitly
+preserve data you intend to retain. Only delete operations create tombstones.
+
+`project init` refuses any existing destination rather than overwriting or
+implicitly importing it. If initialization succeeded but config registration
+failed, inspect the cause and use explicit registration of that schema-1 store:
+
+```sh
+gitcode-mcp project register --project lab --project-id example-project \
+  --storage-ref lab-data --confirm
+```
+
+Registration validates identity/ref and canonical aliases across the entire
+candidate config under the existing trusted-config writer lock. Existing
+selectors cannot be silently retargeted. Setup takes no arbitrary destination
+URL; storage references resolve only in the managed local store directory.
+There is no second operation journal. Successfully initialized Git data is not
+deleted when a later registration fails. Initialization also preserves the store
+once ref publication is attempted, even if cancellation leaves the result
+unacknowledged: inspect it and explicitly register a valid schema-1 store rather
+than retrying `init` over it. Config registration rejects rendered YAML above its
+1 MiB intake limit before changing the selected file.
+
+Local MCP discovery is side-effect-free and advertises only:
+
+| MCP tool | CLI equivalent | Input |
+|---|---|---|
+| `local_project_status` | `project status` | Empty object; bounded registrations/status, no content or paths |
+| `local_project_get` | `project get` | `project`, `kind`, stable `id` |
+| `local_project_list` | `project list` | `project`, `kind`, optional `offset`/`limit` (default 20, max 128) |
+| `local_project_history` | `project history` | `project`, `kind`, `id`, optional `max_commits` (default 64, max 256) |
+| `local_project_mutate` | `project mutate` | `project` and closed typed `mutation` with local intent, expected revision/head and caller key |
+
+For example, pass this to `local_project_mutate`:
+
+```json
+{
+  "project": "lab",
+  "mutation": {
+    "operation": "update_issue",
+    "id": "ISSUE-1",
+    "title": "Answered research question",
+    "body": "Retained evidence and result.",
+    "state": "closed",
+    "expected_revision": "EXPECTED_FULL_BLOB",
+    "write_mode": "local",
+    "idempotency_key": "answer-question-1"
+  }
+}
+```
+
+Local write tools are hidden and rejected before service access when MCP access
+is `read`. `write` discovery does not bypass local intent/revision/key checks.
+Storage setup is CLI-only; MCP never accepts paths, store refs or provider URLs.
+Stdio uses the ordinary MCP transport. Explicit HTTP/SSE uses the same local
+handler but must bind a loopback IP; that opt-in listener is not a zero-network
+deployment claim. Neither transport resolves credentials, constructs GitCode or
+embedding providers, initializes a cache or implicitly starts the daemon.
+
+CLI defaults to structured JSON. Results carry entity metadata/body and exact
+commit/blob/Git-tree citations; writes also carry `replayed`. Missing cache data
+does not affect these operations. Replaying the same key/intent after later
+edits or daemon restart returns the original result. A different intent conflicts.
+After a timeout or `local_git_publication_ambiguous`, retain the same key; never
+blindly create a second request with another key. Stale revisions return
+`local_git_write_conflict`. Exhausted history returns
+`local_git_history_unavailable`, not a complete or absent history. Unknown
+project/configuration/service failures remain typed and never select GitCode.
+Current reads and returned historical citations remain Git-backed; direct
+checkout editing/import, history rewriting and standalone label/milestone CRUD
+are outside this checkpoint.

@@ -9,6 +9,12 @@ gitcode-mcp provides two MCP transport modes:
 
 Both modes serve the same MCP tools over the same JSON-RPC 2.0 protocol.
 
+The isolated LocalGit epic also has an explicit `service.mode: local` profile.
+It discovers only its local project tools, not the remote/cache catalog below;
+see [Local project setup and tool contracts](local-git-project-format.md#climcp-first-usable-checkpoint-g4).
+No cache, credentials or embedding provider is bootstrapped by that profile.
+This is the epic's first usable checkpoint, not its full feature rollout.
+
 ## Stdio mode
 
 ### Starting the server

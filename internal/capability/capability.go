@@ -3,9 +3,10 @@ package capability
 type Category string
 
 const (
-	CategoryWrite Category = "write"
-	CategoryRAG   Category = "rag"
-	CategoryAdmin Category = "admin"
+	CategoryWrite        Category = "write"
+	CategoryRAG          Category = "rag"
+	CategoryAdmin        Category = "admin"
+	CategoryLocalProject Category = "local_project"
 )
 
 type SafetyClass string
@@ -495,7 +496,7 @@ var adminCapabilities = []Capability{
 		ID: "admin_service_observation", Category: CategoryAdmin, Safety: SafetyReadOnly,
 		CLIName: "service observe", ServiceCommand: "observability-summary",
 		Description: "Read bounded local daemon health, sampled metrics and catalog events; no provider, setup or execution side effects.",
-		UI: enabled("Available in the Service view; overall feature qualification remains separate."), CLI: enabled("Available through service observe, metrics and events."), MCP: disabled("The Admin cohort uses shared observation APIs; MCP has separate read tools."),
+		UI:          enabled("Available in the Service view; overall feature qualification remains separate."), CLI: enabled("Available through service observe, metrics and events."), MCP: disabled("The Admin cohort uses shared observation APIs; MCP has separate read tools."),
 	},
 	{
 		ID: "admin_feedback_setup", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
@@ -563,10 +564,16 @@ func Capabilities() []Capability {
 	out := append([]Capability(nil), writeCapabilities...)
 	out = append(out, ragCapabilities...)
 	out = append(out, adminCapabilities...)
+	out = append(out, LocalProjectCapabilities()...)
 	return out
 }
 
 func LookupByMCPName(name string) (Capability, bool) {
+	for _, cap := range LocalProjectCapabilities() {
+		if cap.MCPName == name && name != "" {
+			return cap, true
+		}
+	}
 	for _, cap := range writeCapabilities {
 		if cap.MCPName == name {
 			return cap, true

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gitcode-mcp/internal/localgit"
 	"gitcode-mcp/internal/service"
@@ -18,6 +19,15 @@ import (
 
 const localProjectBudget = 10 * time.Second
 const localProjectResponseBytes = 64 << 20 // bounded escaped JSON over the G1 8 MiB source cap.
+
+// DecodeLocalProjectJSON reuses the existing private IPC closed decoder for
+// CLI/MCP transport values. It never reflects input bytes in diagnostics.
+func DecodeLocalProjectJSON(raw []byte, dst any) error {
+	if len(raw) > maxRPCRequestBytes || !utf8.Valid(raw) || strictObservationResponse(raw, dst) != nil {
+		return localHostError("invalid_argument")
+	}
+	return nil
+}
 
 func localProjectMethod(method string) bool { return strings.HasPrefix(method, "LocalProjects.") }
 
