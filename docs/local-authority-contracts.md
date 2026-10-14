@@ -565,10 +565,9 @@ are corruption, never permission to replace the admitted policy at runtime.
 ### Explicit derived-repair service (L4 in progress)
 
 The shared coordinator can render a read-only `ProjectionRepairPlan`. This is
-an internal service contract, not an advertised CLI/MCP/Admin or private-IPC
-action and not a completed repair receipt. Shared apply/replay described below
-does not yet activate the private-IPC, CLI/MCP or Admin cohorts. Their protected
-response and complete runtime acceptance remain required before rollout.
+an internal service contract and not a completed repair receipt. The dedicated
+private IPC cohort below uses shared apply/replay; public CLI/MCP and Admin
+remain gated on their complete workflow and runtime acceptance.
 Planning never creates, repairs or syncs a
 missing namespace or initializes the separate index-intent ledger.
 
@@ -666,6 +665,48 @@ can be admitted as never provisioned. Cancellation/deadline during inspection
 propagates as interruption, not proof of corrupt bytes; after a possible move
 the live owner remains fenced until qualified reopen.
 
+### Protected derived-repair protocol
+
+The dedicated private server exposes four shared-owner operations. Ordinary
+remote RPC remains contracts-only and cannot start or discover a local writer.
+
+| Method (`AuthorityV1.` prefix) | Closed request fields |
+| --- | --- |
+| PlanProjectionRepair | project_id |
+| ApplyProjectionRepair | project_id, plan_id, idempotency_key, write_mode |
+| ProjectionRepair | project_id, repair_id |
+| ProjectionRepairs | project_id |
+
+Plan replies wrap the exact finite proposal in a schema-1 envelope; apply
+replies wrap only confirmed phase-3 receipts. Each envelope binds the normalized
+request and concrete proposal/receipt with a domain-separated SHA-256 digest.
+It is a consistency check, not peer authentication or a readiness claim.
+Changed keys, projects, plans or response fields cannot reuse an old envelope.
+Only the private server supplies local-user attribution; callers cannot select
+an actor, path, namespace, profile, destination or source bytes. Apply retains
+explicit `write_mode: local` and never retries after an ambiguous response.
+
+History is one complete atomic snapshot, not pagination or caller filtering:
+at most four views and 8 KiB, exact project, retained count, causal generation
+sum, unique repair IDs/plans and a domain-separated digest of all finite rows.
+Rows retain admission order; canonical sequences cannot decrease, all but the
+last operation are confirmed, and read views never claim request replay.
+No source, index, key, actor or physical guard enters the view. A genuinely
+absent namespace returns `missing`, zero generation/count, an empty array and
+no digest without creating anything. Missing final, unknown ownership and
+damaged evidence return typed failures, never invented empty history.
+
+Lookup binds the requested project/repair identity. Every concrete response,
+including a discarded response, validates all required fields, exact selectors,
+bounded counts/bytes, closed phases and full history accounting before replacing
+caller state. Pending phase-1/2 history is not an apply success. Discovery after
+lost acknowledgement does not execute anything; the original key/plan remains
+the only replay intent. Confirmed receipt/history survives qualified owner
+reopen and separate new index admission without claiming current coverage.
+Exact implemented capability inventory is mandatory before a call; a prior
+runtime never receives the repair write. Native peer authentication, finite
+request/response budgets and joined handler cancellation remain unchanged.
+
 ### Protected index control protocol
 
 The dedicated private server also implements EnqueueIndex, IndexJob, IndexJobs,
@@ -757,7 +798,8 @@ for authority operations instead of falling through to this graph implicitly.
 The dedicated server negotiates implemented Read, Mutate, MutateDocument,
 KnowledgeStatus, Search, EnqueueRecovery, RecoveryJob, RecoveryJobs,
 CancelRecovery, RetryRecovery, EnqueueIndex, IndexJob, IndexJobs, CancelIndex
-and RetryIndex methods. Exact implemented-method inventory
+and RetryIndex, plus PlanProjectionRepair, ApplyProjectionRepair,
+ProjectionRepair and ProjectionRepairs methods. Exact implemented-method inventory
 is required before an operation; contracts-only stays unavailable and an old,
 incomplete, reordered or unknown inventory is unsupported, never auto-started
 or routed to remote state. Concrete responses are validated even when

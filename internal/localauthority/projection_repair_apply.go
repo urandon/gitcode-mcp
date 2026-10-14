@@ -117,6 +117,15 @@ func advanceRepair(ctx context.Context, q *projectionRepairStore, index int, pha
 func (c *Coordinator) resumeProjectionRepair(ctx context.Context, p *coordinatedProject, index int) (err error) {
 	q := p.repair
 	r := q.state.Records[index]
+	effectPossible := false
+	// Capture the function result, not a block-local inspection error. Every
+	// possible-effect exit (including later proof/phase/ack failure) fences the
+	// live owner; only qualified reopen can reconcile the retained operation.
+	defer func() {
+		if err != nil && effectPossible {
+			q.fence = RepairUncertain
+		}
+	}()
 	if err = q.verifyExpected(); err != nil {
 		return err
 	}
@@ -179,14 +188,10 @@ func (c *Coordinator) resumeProjectionRepair(ctx context.Context, p *coordinated
 		// Once a move is attempted, caller cancellation cannot prove rollback.
 		// Preserve pending intent and fence the live owner until verified reopen.
 		q.restartRequired = true
+		effectPossible = true
 		if p.projection != nil {
 			p.projection.fence = ProjectionUncertain
 		}
-		defer func() {
-			if err != nil {
-				q.fence = RepairUncertain
-			}
-		}()
 		if err = moveProjectionToQuarantine(q.root, q.directory, r.ID); err != nil {
 			return err
 		}
@@ -203,14 +208,10 @@ func (c *Coordinator) resumeProjectionRepair(ctx context.Context, p *coordinated
 			return Error{RepairCorrupt}
 		}
 		q.restartRequired = true
+		effectPossible = true
 		if p.projection != nil {
 			p.projection.fence = ProjectionUncertain
 		}
-		defer func() {
-			if err != nil {
-				q.fence = RepairUncertain
-			}
-		}()
 	}
 	if err = q.verifyQuarantine(ctx, r, true); err != nil {
 		return err

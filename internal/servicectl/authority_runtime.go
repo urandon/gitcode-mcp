@@ -31,7 +31,7 @@ func NewAuthorityServer(core *localauthority.Coordinator) (*AuthorityServer, err
 }
 
 func authorityRuntimeCapabilities() authority.Negotiation {
-	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery", "AuthorityV1.EnqueueIndex", "AuthorityV1.IndexJob", "AuthorityV1.IndexJobs", "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex"}}
+	return authority.Negotiation{Protocol: authority.Protocol, SchemaMin: 1, SchemaMax: 1, Authority: authority.Local, Available: true, Methods: []string{"AuthorityV1.Read", "AuthorityV1.Mutate", "AuthorityV1.MutateDocument", "AuthorityV1.KnowledgeStatus", "AuthorityV1.Search", "AuthorityV1.EnqueueRecovery", "AuthorityV1.RecoveryJob", "AuthorityV1.RecoveryJobs", "AuthorityV1.CancelRecovery", "AuthorityV1.RetryRecovery", "AuthorityV1.EnqueueIndex", "AuthorityV1.IndexJob", "AuthorityV1.IndexJobs", "AuthorityV1.CancelIndex", "AuthorityV1.RetryIndex", "AuthorityV1.PlanProjectionRepair", "AuthorityV1.ApplyProjectionRepair", "AuthorityV1.ProjectionRepair", "AuthorityV1.ProjectionRepairs"}}
 }
 
 type authorityProjectRequest struct {
@@ -198,6 +198,15 @@ func (s *AuthorityServer) dispatch(ctx context.Context, method string, raw []byt
 		return s.core.CancelIndex(ctx, params.(localauthority.IndexJobAction), localauthority.Actor{ID: "local-user"})
 	case "AuthorityV1.RetryIndex":
 		return s.core.RetryIndex(ctx, params.(localauthority.IndexJobAction), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.PlanProjectionRepair":
+		return s.core.InspectProjectionRepair(ctx, params.(localauthority.ProjectionRepairPlanRequest))
+	case "AuthorityV1.ApplyProjectionRepair":
+		return s.core.ConfirmProjectionRepair(ctx, params.(localauthority.ProjectionRepairRequest), localauthority.Actor{ID: "local-user"})
+	case "AuthorityV1.ProjectionRepair":
+		req := params.(localauthority.ProjectionRepairLookup)
+		return s.core.ProjectionRepair(ctx, req.ProjectID, req.RepairID)
+	case "AuthorityV1.ProjectionRepairs":
+		return s.core.ProjectionRepairs(ctx, params.(localauthority.ProjectionRepairPlanRequest))
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}

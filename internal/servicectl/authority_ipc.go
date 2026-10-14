@@ -116,6 +116,24 @@ func authorityParams(method string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return r, r.Validate()
+	case "AuthorityV1.PlanProjectionRepair", "AuthorityV1.ProjectionRepairs":
+		var r localauthority.ProjectionRepairPlanRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.ApplyProjectionRepair":
+		var r localauthority.ProjectionRepairRequest
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
+	case "AuthorityV1.ProjectionRepair":
+		var r localauthority.ProjectionRepairLookup
+		if err := authority.DecodeJSON(raw, &r); err != nil {
+			return nil, err
+		}
+		return r, r.Validate()
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}

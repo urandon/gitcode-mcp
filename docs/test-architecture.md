@@ -190,8 +190,19 @@ At every cut original index-ledger bytes, canonical citation and real lexical
 retrieval are preserved. Native no-replace collision, pending-key conflict,
 stale image, cancellation/joined writer ownership, bounded history quota and
 corrupt/unsafe repair/quarantine intake are deterministic offline regressions.
-These do not substitute for protected IPC/CLI/MCP/Admin or real embedding
-acceptance; no user provider or repository is used by the fixtures.
+These do not substitute for CLI/MCP/Admin or real embedding acceptance; no user
+provider or repository is used by the fixtures.
+The repair private-IPC cohort exercises actual plan, interrupted acknowledgement,
+atomic discovery, original-key replay, lookup, qualified owner reopen and
+separate index admission. Canonical citations and real lexical fallback remain
+unchanged. Shared missing/pending/missing-final fixtures prove history never
+provisions metadata or invents empty evidence. Closed validators reject mixed,
+duplicate, omitted, impossible-phase or replay-marked rows and conserve complete
+count/generation/digest accounting. Authenticated malformed peers are rejected
+even for discarded results; changed request keys/plans and pending apply replies
+cannot claim confirmation, and old capability inventories receive no write.
+These are protected repair integration tests, not complete native/runtime or
+public CLI/MCP/Admin qualification.
 
 The index private-IPC cohort validates exact caller-request admission digests,
 typed unknown jobs, generation-fenced cancel/retry, missing-ledger observation,

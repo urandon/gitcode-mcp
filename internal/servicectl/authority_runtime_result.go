@@ -140,6 +140,31 @@ func authorityRuntimeResult(method string, params any, raw json.RawMessage) (any
 			return nil, invalid
 		}
 		return result, nil
+	case "AuthorityV1.PlanProjectionRepair":
+		var result localauthority.ProjectionRepairPlanResult
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyProjectionRepairPlan(params.(localauthority.ProjectionRepairPlanRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.ApplyProjectionRepair":
+		var result localauthority.ProjectionRepairConfirmation
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyProjectionRepairConfirmation(params.(localauthority.ProjectionRepairRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.ProjectionRepair":
+		req := params.(localauthority.ProjectionRepairLookup)
+		var result localauthority.ProjectionRepairView
+		if authority.DecodeJSON(raw, &result) != nil || result.Validate() != nil || result.ProjectID != req.ProjectID || result.RepairID != req.RepairID || result.Replayed {
+			return nil, invalid
+		}
+		return result, nil
+	case "AuthorityV1.ProjectionRepairs":
+		var result localauthority.ProjectionRepairHistory
+		if authority.DecodeJSON(raw, &result) != nil || localauthority.VerifyProjectionRepairHistory(params.(localauthority.ProjectionRepairPlanRequest), result) != nil {
+			return nil, invalid
+		}
+		return result, nil
 	default:
 		return nil, authority.Error{Code: authority.Unsupported}
 	}
