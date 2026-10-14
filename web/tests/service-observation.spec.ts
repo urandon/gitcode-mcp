@@ -29,6 +29,25 @@ async function mockObservation(page: Page, fixture = observationFixture(), snaps
 }
 const emit = (page: Page, kind = 'observability_changed') => page.evaluate(k => (window as any).__emitObservation(k), kind);
 
+test('local phase state copy preserves proof without asserting remote authority', async ({ page }) => {
+  const fixture = observationFixture();
+  fixture.summary.event_templates!.local_authority_phase_changed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.' };
+  fixture.summary.event_filters!.code.push('local_authority_phase_changed'); fixture.summary.event_filters!.component.push('authority');
+  fixture.summary.event_filters!.phase = ['projection_repair']; fixture.summary.event_filters!.outcome = ['confirmed'];
+  fixture.page.events = [{ schema: 1, event_id: id('e'), boot_id: id('a'), occurred_at: fixture.summary.observed_at, sequence: 1, code: 'local_authority_phase_changed', stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project phase reached a confirmed state.', phase: 'projection_repair', outcome: 'confirmed', project_ref: ref('project', '1'), correlation_ref: ref('correlation', '7'), raw_body: 'synthetic-private-phase-content' }];
+  const mock = await mockObservation(page, fixture);
+  await page.goto(`/?view=Service&obs_project_ref=${ref('project', '1')}&obs_phase=projection_repair`);
+  const row = page.getByRole('list', { name: 'Retained catalog events' }).getByRole('listitem');
+  await expect(row).toContainText('Projection Repair'); await expect(row).toContainText('Confirmed');
+  await page.getByRole('button', { name: 'Local Authority Phase Changed', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Open exact/ })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Copy safe context', exact: true }).click();
+  const copy = JSON.parse(await page.evaluate(() => (window as any).__copiedObservation));
+  expect(copy.event.project_ref).toBe(ref('project', '1')); expect(copy.event.phase).toBe('projection_repair'); expect(copy.event.outcome).toBe('confirmed');
+  expect(JSON.stringify(copy)).not.toContain('synthetic-private'); expect(await page.locator('body').innerText()).not.toContain('synthetic-private');
+  expect(mock.requests.every(request => request.startsWith('GET '))).toBe(true);
+});
+
 test('local project commit copy preserves opaque scope without remote navigation or writes', async ({ page }) => {
   const fixture = observationFixture();
   fixture.summary.event_templates!.local_authority_committed = { stream: 'stdout', severity: 'info', component: 'authority', message: 'A local project source commit was confirmed.' };

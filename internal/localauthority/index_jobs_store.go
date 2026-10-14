@@ -378,6 +378,7 @@ func (q *indexQueue) publish(ctx context.Context, next indexJobSnapshot) (err er
 	if q.terminalUncertain.Load() {
 		return Error{IndexJobsUncertain}
 	}
+	boundary := capturePhasePublication(ctx, q.store.manifest.ID, "index_job", indexPhaseOutcome(q.state, next))
 	if err = publishIndexJobFile(q.directory, name); err != nil {
 		q.fence = IndexJobsUncertain
 		return err
@@ -399,6 +400,7 @@ func (q *indexQueue) publish(ctx context.Context, next indexJobSnapshot) (err er
 	oldState, oldHash, oldID := q.state, q.fileHash, q.fileIdentity
 	q.state, q.fileHash, q.fileIdentity = cloneIndexSnapshot(next), hash(body), stageID
 	if err = q.verifyExpected(); err == nil {
+		boundary.confirm()
 		err = q.inject(ctx, "index_state_acknowledgement")
 	}
 	if err == nil && q.terminalUncertain.Load() {

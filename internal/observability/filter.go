@@ -50,7 +50,7 @@ func validateFilter(f Filter) (Filter, error) {
 			f.Phase != "" && f.Phase != e.Phase || f.Collection != "" && f.Collection != e.Collection || f.Outcome != "" && f.Outcome != e.Outcome || f.FailureClass != "" && f.FailureClass != e.FailureClass ||
 			f.SourceRef != "" && e.SourceRef == "" || f.StageRef != "" && e.StageRef == "" || f.PreviousRegistrationRef != "" && e.PreviousRegistrationRef == "" ||
 			f.ProjectRef != "" && e.ProjectRef == "" ||
-			e.Code == LocalAuthorityCommitted && (f.JobRef != "" || f.CacheRef != "" || f.RepoRef != "" || f.RegistrationRef != "") ||
+			localAuthorityCode(e.Code) && (f.JobRef != "" || f.CacheRef != "" || f.RepoRef != "" || f.RegistrationRef != "") ||
 			f.JobRef != "" && (e.Code == MaintenanceStateChanged || e.Code == AdminRequestCompleted) ||
 			(f.CacheRef != "" || f.RepoRef != "" || f.RegistrationRef != "") && e.Code == AdminRequestCompleted {
 			continue
@@ -140,7 +140,7 @@ func buildFilterCatalogShapes() []Event {
 			continue
 		}
 		base.CorrelationRef = KnownRef("correlation", "catalog").value
-		if code == LocalAuthorityCommitted {
+		if localAuthorityCode(code) {
 			base.ProjectRef = KnownRef("project", "catalog").value
 		}
 		switch code {
@@ -168,7 +168,8 @@ func buildFilterCatalogShapes() []Event {
 			JobAdmitted: {"admission"}, JobTerminal: {"completion"}, JobRecovered: {"recovery"},
 			ProviderAttempt: {"fetch", "embedding"}, SyncCommitted: {"commit"}, RetryAdmitted: {"retry"},
 			WriterContended: {"writer"}, SyncStageChanged: {"staging"}, AdminRequestCompleted: {"admin"}, MaintenanceStateChanged: {"maintenance"},
-			LocalAuthorityCommitted: {"authority_commit", "document_commit"},
+			LocalAuthorityCommitted:    {"authority_commit", "document_commit"},
+			LocalAuthorityPhaseChanged: {"index_job", "knowledge_recovery", "projection_repair"},
 		}[code]
 		collections := []string{""}
 		if code == ProviderAttempt || code == SyncCommitted || code == RetryAdmitted || code == SyncStageChanged {
@@ -195,7 +196,7 @@ func buildFilterCatalogShapes() []Event {
 				e.Phase = phase
 				for _, collection := range collections {
 					e.Collection = collection
-					for _, outcome := range []string{"queued", "succeeded", "cancelled", "interrupted", "superseded", "failed", "resumed", "reconciled", "rejected", "timeout", "rate_limited", "forbidden", "invalid", "admitted", "denied", "staged", "committing", "committed", "waiting_commit", "enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked", "registered", "not_indexed", "identity_conflict", "cache_clone_conflict", "identity_unresolved", "config_snapshot_invalid", "cache_inspection_timeout"} {
+					for _, outcome := range []string{"queued", "succeeded", "cancelled", "interrupted", "superseded", "failed", "resumed", "reconciled", "rejected", "timeout", "rate_limited", "forbidden", "invalid", "admitted", "denied", "staged", "committing", "committed", "waiting_commit", "enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked", "registered", "not_indexed", "identity_conflict", "cache_clone_conflict", "identity_unresolved", "config_snapshot_invalid", "cache_inspection_timeout", "running", "cancelling", "prepared", "quarantined", "confirmed"} {
 						e.Outcome = outcome
 						for _, failure := range []string{"", "cancelled", "timeout", "rate_limited", "forbidden", "invalid", "operation_failed", "provider_failed", "interrupted", "writer_busy", "superseded", "cache", "identity", "content", "frontier", "embedding", "retry", "sync_schedule", "rag_schedule", "repository_docs", "cache_schema_blocked"} {
 							e.FailureClass = failure

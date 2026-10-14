@@ -9,6 +9,63 @@ import (
 	"testing"
 )
 
+func TestLocalAuthorityPhaseCatalogFiltersReplayAndCopy(t *testing.T) {
+	path := testDirectory(t)
+	c := New(Config{Directory: path, ManagedOutput: true})
+	ready(t, c)
+	project := KnownRef("project", "synthetic-private-phase-project")
+	correlation := KnownRef("correlation", "synthetic-phase-boundary")
+	pairs := map[string][]string{
+		"index_job":          {"queued", "running", "cancelling", "cancelled", "succeeded", "failed", "interrupted"},
+		"knowledge_recovery": {"queued", "running", "cancelling", "cancelled", "succeeded", "failed", "interrupted"},
+		"projection_repair":  {"prepared", "quarantined", "confirmed"},
+	}
+	for phase, outcomes := range pairs {
+		for _, outcome := range outcomes {
+			filter := Filter{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: phase, Outcome: outcome}
+			if _, err := ValidateFilter(filter); err != nil {
+				t.Fatal("valid local phase pair omitted from finite filters")
+			}
+			admitFixture(t, c, LocalAuthorityPhaseChanged, Context{Project: project, Correlation: correlation, ExecutionDetails: ExecutionDetails{Phase: phase, Outcome: outcome}})
+		}
+	}
+	for _, bad := range []Filter{
+		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "index_job", Outcome: "confirmed"},
+		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "projection_repair", Outcome: "running"},
+		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, Phase: "document_commit", Outcome: "committed"},
+		{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value, JobRef: KnownRef("job", "synthetic-job").value},
+	} {
+		if _, err := ValidateFilter(bad); err == nil {
+			t.Fatal("local phase filter admitted an invalid pair or remote bridge")
+		}
+	}
+	flush(t, c, true)
+	filter := Filter{Code: LocalAuthorityPhaseChanged, ProjectRef: project.value}
+	page, err := c.Query(filter, "", 200)
+	if err != nil || len(page.Events) != 17 {
+		t.Fatal("confirmed phase catalog evidence missing")
+	}
+	summary, err := (&Reader{Collector: c}).Summary(context.Background())
+	if err != nil || summary.ExecutionHealth.State != "unknown" {
+		t.Fatal("historical phases invented current health")
+	}
+	copy, err := BuildSafeContext(context.Background(), summary, &page, ContextSelection{EventID: page.Events[0].EventID})
+	if err != nil || copy.Event == nil || copy.Event.ProjectRef != project.value {
+		t.Fatal("safe copy lost true project phase")
+	}
+	body, _ := MarshalSafeContext(context.Background(), copy)
+	if strings.Contains(string(body), "synthetic-private") {
+		t.Fatal("phase copy disclosed raw owner")
+	}
+	next := New(Config{Directory: path, ManagedOutput: true})
+	ready(t, next)
+	flush(t, next, true)
+	reloaded, err := next.Query(filter, "", 200)
+	if err != nil || len(reloaded.Events) != len(page.Events) || reloaded.Events[0] != page.Events[0] {
+		t.Fatal("phase ledger replay changed retained proof")
+	}
+}
+
 func TestLocalAuthorityScopeFiltersReplayAndSafeCopy(t *testing.T) {
 	path := testDirectory(t)
 	c := New(Config{Directory: path, ManagedOutput: true})

@@ -446,6 +446,7 @@ func (q *projectionRepairStore) publish(ctx context.Context, next projectionRepa
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	boundary := capturePhasePublication(ctx, q.store.manifest.ID, "projection_repair", repairPhaseOutcome(q.state, next))
 	if err = publishRepairMetadata(q.directory, name); err != nil {
 		q.fence = RepairUncertain
 		return err
@@ -465,6 +466,7 @@ func (q *projectionRepairStore) publish(ctx context.Context, next projectionRepa
 	next.Records = append([]projectionRepairRecord(nil), next.Records...)
 	q.state, q.fileHash, q.fileIdentity = next, hash(body), stageID
 	if err = q.verifyExpected(); err == nil {
+		boundary.confirm()
 		err = q.inject(ctx, "repair_state_acknowledgement")
 	}
 	if err != nil {

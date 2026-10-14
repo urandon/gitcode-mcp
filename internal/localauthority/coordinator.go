@@ -283,12 +283,14 @@ func (c *Coordinator) beginWithWait(ctx context.Context, project authority.UUID)
 	c.active.Add(1)
 	call, cancel := context.WithTimeout(ctx, CoordinatorCallBudget)
 	stop := context.AfterFunc(c.lifetime, cancel)
+	call, phases := observePhases(call, p)
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			stop()
 			cancel()
 			p.turn.Unlock()
+			phases.publish(p.observation)
 			c.active.Done()
 		})
 	}
@@ -333,14 +335,11 @@ func (c *Coordinator) Mutate(ctx context.Context, req authority.MutationRequest,
 		return authority.MutationReceipt{}, err
 	}
 	capture := &canonicalObservation{project: req.Intent.ProjectID}
-	result, err := coordinated(c, ctx, req.Intent.ProjectID, func(ctx context.Context, s *Store) (authority.MutationReceipt, error) {
-		return s.Mutate(context.WithValue(ctx, canonicalObservationKey{}, capture), req, actor)
+	result, err := coordinated(c, context.WithValue(ctx, canonicalObservationKey{}, capture), req.Intent.ProjectID, func(ctx context.Context, s *Store) (authority.MutationReceipt, error) {
+		return s.Mutate(ctx, req, actor)
 	})
-	// The store's commit and the coordinator's owned turn have both unwound.
-	// Only actual commit proof is observed; settled replay is not throughput.
-	if c != nil && c.projects[req.Intent.ProjectID] != nil {
-		capture.publish(c.projects[req.Intent.ProjectID].observation)
-	}
+	// The owned release flushes proof after Store/project-turn unwind and before
+	// dropping joined lifetime registration. Close cannot outrun that boundary.
 	return result, err
 }
 
@@ -350,9 +349,9 @@ func (c *Coordinator) MutateDocument(ctx context.Context, req authority.Document
 	}
 	admitted := false
 	capture := &canonicalObservation{project: req.Intent.ProjectID, document: true}
-	result, err := coordinated(c, ctx, req.Intent.ProjectID, func(ctx context.Context, s *Store) (authority.DocumentMutationResult, error) {
+	result, err := coordinated(c, context.WithValue(ctx, canonicalObservationKey{}, capture), req.Intent.ProjectID, func(ctx context.Context, s *Store) (authority.DocumentMutationResult, error) {
 		admitted = true
-		return s.MutateDocument(context.WithValue(ctx, canonicalObservationKey{}, capture), req, actor)
+		return s.MutateDocument(ctx, req, actor)
 	})
 	// Only explicit external document writes wake proof reconciliation of
 	// already admitted jobs, including ambiguous source outcomes. Reads and
@@ -361,9 +360,6 @@ func (c *Coordinator) MutateDocument(ctx context.Context, req authority.Document
 		if p := c.projects[req.Intent.ProjectID]; p != nil && p.jobs != nil {
 			p.jobs.signal()
 		}
-	}
-	if c != nil && c.projects[req.Intent.ProjectID] != nil {
-		capture.publish(c.projects[req.Intent.ProjectID].observation)
 	}
 	return result, err
 }

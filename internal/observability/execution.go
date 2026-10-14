@@ -21,7 +21,7 @@ const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged, AdminRequestCompleted, MaintenanceStateChanged, LocalAuthorityCommitted:
+	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged, AdminRequestCompleted, MaintenanceStateChanged, LocalAuthorityCommitted, LocalAuthorityPhaseChanged:
 		return true
 	default:
 		return false
@@ -48,7 +48,7 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
-	if e.Code != LocalAuthorityCommitted && e.ProjectRef != "" {
+	if !localAuthorityCode(e.Code) && e.ProjectRef != "" {
 		return false
 	}
 	if e.PreviousRegistrationRef != "" && (e.Code != MaintenanceStateChanged || d.MaintenanceScope != "identity_resolution") {
@@ -78,9 +78,9 @@ func (e Event) validExecution() bool {
 		return false
 	}
 	switch e.Code {
-	case LocalAuthorityCommitted:
+	case LocalAuthorityCommitted, LocalAuthorityPhaseChanged:
 		return e.ProjectRef != "" && e.JobRef == "" && e.CacheRef == "" && e.RepoRef == "" && e.RegistrationRef == "" &&
-			(d.Phase == "authority_commit" || d.Phase == "document_commit") && d.Outcome == "committed" && d.FailureClass == "" && d.Collection == "" && d.Attempt == 0
+			localAuthorityPhase(e.Code, d.Phase, d.Outcome) && d.FailureClass == "" && d.Collection == "" && d.Attempt == 0
 	case MaintenanceStateChanged:
 		if e.JobRef != "" || e.RegistrationRef == "" || e.CacheRef == "" || e.RepoRef == "" || d.Phase != "maintenance" || d.Collection != "" || d.Attempt != 0 {
 			return false

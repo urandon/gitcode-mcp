@@ -79,7 +79,13 @@ func (c *Coordinator) beginRecoveryControl(ctx context.Context, project authorit
 	c.active.Add(1)
 	call, cancel := context.WithTimeout(ctx, CoordinatorCallBudget)
 	stop := context.AfterFunc(c.lifetime, cancel)
-	release := func() { stop(); cancel(); c.active.Done() }
+	call, phases := observePhases(call, p)
+	release := func() {
+		stop()
+		cancel()
+		phases.publish(p.observation)
+		c.active.Done()
+	}
 	return p, call, release, nil
 }
 

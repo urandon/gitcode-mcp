@@ -301,6 +301,7 @@ func (q *recoveryQueue) publish(ctx context.Context, next recoveryJobSnapshot) (
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	boundary := capturePhasePublication(ctx, q.store.manifest.ID, "knowledge_recovery", recoveryPhaseOutcome(q.state, next))
 	if err = publishRecoveryJobFile(q.directory, stage); err != nil {
 		q.fence = JobsUncertain
 		return err
@@ -327,6 +328,7 @@ func (q *recoveryQueue) publish(ctx context.Context, next recoveryJobSnapshot) (
 	if err != nil || !exists || hash(actual) != hash(body) || identity != stageIdentity {
 		return Error{JobsCorrupt}
 	}
+	boundary.confirm()
 	if err = q.inject(ctx, "jobs_state_acknowledgement"); err != nil {
 		return err
 	}

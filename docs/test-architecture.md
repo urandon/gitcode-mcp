@@ -232,6 +232,20 @@ bridges and private input; event presence never invents current health. These
 tests do not substitute for native retained delivery, all local phase coverage,
 exact owner-state health or the later public workflow cohort.
 
+Local phase fixtures run actual index/recovery workers and quarantine repair,
+then replay original admissions/actions without inventing transitions. Nine
+ledger cuts distinguish pre-rename failure, uncertain rename and confirmed
+publication with lost acknowledgement. A real observation reader holds the
+collector mutex during bounded capture: no emission/loss occurs under the
+source turn, then release emits the bounded records with counted overflow.
+Actual canonical commit proof also survives concurrent owner cancellation and
+joined Close. Foreign/noncatalog capture and pre-admission cancellation are
+rejected. Cancellation racing the actual rename retains possible-publication
+coverage; a filesystem rename has no context-driven rollback guarantee. The finite
+phase/outcome catalog is tested through ledger replay, filters, safe-copy and
+semantic browser rendering without a remote navigation bridge. These are
+shared-core controls, not native retained-delivery/current-health qualification.
+
 The explicit Linux strict-process network gate builds the real product from
 the current checkout with `python3 scripts/ci/run_native_authority_network.py`.
 Direct opt-in tests may use a separately built artifact only with an explicit

@@ -910,9 +910,29 @@ Observation is one nonblocking best-effort emission, not a commit dependency,
 retry loop or health authority. Actual read-lock contention counts diagnostic
 loss while the canonical receipt and replay remain unchanged. No collector is
 constructed by authority discovery, mutation or native child startup. This
-shared-core increment does not qualify native retained delivery, local
-index/recovery/repair/runtime phase coverage, exact owner-state health or
+shared-core increment does not qualify native retained delivery, runtime
+phase coverage, exact owner-state health or
 public local workflows. Those remain mandatory #183/#184/#185 rollout gates.
+
+Shared index/recovery/repair ledgers additionally capture
+`local_authority_phase_changed` from actual validated final publication, not
+an API return or observation poll. Finite phase/outcome pairs mirror retained
+index/recovery job states and repair prepared/quarantined/confirmed states.
+Initial empty provisioning and settled replay are quiet. Rename uncertainty
+counts incomplete coverage; exact readback after existing barriers confirms
+historical proof even if acknowledgement subsequently fails. Ledger/source
+fences, cancellation permission and attempt generations remain authoritative.
+
+Each synchronous owner call/worker turn retains at most eight content-free
+phase records and a saturating overflow lower bound (255). No job UUID, raw
+error, source bytes or callback enters that buffer. Source/ledger locks unwind
+before emission, while joined lifetime registration still prevents owner Close
+from overtaking the flush; canonical source/document proof uses the same
+release. Index slices and terminal reconciliation flush independently, so a
+long-running job cannot accumulate an unbounded observation buffer. Admission
+order is historical observation order, not a current job state or durable
+generation sequence. Native delivery/current-health and later protected local
+workflow qualification remain explicit rollout gates.
 
 ### Fixed-channel native launch (L4 in progress)
 

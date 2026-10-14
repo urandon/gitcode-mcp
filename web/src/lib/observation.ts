@@ -120,9 +120,12 @@ export function incidentProjection(value: unknown): Incident | undefined {
 }
 export function eventProjection(value: unknown, summary: ServiceSummary): EventRecord | undefined {
   const e = records(value);
-	if (e.code === 'local_authority_committed') {
-		if (!isRef(e.project_ref, 'project') || !isRef(e.correlation_ref, 'correlation') || e.legacy || !member(e.phase, ['authority_commit', 'document_commit']) || e.outcome !== 'committed') return;
-		if (!summary.event_filters?.phase?.includes(String(e.phase)) || !summary.event_filters?.outcome?.includes('committed')) return;
+	if (e.code === 'local_authority_committed' || e.code === 'local_authority_phase_changed') {
+		const validPhase = e.code === 'local_authority_committed'
+			? member(e.phase, ['authority_commit', 'document_commit']) && e.outcome === 'committed'
+			: member(e.phase, ['index_job', 'knowledge_recovery']) && member(e.outcome, ['queued', 'running', 'cancelling', 'cancelled', 'succeeded', 'failed', 'interrupted']) || e.phase === 'projection_repair' && member(e.outcome, ['prepared', 'quarantined', 'confirmed']);
+		if (!isRef(e.project_ref, 'project') || !isRef(e.correlation_ref, 'correlation') || e.legacy || !validPhase) return;
+		if (!summary.event_filters?.phase?.includes(String(e.phase)) || !summary.event_filters?.outcome?.includes(String(e.outcome))) return;
 		for (const key of [...Object.keys(refKinds).filter(key => key !== 'project_ref' && key !== 'correlation_ref'), ...eventDetailKeys.filter(key => key !== 'phase' && key !== 'outcome')]) {
 			if (e[key] !== undefined && e[key] !== '') return;
 		}

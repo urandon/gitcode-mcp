@@ -93,11 +93,26 @@ fresh collector-owned correlation, with no source/entity UUID, key, actor,
 payload or private coordinate. Collector contention/loss never changes the
 canonical receipt. This historical evidence does not infer current project,
 job or index health; existing remote incident projection rejects project scope.
-Native retained delivery, local job/repair/runtime phases and exact local
+Native retained delivery, runtime phases and exact local
 health remain #183 work. Public local workflow/navigation remains gated in
 #184/#185; the Service view cannot fall through to a remote entity when a
 project bridge is unavailable. Stdio/HTTP discovery can accept the opaque
 `project_ref` selector; no read starts or enrolls a local runtime.
+
+`local_authority_phase_changed` records confirmed `index_job` and
+`knowledge_recovery` states (`queued`, `running`, `cancelling`, `cancelled`,
+`succeeded`, `failed`, `interrupted`), and `projection_repair` states
+(`prepared`, `quarantined`, `confirmed`). These are project-scoped historical
+proof boundaries, not a remote job bridge or current-state health. Observation
+admission order is not durable job-generation order. Validated ledger transitions
+are captured at the real rename/proof boundary, before a later acknowledgement
+can fail; empty namespace provisioning and replay produce no transition.
+Each owned call/worker turn buffers at most eight finite phase records, with a
+saturating 255-record overflow lower bound. Unproved publication/overflow counts
+incomplete coverage only. Buffers drain after source/ledger locks release but
+before joined owner lifetime registration ends; canonical commit proof shares
+that release boundary. Long index jobs flush per turn, not into a lifetime-sized
+buffer. Loss never retries a job, changes its receipt or delays its cancellation.
 
 `since` and `until` must be supplied together as ordered RFC3339Nano UTC (`Z`)
 timestamps spanning at most seven days. Omit both to read retained evidence only.

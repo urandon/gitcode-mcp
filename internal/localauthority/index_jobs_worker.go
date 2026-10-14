@@ -253,6 +253,8 @@ func (c *Coordinator) reconcileIndexOutcome(p *coordinatedProject, r indexJobRec
 	}
 	proofCtx, cancel := context.WithTimeout(context.WithoutCancel(c.lifetime), budget)
 	defer cancel()
+	proofCtx, phases := observePhases(proofCtx, p)
+	defer phases.publish(p.observation)
 	proof, published, proofErr := waitIndexProof(proofCtx, p.projection, r.Selection)
 	if proofErr == nil && published {
 		return finishIndexMetadata(proofCtx, p.indexJobs, r.Selection.BuildID, "succeeded", "", &proof)

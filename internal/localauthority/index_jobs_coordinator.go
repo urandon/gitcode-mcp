@@ -46,7 +46,13 @@ func (c *Coordinator) beginIndexControl(ctx context.Context, project authority.U
 	c.active.Add(1)
 	call, cancel := context.WithTimeout(ctx, CoordinatorCallBudget)
 	stop := context.AfterFunc(c.lifetime, cancel)
-	return p, call, func() { stop(); cancel(); c.active.Done() }, nil
+	call, phases := observePhases(call, p)
+	return p, call, func() {
+		stop()
+		cancel()
+		phases.publish(p.observation)
+		c.active.Done()
+	}, nil
 }
 
 func (c *Coordinator) EnqueueIndex(ctx context.Context, req IndexJobRequest, actor Actor) (IndexJobView, error) {
