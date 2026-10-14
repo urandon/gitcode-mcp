@@ -26,7 +26,7 @@ func TestLocalProjectSearchCLIAndMCPRealGitAndExplicitProvider(t *testing.T) {
 	base.cacheDir = filepath.Join(short, "cache")
 	base.env[config.EnvMCPConfigPath] = filepath.Join(base.configDir, "local.yaml")
 	var calls, documentTransfers atomic.Int64
-	var providerFailure atomic.Bool
+	var providerFailure, queryFailure atomic.Bool
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if providerFailure.Load() {
@@ -38,6 +38,10 @@ func TestLocalProjectSearchCLIAndMCPRealGitAndExplicitProvider(t *testing.T) {
 		case "/api/tags":
 			json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "fixture-embedding", "digest": "fixture-revision"}}})
 		case "/api/embed":
+			if queryFailure.Load() {
+				w.WriteHeader(503)
+				return
+			}
 			var req struct {
 				Input []string `json:"input"`
 			}
@@ -97,6 +101,15 @@ func TestLocalProjectSearchCLIAndMCPRealGitAndExplicitProvider(t *testing.T) {
 	if mcpSearch.EffectiveMode != "hybrid" || mcpSearch.IndexState != "ready" || len(mcpSearch.Hits) != 1 || documentTransfers.Load() != before {
 		t.Fatal("hybrid query repaired index or sent cached text")
 	}
+	queryFailure.Store(true)
+	json.Unmarshal(localProjectCLI(t, src, "", "search", "--project", "lab", "--query", "oldneedle", "--mode", "hybrid"), &cliSearch)
+	json.Unmarshal(localProjectMCP(t, src, "tools/call", projectTool("local_project_search", service.LocalProjectSearchRequest{Project: "lab", Query: "oldneedle", Mode: "hybrid"}), ""), &mcpSearch)
+	for _, result := range []service.LocalProjectSearchResult{cliSearch, mcpSearch} {
+		if result.EffectiveMode != "fulltext" || result.Coverage.State != "lexical-only" || result.Fallback != "semantic_unavailable" || len(result.Hits) != 1 || result.Hits[0].Citation != issue.Entity.Citation || documentTransfers.Load() != before {
+			t.Fatal("query embedding failure lost verified lexical fallback")
+		}
+	}
+	queryFailure.Store(false)
 	update := service.LocalProjectMutation{Project: "lab", Mutation: localgit.Mutation{Operation: "update_issue", ID: "ISSUE-1", Title: "Question", State: "open", Body: "newneedle GitOnlyTransportFixture", ExpectedRevision: issue.Entity.Citation.Blob, WriteMode: "local", IdempotencyKey: "edit"}}
 	localProjectMCP(t, src, "tools/call", projectTool("local_project_mutate", update), "")
 	json.Unmarshal(localProjectCLI(t, src, "", "search", "--project", "lab", "--query", "oldneedle", "--mode", "hybrid"), &cliSearch)

@@ -379,6 +379,11 @@ Only configured `local_process`/`local_network` boundaries are allowed; remote,
 unknown or absent boundaries fail closed before embedding. Provider requests
 have bounded deadlines and 4 MiB response bodies, do not follow redirects or
 environment proxy settings, and never invoke setup/model-management commands.
+Every query/batch/item embedding must match the selected model revision and
+dimensions before scoring or persistence; model drift cannot silently enter an
+old namespace. Missing or malformed derived vectors cause lexical fallback,
+whose coverage describes the effective lexical result. Citation line ranges
+are recomputed from pinned Git bytes, not trusted from index metadata.
 
 Index is an explicit bounded foreground call through the same private IPC, not
 a new job protocol. It embeds at most `max_chunks` new chunks (default 64,
@@ -387,6 +392,9 @@ embedded/reused/failed counts. Repeat a partial/interrupted call to reuse the
 existing engine's immutable metadata and vector-only checkpoints; no new project
 receipt or authority journal is created. Read-only registrations and read-only
 MCP policy reject index writes. No index action changes project Git content.
+The existing `embedded_chunks` counter also includes replayed provider handoffs;
+it can exceed 128 on resume without new provider work exceeding `max_chunks`.
+All returned counts remain bounded by eligible corpus chunks and conserved.
 
 The existing SQLite schema/engine is used in a separate disposable file named
 by appending `.local-project-index.db` to the selected filesystem cache path

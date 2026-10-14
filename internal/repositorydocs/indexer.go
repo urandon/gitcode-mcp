@@ -222,13 +222,19 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 			inputs[idx] = pending[idx].text
 		}
 		response, embedErr := i.provider.Embed(ctx, rag.EmbedRequest{Inputs: inputs})
+		if embedErr == nil && !embeddingResponseMatchesNamespace(response, namespaceIdentity) {
+			return SemanticProviderContractError{code: "semantic_provider_namespace_changed"}
+		}
 		if embedErr != nil || len(response.Embeddings) != len(pending) {
 			for _, item := range pending {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
 				one, oneErr := i.provider.Embed(ctx, rag.EmbedRequest{Inputs: []string{item.text}})
-				if oneErr != nil || len(one.Embeddings) != 1 {
+				if oneErr == nil && !embeddingResponseMatchesNamespace(one, namespaceIdentity) {
+					return SemanticProviderContractError{code: "semantic_provider_namespace_changed"}
+				}
+				if oneErr != nil || len(one.Embeddings) != 1 || one.Dimensions != namespace.Dimensions {
 					result.FailedChunks++
 					continue
 				}
@@ -243,6 +249,10 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 			return nil
 		}
 		for idx, vector := range response.Embeddings {
+			if response.Dimensions != namespace.Dimensions {
+				result.FailedChunks++
+				continue
+			}
 			if err := i.persistProviderVector(ctx, req.RepoID, namespace.ID, pending[idx].meta.ID, namespace.Dimensions, vector); err != nil {
 				result.FailedChunks++
 				continue

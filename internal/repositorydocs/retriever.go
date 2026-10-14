@@ -173,6 +173,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	}
 	semanticAvailable := req.Mode == SearchModeHybrid && r.provider != nil && r.store != nil
 	expectedNamespaceID := ""
+	var expectedNamespace cache.EmbeddingNamespaceIdentity
 	if semanticAvailable {
 		identity, identityErr := r.provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: chunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
 		if identityErr != nil {
@@ -182,6 +183,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			result.addWarning("embedding_provider_identity_unavailable", "embedding provider identity unavailable; returning verified lexical results")
 		} else {
 			expectedNamespaceID = cache.EmbeddingNamespaceID(identity)
+			expectedNamespace = identity
 			result.RequestedNamespaceID = expectedNamespaceID
 		}
 	}
@@ -233,7 +235,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	}
 	semantic := map[string]rankedHit{}
 	if req.Mode == SearchModeHybrid && selected.ID != "" && semanticAvailable {
-		semantic, err = r.semantic(ctx, req, selected)
+		semantic, err = r.semantic(ctx, req, selected, expectedNamespace)
 		if err != nil {
 			code := "semantic_retrieval_unavailable"
 			message := "semantic retrieval unavailable; returning verified lexical results"
@@ -246,6 +248,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			result.EffectiveMode = SearchModeFullText
 			result.addWarning(code, message)
 			semantic = map[string]rankedHit{}
+			result.Coverage = lexicalCoverage
 		}
 	} else if req.Mode == SearchModeHybrid && !semanticAvailable && result.Fallback == "" {
 		result.Fallback = "provider_unavailable"
@@ -426,7 +429,7 @@ func trimRankedHits(values map[string]rankedHit, limit int) map[string]rankedHit
 	return trimmed
 }
 
-func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.RepositoryDocRevisionSet) (map[string]rankedHit, error) {
+func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.RepositoryDocRevisionSet, namespace cache.EmbeddingNamespaceIdentity) (map[string]rankedHit, error) {
 	response, err := r.provider.Embed(ctx, rag.EmbedRequest{Inputs: []string{req.Query}})
 	if err != nil || len(response.Embeddings) != 1 {
 		if err == nil {
@@ -435,17 +438,23 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		return nil, err
 	}
 	query := response.Embeddings[0]
-	if response.Dimensions <= 0 || len(query) != response.Dimensions {
+	if response.Dimensions <= 0 || len(query) != response.Dimensions || response.Dimensions != namespace.Dimensions {
 		return nil, SemanticProviderContractError{code: "query_embedding_dimension_mismatch"}
+	}
+	if !embeddingResponseMatchesNamespace(response, namespace) {
+		return nil, SemanticProviderContractError{code: "semantic_provider_namespace_changed"}
 	}
 	snapshot, err := r.store.LoadRepositoryDocSearchSnapshot(ctx, req.RepoID, set.ID, set.NamespaceID)
 	if err != nil {
 		return nil, err
 	}
+	if len(snapshot.Candidates) != set.EligibleChunks {
+		return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
+	}
 	results := map[string]rankedHit{}
 	for _, candidate := range snapshot.Candidates {
 		if len(candidate.Vector) == 0 {
-			continue
+			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
 		}
 		if candidate.Dimensions != len(query) {
 			return nil, SemanticProviderContractError{code: "query_embedding_dimension_mismatch"}
@@ -458,6 +467,10 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, semantic: score}
 	}
 	return results, nil
+}
+
+func embeddingResponseMatchesNamespace(response rag.EmbedResponse, namespace cache.EmbeddingNamespaceIdentity) bool {
+	return response.Model == namespace.ModelID && response.Revision == namespace.ModelRevision
 }
 
 func fuseRanks(lexical, semantic map[string]rankedHit) []rankedHit {
@@ -522,6 +535,7 @@ func (r *Retriever) hydrate(ctx context.Context, repo *Repository, commitOID str
 			return SearchHit{}, false, SearchWarning{Code: "worktree_overlay_stale", Message: "worktree_overlay_stale: tracked content changed; reindex the overlay"}
 		}
 		raw := data[candidate.ByteStart:candidate.ByteEnd]
+		candidate.LineStart, candidate.LineEnd = chunkLineRange(data, candidate.ByteStart, candidate.ByteEnd)
 		snippet := truncateUTF8Bytes(strings.TrimSpace(string(raw)), 800)
 		return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "worktree", CommitOID: commitOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, SearchWarning{}
 	}
@@ -533,6 +547,7 @@ func (r *Retriever) hydrate(ctx context.Context, repo *Repository, commitOID str
 		return SearchHit{}, false, SearchWarning{Code: "citation_locator_invalid", Message: "citation omitted: stored chunk locator is invalid"}
 	}
 	raw := data[candidate.ByteStart:candidate.ByteEnd]
+	candidate.LineStart, candidate.LineEnd = chunkLineRange(data, candidate.ByteStart, candidate.ByteEnd)
 	if digestBytes(raw) != candidate.RawSliceDigest {
 		return SearchHit{}, false, SearchWarning{Code: "citation_digest_mismatch", Message: "citation omitted: Git content failed digest verification"}
 	}

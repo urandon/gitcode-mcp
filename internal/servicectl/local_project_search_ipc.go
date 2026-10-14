@@ -46,10 +46,10 @@ func localSearchIdentity(project, id, commit string) bool {
 func validateLocalSearchResult(method string, raw []byte) (any, bool) {
 	if method == "LocalProjects.Index" {
 		var r service.LocalProjectIndexResult
-		if strictObservationResponse(raw, &r) != nil || !localJSONRequired(raw, "project", "project_id", "commit", "revision_set_id", "state", "eligible_chunks", "embedded_chunks", "reused_chunks", "failed_chunks") || !localSearchIdentity(r.Project, r.ProjectID, r.Commit) || !strings.HasPrefix(r.RevisionSetID, "repo-doc-set-") || len(r.RevisionSetID) != len("repo-doc-set-")+64 || r.EligibleChunks < 0 || r.EligibleChunks > 32768 || r.EmbeddedChunks < 0 || r.EmbeddedChunks > 128 || r.ReusedChunks < 0 || r.FailedChunks < 0 || r.EmbeddedChunks+r.ReusedChunks+r.FailedChunks != r.EligibleChunks {
+		if strictObservationResponse(raw, &r) != nil || !localJSONRequired(raw, "project", "project_id", "commit", "revision_set_id", "state", "eligible_chunks", "embedded_chunks", "reused_chunks", "failed_chunks") || !localSearchIdentity(r.Project, r.ProjectID, r.Commit) || !strings.HasPrefix(r.RevisionSetID, "repo-doc-set-") || len(r.RevisionSetID) != len("repo-doc-set-")+64 || !localSearchChunkCounts(r.EligibleChunks, r.EmbeddedChunks, r.ReusedChunks, r.FailedChunks) {
 			return nil, false
 		}
-		if strings.Trim(strings.TrimPrefix(r.RevisionSetID, "repo-doc-set-"), "0123456789abcdef") != "" || r.State != "ready" && r.State != "partial" || r.State == "ready" && r.FailedChunks != 0 || r.State == "partial" && r.FailedChunks == 0 {
+		if r.EmbeddedChunks+r.ReusedChunks+r.FailedChunks != r.EligibleChunks || strings.Trim(strings.TrimPrefix(r.RevisionSetID, "repo-doc-set-"), "0123456789abcdef") != "" || r.State != "ready" && r.State != "partial" || r.State == "ready" && r.FailedChunks != 0 || r.State == "partial" && r.FailedChunks == 0 {
 			return nil, false
 		}
 		return r, true
@@ -82,7 +82,7 @@ func validateLocalSearchResult(method string, raw []byte) (any, bool) {
 		return nil, false
 	}
 	c := r.Coverage
-	if c.State != "lexical-only" && c.State != "ready" || c.EligibleFiles < 0 || c.EligibleFiles > 10000 || c.EligibleChunks < 0 || c.EligibleChunks > 32768 || c.EmbeddedChunks < 0 || c.ReusedChunks < 0 || c.FailedChunks < 0 || c.MissingObjects < 0 || c.EmbeddedChunks+c.ReusedChunks+c.FailedChunks > 32768 || c.MissingObjects > 10000 {
+	if c.State != "lexical-only" && c.State != "ready" || c.EligibleFiles < 0 || c.EligibleFiles > 10000 || !localSearchChunkCounts(c.EligibleChunks, c.EmbeddedChunks, c.ReusedChunks, c.FailedChunks) || c.MissingObjects < 0 || c.MissingObjects > 10000 {
 		return nil, false
 	}
 	if r.EffectiveMode == "hybrid" && (c.State != "ready" || c.EmbeddedChunks+c.ReusedChunks != c.EligibleChunks || c.FailedChunks != 0 || c.MissingObjects != 0) || r.EffectiveMode == "fulltext" && c.State != "lexical-only" || r.RequestedMode == "hybrid" && r.IndexState == "not_requested" {
@@ -94,4 +94,9 @@ func validateLocalSearchResult(method string, raw []byte) (any, bool) {
 		}
 	}
 	return r, true
+}
+
+func localSearchChunkCounts(eligible, embedded, reused, failed int) bool {
+	// Bound every operand before addition; wire integers are untrusted.
+	return eligible >= 0 && eligible <= 32768 && embedded >= 0 && embedded <= eligible && reused >= 0 && reused <= eligible && failed >= 0 && failed <= eligible && embedded+reused+failed <= eligible
 }
