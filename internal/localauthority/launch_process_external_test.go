@@ -62,6 +62,10 @@ func nativeLaunchFixture(t *testing.T) (*localauthority.PreparedRegistry, *local
 }
 
 func nativeProcess(t *testing.T, p *localauthority.PreparedRegistry, dir string) *servicectl.AuthorityProcess {
+	return nativeProcessObserved(t, p, dir, context.Background())
+}
+
+func nativeProcessObserved(t *testing.T, p *localauthority.PreparedRegistry, dir string, observation context.Context) *servicectl.AuthorityProcess {
 	t.Helper()
 	if runtime.GOOS == "darwin" && !nativeDarwinCgo() {
 		t.Skip("native Darwin descriptor inventory requires cgo")
@@ -77,7 +81,7 @@ func nativeProcess(t *testing.T, p *localauthority.PreparedRegistry, dir string)
 		t.Fatal("native launch listener failed")
 	}
 	assertNativeParentDescriptorHygiene(t)
-	process, err := servicectl.StartAuthorityRuntime(context.Background(), prepared, l)
+	process, err := servicectl.StartAuthorityRuntime(observation, prepared, l)
 	if err != nil {
 		t.Fatalf("native same-binary launch refused: %v", err)
 	}

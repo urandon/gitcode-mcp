@@ -1,5 +1,19 @@
 # Test Architecture
 
+Native local-project observation uses a memory-only closed relay in the strict
+child and the real retained collector in its trusted parent. Deterministic
+tests cover the 64-record bound, loss saturation/seal, foreign/replayed/invalid
+frames, actual startup-deadline handoff, disconnect and joined owner shutdown.
+`TestNativeProductObservedSourceRetainedAcrossRestartAndReplay` builds the real
+offline product, commits through private IPC, joins child/reader/collector,
+reloads the actual parent ledger, and verifies original-key replay adds no
+throughput. `TestNativeObservedProcessCloseJoinsRetainedReader` separately uses
+the production parent process supervisor. The explicit Linux strict-network
+qualification now enrolls retained observation, verifies the real commit event
+and traces the new child graph; memory-only events are not durable-delivery
+acceptance. Current-owner health and other L4 qualification gates remain
+separate, not inferred from these tests.
+
 This repository keeps tests close to the code they verify. Do not add generated
 design packages, captured work logs, or ad hoc harness dumps to `main`; keep
 historical evidence in GitCode issues, pull requests, or wiki pages.

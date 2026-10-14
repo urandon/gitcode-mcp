@@ -5,8 +5,10 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"gitcode-mcp/internal/authority"
+	"gitcode-mcp/internal/observability"
 )
 
 // ReceivedLaunch is private bootstrap state, not serialized permission to
@@ -22,6 +24,8 @@ type ReceivedLaunch struct {
 	cancel     context.CancelFunc
 	parentStop func() bool
 	used       bool
+	relay      *observability.LocalProjectRelay
+	relayDone  chan struct{}
 }
 
 // ReceiveLaunch consumes an inherited private registry role only through an
@@ -110,6 +114,19 @@ func (r *ReceivedLaunch) Activate(lifetime, handshake context.Context) (*Coordin
 	r.parentStop = context.AfterFunc(lifetime, cancel)
 	stopAdmission := context.AfterFunc(ctx, cancel)
 	defer stopAdmission()
+	if r.frame.Observation != "" {
+		ids := make([]string, 0, len(r.frame.Projects))
+		for _, project := range r.frame.Projects {
+			ids = append(ids, string(project.ProjectID))
+		}
+		r.relay = observability.NewLocalProjectRelay(ids)
+		if r.relay == nil {
+			cancel()
+			r.parentStop()
+			return nil, authority.Error{Code: authority.InvalidContract}
+		}
+		admission = observability.WithLocalProjectRelay(admission, r.relay)
+	}
 	r.core, err = newStrictCoordinator(admission, r.prepared, r.bindings, false)
 	if err != nil {
 		cancel()
@@ -148,6 +165,50 @@ func (r *ReceivedLaunch) Activate(lifetime, handshake context.Context) (*Coordin
 	return r.core, nil
 }
 
+// StartObservations follows successful activation and handshake cleanup. The
+// fixed bootstrap role becomes one-way observation only; no extra descriptor,
+// file collector or ordinary startup graph is created in this process.
+func (r *ReceivedLaunch) StartObservations() (bool, error) {
+	if r == nil || !r.mu.TryLock() {
+		return false, authority.Error{Code: authority.Unavailable}
+	}
+	defer r.mu.Unlock()
+	if r.frame.Observation == "" {
+		return false, nil
+	}
+	if r.relay == nil || r.core == nil || !r.core.Available() || r.relayDone != nil {
+		return false, authority.Error{Code: authority.Unavailable}
+	}
+	if r.conn.SetDeadline(time.Time{}) != nil {
+		return false, authority.Error{Code: authority.Unavailable}
+	}
+	r.relayDone = make(chan struct{})
+	go func() {
+		defer close(r.relayDone)
+		runNativeObservation(r.conn, r.relay, launchBinding(r.frame))
+	}()
+	return true, nil
+}
+
+func (r *ReceivedLaunch) closeObservations(ctx context.Context, ownerJoined bool) {
+	if r.relay == nil {
+		return
+	}
+	if !ownerJoined {
+		_ = r.conn.Close() // no clean observation seal over an unjoined owner
+	}
+	r.relay.Seal()
+	if r.relayDone == nil {
+		return
+	}
+	select {
+	case <-r.relayDone:
+	case <-ctx.Done():
+		_ = r.conn.Close()
+		<-r.relayDone // closed channel + bounded writer cannot retain ownership
+	}
+}
+
 func (r *ReceivedLaunch) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
@@ -167,9 +228,11 @@ func (r *ReceivedLaunch) Close(ctx context.Context) error {
 	}
 	if r.core != nil {
 		if err := r.core.Close(ctx); err != nil {
+			r.closeObservations(ctx, false)
 			return err
 		}
 	}
+	r.closeObservations(ctx, true)
 	if r.prepared != nil {
 		return r.prepared.Close()
 	}

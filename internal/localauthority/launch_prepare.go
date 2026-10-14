@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"gitcode-mcp/internal/authority"
 )
@@ -27,17 +28,21 @@ type launchProject struct {
 }
 
 type launchFrame struct {
-	Schema     int             `json:"schema"`
-	Protocol   string          `json:"protocol"`
-	Profile    string          `json:"profile"`
-	Generation authority.UUID  `json:"generation"`
-	Challenge  authority.UUID  `json:"challenge"`
-	Root       string          `json:"root"`
-	Identity   string          `json:"identity"`
-	Projects   []launchProject `json:"projects"`
+	Schema      int             `json:"schema"`
+	Protocol    string          `json:"protocol"`
+	Profile     string          `json:"profile"`
+	Generation  authority.UUID  `json:"generation"`
+	Challenge   authority.UUID  `json:"challenge"`
+	Root        string          `json:"root"`
+	Identity    string          `json:"identity"`
+	Projects    []launchProject `json:"projects"`
+	Observation string          `json:"observation,omitempty"`
 }
 
 func (f *launchFrame) Validate() error {
+	if f.Observation != "" && f.Observation != nativeObservationProtocol {
+		return authority.Error{Code: authority.InvalidContract}
+	}
 	if f.Schema != 1 || f.Protocol != authority.Protocol || f.Profile != strictLaunchProfile || !f.Generation.Valid() || !f.Challenge.Valid() || !validDigest(f.Identity) || !launchPath(f.Root) || len(f.Projects) < 1 || len(f.Projects) > CoordinatorProjectLimit {
 		return authority.Error{Code: authority.InvalidContract}
 	}
@@ -189,41 +194,78 @@ func (p *NativePreparation) Close() error {
 // Failed or cancelled handshake burns this preparation; retry needs a fresh
 // preparation/challenge and an actual joined child, never another writer key.
 func (p *NativePreparation) Send(ctx context.Context, conn *net.UnixConn) error {
+	_, err := p.send(ctx, conn, false)
+	return err
+}
+
+// SendObserved selects retained delivery only from an already bound concrete
+// parent collector. Absence preserves unobserved launch; requested delivery is
+// included in the authenticated binding and cannot silently downgrade.
+func (p *NativePreparation) SendObserved(ctx context.Context, conn *net.UnixConn) (*NativeObservationReader, error) {
+	return p.send(ctx, conn, true)
+}
+
+func (p *NativePreparation) send(ctx context.Context, conn *net.UnixConn, observe bool) (_ *NativeObservationReader, resultErr error) {
 	if p == nil {
-		return authority.Error{Code: authority.InitializationRequired}
+		return nil, authority.Error{Code: authority.InitializationRequired}
 	}
 	p.mu.Lock()
 	if p.used || p.closed || p.file == nil {
 		p.mu.Unlock()
-		return authority.Error{Code: authority.InitializationRequired}
+		return nil, authority.Error{Code: authority.InitializationRequired}
 	}
 	p.used = true
 	f := p.frame
 	p.mu.Unlock()
+	var observation *NativeObservationReader
+	handoff := false
+	if observe {
+		observation = newNativeObservationReader(ctx, conn, f.Projects)
+		if observation != nil {
+			f.Observation = nativeObservationProtocol
+		}
+	}
 	ctx, release, err := launchHandshake(ctx, conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer release()
+	defer func() {
+		release()
+		// Reset only after the startup cancellation callback has joined. The
+		// process owner can subsequently impose a bounded post-exit drain.
+		if resultErr == nil && observation != nil && conn.SetDeadline(time.Time{}) != nil {
+			resultErr = authority.Error{Code: authority.Unavailable}
+		}
+		if resultErr != nil && observation != nil && handoff {
+			observation.lossOwner.UnconfirmedCommit()
+		}
+	}()
 	var challenge launchMessage
 	if err = readLaunch(conn, &challenge); err != nil || challenge.Phase != "challenge" || challenge.Generation != "" || challenge.Binding != "" {
-		return authority.Error{Code: authority.InvalidContract}
+		return nil, authority.Error{Code: authority.InvalidContract}
 	}
 	f.Challenge = challenge.Challenge
-	if f.Validate() != nil || writeLaunch(conn, f) != nil {
-		return authority.Error{Code: authority.InvalidContract}
+	if f.Validate() != nil {
+		return nil, authority.Error{Code: authority.InvalidContract}
+	}
+	handoff = true // an interrupted full-frame write can leave child admission unknown
+	if writeLaunch(conn, f) != nil {
+		return nil, authority.Error{Code: authority.InvalidContract}
 	}
 	binding := launchBinding(f)
+	if observation != nil {
+		observation.binding = binding
+	}
 	if err = expectLaunch(conn, f, binding, "ready"); err != nil {
-		return err
+		return nil, err
 	}
 	if err = writeLaunch(conn, launchReply(f, binding, "activate")); err != nil {
-		return err
+		return nil, err
 	}
 	if err = expectLaunch(conn, f, binding, "active"); err != nil {
-		return err
+		return nil, err
 	}
-	return ctx.Err()
+	return observation, ctx.Err()
 }
 
 func launchBinding(f launchFrame) string { body, _ := json.Marshal(f); return hash(body) }

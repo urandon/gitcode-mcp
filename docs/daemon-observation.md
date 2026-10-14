@@ -93,8 +93,13 @@ fresh collector-owned correlation, with no source/entity UUID, key, actor,
 payload or private coordinate. Collector contention/loss never changes the
 canonical receipt. This historical evidence does not infer current project,
 job or index health; existing remote incident projection rejects project scope.
-Native retained delivery, runtime phases and exact local
-health remain #183 work. Public local workflow/navigation remains gated in
+Native delivery uses the optional authenticated bounded relay described in
+[local authority contracts](local-authority-contracts.md#safe-project-commit-observations-l4-in-progress).
+The strict child opens no observation files: only the existing parent collector
+retains events. Missing frames/seal, queue overflow and channel failure make
+coverage partial without changing canonical work. Actual product restart tests
+verify retained parent-ledger reload and quiet original-key replay. Runtime
+phases and exact current-owner health remain #183 work. Public local workflow/navigation remains gated in
 #184/#185; the Service view cannot fall through to a remote entity when a
 project bridge is unavailable. Stdio/HTTP discovery can accept the opaque
 `project_ref` selector; no read starts or enrolls a local runtime.

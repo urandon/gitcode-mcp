@@ -5,26 +5,39 @@ import (
 	"strconv"
 )
 
-// LocalProjectObserver retains only a trusted concrete collector and an opaque
-// identity resolved from admitted owner state. No caller refs or callbacks are
-// inherited, and constructing it never starts a collector or probes storage.
+// LocalProjectObserver retains one trusted concrete collector or memory relay
+// and an opaque identity resolved from admitted owner state. No caller refs or
+// callbacks are inherited; binding never starts a collector or probes storage.
 type LocalProjectObserver struct {
 	collector *Collector
+	relay     *LocalProjectRelay
 	project   Ref
 }
 
 func BindLocalProject(ctx context.Context, admittedProjectID string) LocalProjectObserver {
 	binding, ok := ctx.Value(observationContextKey{}).(observationBinding)
-	if !ok || binding.collector == nil {
-		return LocalProjectObserver{}
+	if ok && binding.collector != nil {
+		return LocalProjectObserver{collector: binding.collector, project: KnownRef("project", admittedProjectID)}
 	}
-	return LocalProjectObserver{collector: binding.collector, project: KnownRef("project", admittedProjectID)}
+	relay, _ := ctx.Value(localRelayContextKey{}).(*LocalProjectRelay)
+	ref := KnownRef("project", admittedProjectID)
+	if relay != nil && relay.projects[ref.value] {
+		return LocalProjectObserver{relay: relay, project: ref}
+	}
+	return LocalProjectObserver{}
 }
 
 func (o LocalProjectObserver) SourceCommitted()   { o.committed("authority_commit") }
 func (o LocalProjectObserver) DocumentCommitted() { o.committed("document_commit") }
 
-func (o LocalProjectObserver) Bound() bool { return o.collector != nil && o.project.value != "" }
+func (o LocalProjectObserver) Bound() bool {
+	return (o.collector != nil || o.relay != nil) && o.project.value != ""
+}
+
+// Retained distinguishes an already owned parent collector from the child's
+// memory relay. Only the former can request retained native delivery.
+func (o LocalProjectObserver) Retained() bool     { return o.collector != nil && o.project.value != "" }
+func (o LocalProjectObserver) ProjectRef() string { return o.project.value }
 
 func localAuthorityCode(code Code) bool {
 	return code == LocalAuthorityCommitted || code == LocalAuthorityPhaseChanged
@@ -66,7 +79,19 @@ func (o LocalProjectObserver) PhaseChanged(phase, outcome string) {
 // emits a success event/fabricated throughput.
 func (o LocalProjectObserver) UnconfirmedCommit() {
 	if o.Bound() {
-		o.collector.UnconfirmedExecution()
+		if o.collector != nil {
+			o.collector.UnconfirmedExecution()
+		} else {
+			o.relay.omit()
+		}
+	}
+}
+
+// UnconfirmedCommits folds one bounded native loss delta without per-event
+// iteration. Relay senders cannot use this to manufacture parent authority.
+func (o LocalProjectObserver) UnconfirmedCommits(count uint64) {
+	if o.Retained() && count <= LocalProjectRelayMaxLoss {
+		o.collector.UnconfirmedExecutions(count)
 	}
 }
 
@@ -76,6 +101,13 @@ func (o LocalProjectObserver) committed(phase string) {
 
 func (o LocalProjectObserver) emit(code Code, phase, outcome string) {
 	if !o.Bound() {
+		return
+	}
+	if !localAuthorityPhase(code, phase, outcome) {
+		return
+	}
+	if o.relay != nil {
+		o.relay.emit(LocalProjectTransition{o.project.value, code, phase, outcome})
 		return
 	}
 	correlation := KnownRef("correlation", o.collector.boot+"\x00authority\x00"+strconv.FormatUint(o.collector.authorityTransitions.Add(1), 10))

@@ -910,7 +910,7 @@ Observation is one nonblocking best-effort emission, not a commit dependency,
 retry loop or health authority. Actual read-lock contention counts diagnostic
 loss while the canonical receipt and replay remain unchanged. No collector is
 constructed by authority discovery, mutation or native child startup. This
-shared-core increment does not qualify native retained delivery, runtime
+shared-core increment alone does not qualify runtime
 phase coverage, exact owner-state health or
 public local workflows. Those remain mandatory #183/#184/#185 rollout gates.
 
@@ -931,8 +931,41 @@ from overtaking the flush; canonical source/document proof uses the same
 release. Index slices and terminal reconciliation flush independently, so a
 long-running job cannot accumulate an unbounded observation buffer. Admission
 order is historical observation order, not a current job state or durable
-generation sequence. Native delivery/current-health and later protected local
+generation sequence. Current-health and later protected local
 workflow qualification remain explicit rollout gates.
+
+The trusted native launcher optionally binds an existing parent collector into
+the authenticated launch frame as `local_project_observation.v1`. An absent
+collector preserves unobserved launch; an unsupported requested capability is
+refused, never silently downgraded. The child creates only a memory relay for
+the exact validated project cohort, not a file collector, ordinary config,
+credential resolver or remote Manager. The existing fixed bootstrap role is
+reused one-way after activation; both startup deadlines/cancellation callbacks
+are released before the retained channel lifetime begins.
+
+The relay admits at most 64 content-free records without waiting for readers or
+I/O. Queue/contention/unproved-boundary loss is a cumulative saturating lower
+bound (2^32-1). Concurrent omissions may coalesce into that lower bound: each producer makes
+one CAS attempt, with no retry or lock wait. The closed marker and frozen count
+are published in one atomic word, so a graceful seal cannot roll loss backward.
+Closed frames are at most 1 KiB and contain launch binding,
+bounded monotonic ordinal, loss, opaque project ref and catalog code/phase/
+outcome only. The parent revalidates the exact launch/cohort, closed pairs,
+ordinal and monotonic loss before one best-effort collector admission with a
+fresh parent-owned correlation. Replayed/foreign/malformed/oversized frames
+cannot become events. Loss deltas are folded once, never iterated per count.
+
+The child joins real jobs/writers before sealing the relay. Writes have a
+one-second deadline and final drain is bounded independently of backlog;
+channel failure never retries source work or changes a confirmed receipt or
+authority shutdown result. The parent retains one reader and, after real
+process exit, allows a one-second kernel-buffer drain before closing the FD and
+joining the reader. Missing/invalid seal means incomplete observation, not
+owner health. Actual product tests retain/reload canonical commit observations
+and prove original-key replay quiet across restart. The Linux strict-process
+syscall observer exercises this observed graph. Runtime phase/current-owner
+health, real foreign-user/platform and restricted-provider qualification remain
+mandatory; retained history alone cannot certify those gates.
 
 ### Fixed-channel native launch (L4 in progress)
 

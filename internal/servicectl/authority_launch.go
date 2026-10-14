@@ -76,7 +76,12 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 	if err != nil {
 		return nil, err
 	}
-	defer parent.Close()
+	keepBootstrap := false
+	defer func() {
+		if !keepBootstrap {
+			_ = parent.Close()
+		}
+	}()
 	defer child.Close()
 	// Empty environment and inert stdio are deliberate. Nothing about the
 	// inherited shell/proxy/provider settings grants authority or setup rights.
@@ -95,11 +100,16 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 	_ = child.Close()
 	_ = registry.Close()
 	_ = listenFile.Close()
+	observationDone := make(chan struct{})
+	observationReady := make(chan struct{})
 	// Only one goroutine calls Wait. A cancelled Close never abandons ownership.
 	go func() {
 		if cmd.Wait() != nil {
 			p.exit = authorityLaunchRefusal{phase: authorityExitPhase(cmd.ProcessState.ExitCode())}
 		}
+		<-observationReady // deadline handoff cannot race a startup reset
+		_ = parent.SetReadDeadline(time.Now().Add(time.Second))
+		<-observationDone
 		_ = parent.Close()
 		cleanup()
 		close(p.done)
@@ -122,7 +132,10 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 			<-p.done
 		}
 	}()
-	if err = preparation.Send(ctx, parent); err != nil {
+	observation, err := preparation.SendObserved(ctx, parent)
+	if err != nil {
+		close(observationDone)
+		close(observationReady)
 		cancel()
 		_ = cmd.Process.Kill()
 		<-p.done
@@ -131,6 +144,16 @@ func startAuthorityRuntime(ctx context.Context, preparation *localauthority.Nati
 		}
 		return nil, err
 	}
+	if observation != nil {
+		keepBootstrap = true
+		go func() {
+			defer close(observationDone)
+			observation.Receive()
+		}()
+	} else {
+		close(observationDone)
+	}
+	close(observationReady)
 	select {
 	case <-p.done:
 		cancel()
@@ -238,7 +261,13 @@ func RunInheritedAuthority(ctx context.Context) (status int) {
 	if err != nil {
 		return 84
 	}
-	_ = bootstrap.Close()
+	observed, err := received.StartObservations()
+	if err != nil {
+		return 84
+	}
+	if !observed {
+		_ = bootstrap.Close()
+	}
 	stop()
 	if server.Serve(lifetime, listener) != nil {
 		return 85

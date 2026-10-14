@@ -21,6 +21,7 @@ import (
 
 	"gitcode-mcp/internal/authority"
 	"gitcode-mcp/internal/localauthority"
+	"gitcode-mcp/internal/observability"
 	"golang.org/x/sys/unix"
 )
 
@@ -391,7 +392,15 @@ func TestNativeAuthorityStrictProcessNetworkIsolation(t *testing.T) {
 	target := &nativeTraceTarget{fd: -1}
 	t.Cleanup(target.close)
 	observed := &nativeNetworkTrace{onExec: target.pin}
-	child := spawnProductChild(t, executable, p, dir, "", instrumentNativeTrace(observed))
+	collector := observability.NewQualificationCollector(observability.Config{Directory: filepath.Join(privateTemp(t), "strict-native-observations"), ManagedOutput: true})
+	t.Cleanup(func() { collector.Close(context.Background(), true) })
+	resume, err := collector.PauseWriterForQualification(context.Background())
+	if err != nil {
+		t.Fatal("strict native observation writer idle boundary unavailable")
+	}
+	defer resume()
+	observation := observability.WithObservation(context.Background(), collector, observability.Context{})
+	child := spawnProductChildObserved(t, executable, p, dir, "", observation, instrumentNativeTrace(observed))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	request := nativeMutation("synthetic-observed-native-source", "Observed canonical issue")
@@ -417,6 +426,14 @@ func TestNativeAuthorityStrictProcessNetworkIsolation(t *testing.T) {
 	}
 	if child.cmd.ProcessState == nil || !child.cmd.ProcessState.Success() {
 		t.Fatal("observed product did not exit cleanly after joined shutdown")
+	}
+	if !resume() || !collector.Close(context.Background(), true) {
+		t.Fatal("strict native retained observation did not seal")
+	}
+	refs := observability.ProjectEntityRefs(observability.Context{Project: observability.KnownRef("project", string(fixtureProject))})
+	page, err := collector.Query(observability.Filter{ProjectRef: refs.Project}, "", 200)
+	if err != nil || len(page.Events) != 1 || page.Coverage.Dropped != 0 || page.Events[0].Code != observability.LocalAuthorityCommitted {
+		t.Fatal("strict native observed graph did not retain actual source evidence")
 	}
 	e := observed.snapshot(true)
 	if e.Partial || e.RoleRead == 0 || e.INETSocket != 0 || e.INETOperation != 0 || e.UnixConnect != 0 {

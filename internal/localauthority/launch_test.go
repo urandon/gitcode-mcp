@@ -124,7 +124,7 @@ func TestNativeLaunchPreparationTransfersFullExistingCohortAndReplays(t *testing
 }
 
 func TestNativeLaunchFrameMismatchRefusesBeforeWriter(t *testing.T) {
-	for _, tamper := range []string{"challenge", "profile", "root", "database", "manifest", "instance", "physical", "duplicate"} {
+	for _, tamper := range []string{"challenge", "profile", "root", "database", "manifest", "instance", "physical", "duplicate", "observation"} {
 		t.Run(tamper, func(t *testing.T) {
 			launch, file, registry, dir := launchFixture(t)
 			parent, child := launchPair(t)
@@ -157,6 +157,8 @@ func TestNativeLaunchFrameMismatchRefusesBeforeWriter(t *testing.T) {
 					f.Projects[0].Physical = hash([]byte("other directory"))
 				case "duplicate":
 					f.Projects = append(f.Projects, f.Projects[0])
+				case "observation":
+					f.Observation = "unsupported_observation_protocol"
 				}
 				_ = writeLaunch(parent, f)
 			}()

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,10 @@ type productChild struct {
 }
 
 func spawnProductChild(t *testing.T, executable string, p *localauthority.PreparedRegistry, dir, misuse string, instrument ...func(*exec.Cmd)) productChild {
+	return spawnProductChildObserved(t, executable, p, dir, misuse, context.Background(), instrument...)
+}
+
+func spawnProductChildObserved(t *testing.T, executable string, p *localauthority.PreparedRegistry, dir, misuse string, observation context.Context, instrument ...func(*exec.Cmd)) productChild {
 	t.Helper()
 	prepared, err := p.PrepareLaunch(context.Background(), []localauthority.ProjectBinding{{ProjectID: fixtureProject, Directory: dir}})
 	if err != nil {
@@ -93,7 +98,25 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 		t.Fatal("native product bootstrap conversion failed")
 	}
 	parent := connection.(*net.UnixConn)
-	defer parent.Close()
+	keepBootstrap := false
+	defer func() {
+		if !keepBootstrap {
+			_ = parent.Close()
+		}
+	}()
+	observationDone := make(chan struct{})
+	observationReady := make(chan struct{})
+	var readyOnce sync.Once
+	readyObservation := func() { readyOnce.Do(func() { close(observationReady) }) }
+	var finishOnce sync.Once
+	finishObservation := func() { finishOnce.Do(func() { close(observationDone) }) }
+	observationStarted := false
+	defer func() {
+		if !observationStarted {
+			finishObservation()
+			readyObservation()
+		}
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, executable, servicectl.AuthorityRuntimeSelector)
 	unused := privateTemp(t)
@@ -139,7 +162,14 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 	_ = registry.Close()
 	_ = listenFile.Close()
 	child := productChild{cmd, make(chan struct{}), &servicectl.RPCClient{Network: "unix", Address: path}}
-	go func() { _ = cmd.Wait(); _ = parent.Close(); close(child.done) }()
+	go func() {
+		_ = cmd.Wait()
+		<-observationReady
+		_ = parent.SetReadDeadline(time.Now().Add(time.Second))
+		<-observationDone
+		_ = parent.Close()
+		close(child.done)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		_ = cmd.Process.Kill()
@@ -153,6 +183,8 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 		}
 	})
 	if misuse != "" {
+		finishObservation()
+		readyObservation()
 		select {
 		case <-child.done:
 		case <-time.After(5 * time.Second):
@@ -164,11 +196,19 @@ func spawnProductChild(t *testing.T, executable string, p *localauthority.Prepar
 			t.Fatal("native role control did not exercise its specific admission refusal")
 		}
 	} else {
-		startup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		startup, stop := context.WithTimeout(observation, 10*time.Second)
 		defer stop()
-		if prepared.Send(startup, parent) != nil {
+		reader, err := prepared.SendObserved(startup, parent)
+		if err != nil {
 			t.Fatal("real product early entry did not activate existing authority")
 		}
+		if reader != nil {
+			keepBootstrap, observationStarted = true, true
+			go func() { defer finishObservation(); reader.Receive() }()
+		} else {
+			finishObservation()
+		}
+		readyObservation()
 	}
 	entries, err := os.ReadDir(unused)
 	if err != nil || len(entries) != 0 {
