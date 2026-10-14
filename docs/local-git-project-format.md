@@ -160,6 +160,72 @@ returns `publication_ambiguous`: recover using the same key, never blind retry
 with another key. This does not certify power-loss durability beyond Git's own
 object/ref publication semantics.
 
-Reader and writer tests create real temporary Git stores without credentials
-or network. CLI/MCP exposure, service hosting, search/RAG, protected Admin and bundle
+## Strict-local service hosting (internal epic cohort)
+
+Global machine configuration selects the existing daemon's local startup branch:
+
+```yaml
+service:
+  mode: local
+local_projects:
+  lab:
+    backend: local_git
+    project_id: example-project
+    storage_ref: lab-data
+    ref: refs/heads/main
+    read_only: false
+    rag_profile: disabled
+```
+
+At most 32 registrations use bounded ASCII selectors/storage references. An
+opaque `storage_ref` resolves to `<user-config-dir>/gitcode-mcp/local-projects/
+<storage_ref>.git`; it is not a path or URL input. These are dedicated Git data
+repositories, not repository-document source checkouts. Setup and registration
+are machine-local CLI handoffs, implemented by the separate vertical-slice child
+#204. G3 initializes the registered service from an already valid Git store;
+it never automatically adopts an experimental store. `local_projects` requires
+explicit `service.mode: local`; a missing/mistyped mode cannot silently start a
+remote host. Repository-owned config cannot set either field.
+
+`Manager.Run` takes the local branch before creating remote jobs, maintenance,
+cache authority, credential reporters, embedding providers or Admin controllers.
+It reuses the existing runtime state, private socket, handler cancellation and
+shutdown joining. The control socket is mode 0600 in its private runtime area.
+TCP, redirected socket addresses, live remote intent and implicit Admin are
+rejected. An already-live daemon is not replaced/cohosted. Explicit protected
+loopback Admin remains the separate #206 cohort and is not a zero-network claim.
+There is no new daemon/coordinator, ownership ledger or OS-level sandbox.
+
+Existing private JSON-RPC exposes the following shared-service calls; this is
+not yet CLI/MCP product tool discovery:
+
+| Method | Request/result |
+|---|---|
+| `LocalProjects.Status` | Empty request; selector/identity, readable/read-only state, exact commit and finite last-conflict observation; no content, storage paths or provider URL |
+| `LocalProjects.Get` | `project`, `kind`, `id`; one exact Git entity/citation |
+| `LocalProjects.List` | `project`, `kind`, bounded `offset`/`limit`; exact Git entities |
+| `LocalProjects.History` | `project`, `kind`, `id`, bounded `max_commits`; Git citations |
+| `LocalProjects.Mutate` | `project`, typed `mutation` from the G2 contract; entity and replay flag |
+
+Canonical store aliases share one runtime/OS writer lane. Conflicting project
+identity or configured-ref aliases are rejected. Read-only aliases reject writes.
+Project identity is checked on reads and inside the mutation writer lane before
+receipt lookup/publication; a registration never falls back to a GitCode repo.
+Last-conflict observation is process-local and resets after successful writes
+or daemon restart; it is not a lock, receipt, journal or promise of future write
+availability. Only Git is durable authority.
+
+Local calls own one private connection, inherit a ten-second ceiling and cancel
+the in-flight Git command when the caller disconnects. JSON keys/IDs/envelopes
+are strict, requests retain the existing 1 MiB wire cap, and escaped-JSON
+responses are capped at 64 MiB over the reader's 8 MiB source budget. Only
+registered selectors and typed fields are accepted; unknown routes/methods,
+malformed input and transport failures return finite diagnostics without raw
+paths/provider bodies. The local host's lifecycle health/status remains readable;
+remote job/maintenance/Admin/doctor RPC actions are unavailable, not fallback.
+After a lost reply/restart, retrying the same key returns the Git receipt's
+original result even if the entity was subsequently edited.
+
+Reader, writer and private-service tests create real temporary Git stores
+without credentials or external network. CLI/MCP exposure, search/RAG, protected Admin and bundle
 restore remain separate required children of #200.

@@ -48,6 +48,12 @@ func deleting(op string) bool   { return strings.HasPrefix(op, "delete_") }
 func digest(data []byte) string { h := sha256.Sum256(data); return hex.EncodeToString(h[:]) }
 
 func (s *Store) Mutate(ctx context.Context, ref string, req Mutation) (MutationResult, error) {
+	return s.MutateProject(ctx, ref, "", req)
+}
+
+// MutateProject binds a service registration inside the same writer lane and
+// pinned snapshot as receipt lookup/publication, not in a racy preflight read.
+func (s *Store) MutateProject(ctx context.Context, ref, projectID string, req Mutation) (MutationResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	var zero MutationResult
@@ -120,12 +126,11 @@ func (s *Store) Mutate(ctx context.Context, ref string, req Mutation) (MutationR
 	if err != nil {
 		return zero, err
 	}
-	sym, err := s.run(ctx, 128, "for-each-ref", "--format=%(symref)", ref)
-	if err != nil {
-		return zero, err
+	if projectID != "" && snap.project.ID != projectID {
+		return zero, fail("invalid_configuration", "project")
 	}
-	if strings.TrimSpace(string(sym)) != "" {
-		return zero, fail("unsupported_store", "symbolic_ref")
+	if err := s.ValidateLocalBranch(ctx, ref); err != nil {
+		return zero, err
 	}
 	intent := req
 	intent.ExpectedHead = ""
@@ -303,6 +308,27 @@ func (s *Store) Mutate(ctx context.Context, ref string, req Mutation) (MutationR
 		return zero, fail("publication_rejected", "ref")
 	}
 	return zero, fail("publication_ambiguous", "same_key_recovery")
+}
+
+// Configured authority is a real local branch, never a symbolic redirect.
+func (s *Store) ValidateLocalBranch(ctx context.Context, ref string) error {
+	if !strings.HasPrefix(ref, "refs/heads/") {
+		return fail("invalid_argument", "revision")
+	}
+	if _, err := s.run(ctx, 128, "check-ref-format", ref); err != nil {
+		return fail("invalid_argument", "revision")
+	}
+	sym, err := s.run(ctx, s.limits.TreeBytes, "for-each-ref", "--format=%(refname) %(symref)", ref)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(sym), "\n") {
+		name, target, _ := strings.Cut(line, " ")
+		if name == ref && target != "" {
+			return fail("unsupported_store", "symbolic_ref")
+		}
+	}
+	return nil
 }
 
 func (s *Store) writeBlob(ctx context.Context, data []byte) (string, error) {

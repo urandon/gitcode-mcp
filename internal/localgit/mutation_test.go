@@ -301,3 +301,19 @@ func TestMutationIgnoresHooksSigningAndMachineAuthor(t *testing.T) {
 		t.Fatal("machine author entered project history")
 	}
 }
+
+func TestMutationRegisteredProjectGuardAndExactBranch(t *testing.T) {
+	s := newWritable(t)
+	head := pinFixture(t, s).Commit()
+	req := createRequest(head, "project-guard")
+	_, err := s.MutateProject(context.Background(), mainRef, "different-project", req)
+	requireCode(t, err, "invalid_configuration")
+	if pinFixture(t, s).Commit() != head {
+		t.Fatal("foreign registration changed authority")
+	}
+	fixtureGit(t, s.dir, "", "symbolic-ref", mainRef+"-alias", mainRef)
+	if err := s.ValidateLocalBranch(context.Background(), mainRef); err != nil {
+		t.Fatal("unrelated prefixed branch invalidated exact authority")
+	}
+	requireCode(t, s.ValidateLocalBranch(context.Background(), mainRef+"-alias"), "unsupported_store")
+}

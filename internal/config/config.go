@@ -24,20 +24,21 @@ const (
 )
 
 type Config struct {
-	CachePath       string          `json:"cache_path"`
-	LockPath        string          `json:"lock_path"`
-	CacheMode       string          `json:"cache_mode"`
-	GitCodeBaseURL  string          `json:"gitcode_base_url"`
-	DefaultTimeout  time.Duration   `json:"default_timeout"`
-	MaxResponseSize int64           `json:"max_response_size"`
-	MaxRetries      int             `json:"max_retries"`
-	RateLimitRPS    float64         `json:"rate_limit_rps"`
-	RateLimitBurst  int             `json:"rate_limit_burst"`
-	Format          string          `json:"format"`
-	MCPToolAccess   string          `json:"mcp_tool_access"`
-	Service         ServiceConfig   `json:"service"`
-	RAG             RAGConfig       `json:"rag"`
-	Feedback        feedback.Config `json:"feedback"`
+	CachePath       string                        `json:"cache_path"`
+	LockPath        string                        `json:"lock_path"`
+	CacheMode       string                        `json:"cache_mode"`
+	GitCodeBaseURL  string                        `json:"gitcode_base_url"`
+	DefaultTimeout  time.Duration                 `json:"default_timeout"`
+	MaxResponseSize int64                         `json:"max_response_size"`
+	MaxRetries      int                           `json:"max_retries"`
+	RateLimitRPS    float64                       `json:"rate_limit_rps"`
+	RateLimitBurst  int                           `json:"rate_limit_burst"`
+	Format          string                        `json:"format"`
+	MCPToolAccess   string                        `json:"mcp_tool_access"`
+	Service         ServiceConfig                 `json:"service"`
+	RAG             RAGConfig                     `json:"rag"`
+	Feedback        feedback.Config               `json:"feedback"`
+	LocalProjects   map[string]LocalProjectConfig `json:"local_projects,omitempty"`
 }
 
 type Overrides struct {
@@ -144,22 +145,23 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string             `json:"cache_path" yaml:"cache_path"`
-	LockPath        *string             `json:"lock_path" yaml:"lock_path"`
-	CacheMode       *string             `json:"cache_mode" yaml:"cache_mode"`
-	GitCodeBaseURL  *string             `json:"gitcode_base_url" yaml:"gitcode_base_url"`
-	DefaultTimeout  *string             `json:"default_timeout" yaml:"default_timeout"`
-	MaxResponseSize *int64              `json:"max_response_size" yaml:"max_response_size"`
-	MaxRetries      *int                `json:"max_retries" yaml:"max_retries"`
-	RateLimitRPS    *float64            `json:"rate_limit_rps" yaml:"rate_limit_rps"`
-	RateLimitBurst  *int                `json:"rate_limit_burst" yaml:"rate_limit_burst"`
-	Format          *string             `json:"format" yaml:"format"`
-	MCPToolAccess   *string             `json:"mcp_tool_access" yaml:"mcp_tool_access"`
-	MCP             *MCPConfig          `json:"mcp" yaml:"mcp"`
-	Credential      *CredentialConfig   `json:"credential" yaml:"credential"`
-	Service         *serviceFileConfig  `json:"service" yaml:"service"`
-	RAG             *ragFileConfig      `json:"rag" yaml:"rag"`
-	Feedback        *feedbackFileConfig `json:"feedback" yaml:"feedback"`
+	CachePath       *string                       `json:"cache_path" yaml:"cache_path"`
+	LockPath        *string                       `json:"lock_path" yaml:"lock_path"`
+	CacheMode       *string                       `json:"cache_mode" yaml:"cache_mode"`
+	GitCodeBaseURL  *string                       `json:"gitcode_base_url" yaml:"gitcode_base_url"`
+	DefaultTimeout  *string                       `json:"default_timeout" yaml:"default_timeout"`
+	MaxResponseSize *int64                        `json:"max_response_size" yaml:"max_response_size"`
+	MaxRetries      *int                          `json:"max_retries" yaml:"max_retries"`
+	RateLimitRPS    *float64                      `json:"rate_limit_rps" yaml:"rate_limit_rps"`
+	RateLimitBurst  *int                          `json:"rate_limit_burst" yaml:"rate_limit_burst"`
+	Format          *string                       `json:"format" yaml:"format"`
+	MCPToolAccess   *string                       `json:"mcp_tool_access" yaml:"mcp_tool_access"`
+	MCP             *MCPConfig                    `json:"mcp" yaml:"mcp"`
+	Credential      *CredentialConfig             `json:"credential" yaml:"credential"`
+	Service         *serviceFileConfig            `json:"service" yaml:"service"`
+	RAG             *ragFileConfig                `json:"rag" yaml:"rag"`
+	Feedback        *feedbackFileConfig           `json:"feedback" yaml:"feedback"`
+	LocalProjects   map[string]LocalProjectConfig `json:"local_projects" yaml:"local_projects"`
 }
 
 type feedbackFileConfig struct {
@@ -313,6 +315,12 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	var err error
 	cfg, err = mergeServiceFile(cfg, file.Service)
 	if err != nil {
+		return Config{}, err
+	}
+	if file.LocalProjects != nil {
+		cfg.LocalProjects = file.LocalProjects
+	}
+	if err := ValidateLocalProjects(cfg.Service.Mode, cfg.LocalProjects); err != nil {
 		return Config{}, err
 	}
 	cfg, err = mergeRAGFile(cfg, file.RAG)

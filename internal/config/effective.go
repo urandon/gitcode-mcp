@@ -318,11 +318,19 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 	if eff.Location.Path != "" && (eff.Location.Exists || eff.Location.Explicit) {
 		fileCfg, cred, err := readLocatedConfig(src, eff.Location)
 		if err != nil {
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return EffectiveConfig{}, local
+			}
 			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
 		}
 		var mergeErr error
 		eff.Config, mergeErr = mergeFile(eff.Config, fileCfg)
 		if mergeErr != nil {
+			var local LocalProjectConfigError
+			if errors.As(mergeErr, &local) {
+				return EffectiveConfig{}, local
+			}
 			return EffectiveConfig{}, errors.New(RedactDiagnostic(mergeErr.Error(), src))
 		}
 		applyFileSources(eff.FieldSources, fileCfg, eff.Location.Source)
@@ -350,6 +358,10 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 	}
 	if overrides.CachePath == "" {
 		if err := applyRepoLocalCache(src, &eff); err != nil {
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return EffectiveConfig{}, local
+			}
 			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
 		}
 	}
@@ -499,6 +511,10 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	if loc.Format == "json" || strings.HasSuffix(loc.Path, ".json") {
 		var cfg fileConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return fileConfig{}, CredentialConfig{}, local
+			}
 			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s: %w", loc.Path, err)
 		}
 		var cred CredentialConfig
@@ -549,6 +565,10 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		return invalid()
 	}
 	if err := root.Decode(&decoded); err != nil {
+		var local LocalProjectConfigError
+		if errors.As(err, &local) {
+			return fileConfig{}, CredentialConfig{}, local
+		}
 		return invalid()
 	}
 	cfg := decoded.File
@@ -631,6 +651,9 @@ func defaultFieldSources() map[string]string {
 }
 
 func applyFileSources(sources map[string]string, file fileConfig, source string) {
+	if file.LocalProjects != nil {
+		sources["local_projects"] = source
+	}
 	if file.CachePath != nil {
 		sources["cache_path"] = source
 		if file.LockPath == nil {
@@ -696,6 +719,9 @@ func applyFeedbackFileSources(sources map[string]string, file *feedbackFileConfi
 func applyServiceFileSources(sources map[string]string, file *serviceFileConfig, source string) {
 	if file == nil {
 		return
+	}
+	if file.Mode != nil {
+		sources["service.mode"] = source
 	}
 	if file.RuntimeDir != nil {
 		sources["service.runtime_dir"] = source
@@ -876,6 +902,9 @@ func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *Ef
 }
 
 func validateRepoLocalRuntimeStorage(root, repoConfigPath string, file fileConfig) error {
+	if file.LocalProjects != nil || file.Service != nil && file.Service.Mode != nil {
+		return LocalProjectConfigError{}
+	}
 	if file.Service != nil && file.Service.RuntimeDir != nil {
 		return fmt.Errorf("config: repo-local config %s cannot set service.runtime_dir; configure service runtime globally or with %s", repoConfigPath, EnvServiceRuntimeDir)
 	}
