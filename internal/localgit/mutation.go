@@ -337,25 +337,45 @@ func (s *Snapshot) resultAt(ctx context.Context, commit string, receipt Receipt)
 		deleting(receipt.Operation) && e.Body != "" {
 		return Entity{}, fail("invalid_schema", "receipt_result")
 	}
+	// Qualify the operation against its original parent, never today's state.
+	out, err := s.store.run(ctx, 140, "rev-list", "--parents", "--max-count=1", commit, "--")
+	if err != nil {
+		return Entity{}, err
+	}
+	parents := strings.Fields(string(out))
+	if len(parents) != 2 || parents[0] != commit || !oidValid(parents[1]) {
+		return Entity{}, fail("invalid_schema", "receipt_origin")
+	}
+	parent, err := s.store.Snapshot(ctx, parents[1])
+	if err != nil {
+		return Entity{}, err
+	}
+	if parent.project.ID != receipt.ProjectID {
+		return Entity{}, fail("invalid_schema", "receipt_origin")
+	}
 	if creating(receipt.Operation) {
-		// Creation allocates one fresh ID from its immediate parent's counter.
-		// A newly added receipt cannot claim a pre-existing entity as its result.
-		out, err := s.store.run(ctx, 140, "rev-list", "--parents", "--max-count=1", commit, "--")
-		if err != nil {
-			return Entity{}, err
-		}
-		parents := strings.Fields(string(out))
-		if len(parents) != 2 || parents[0] != commit || !oidValid(parents[1]) {
-			return Entity{}, fail("invalid_schema", "receipt_origin")
-		}
-		parent, err := s.store.Snapshot(ctx, parents[1])
-		if err != nil {
-			return Entity{}, err
-		}
+		// Creation consumes a fresh ID, not a pre-existing entity.
 		n, err := idNumber(e.Metadata.Kind, e.Metadata.ID)
 		before := map[Kind]int64{Issue: parent.project.NextIssue, Comment: parent.project.NextComment, Wiki: parent.project.NextDocument}[e.Metadata.Kind]
 		after := map[Kind]int64{Issue: origin.project.NextIssue, Comment: origin.project.NextComment, Wiki: origin.project.NextDocument}[e.Metadata.Kind]
-		if err != nil || parent.project.ID != receipt.ProjectID || parent.entities[e.Metadata.ID] != "" || n != before || after != before+1 {
+		if err != nil || parent.entities[e.Metadata.ID] != "" || n != before || after != before+1 {
+			return Entity{}, fail("invalid_schema", "receipt_origin")
+		}
+		if e.Metadata.Kind == Comment {
+			issue, err := parent.Get(ctx, Issue, e.Metadata.ParentID)
+			if err != nil {
+				return Entity{}, err
+			}
+			if issue.Metadata.State == "deleted" {
+				return Entity{}, fail("invalid_schema", "receipt_origin")
+			}
+		}
+	} else {
+		previous, err := parent.Get(ctx, e.Metadata.Kind, e.Metadata.ID)
+		if err != nil {
+			return Entity{}, err
+		}
+		if previous.Metadata.State == "deleted" {
 			return Entity{}, fail("invalid_schema", "receipt_origin")
 		}
 	}

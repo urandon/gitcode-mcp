@@ -78,6 +78,9 @@ does not contain its own producing commit ID: Git history supplies that locator.
 At that commit, a delete result must be a tombstone with an empty body; other
 operations must return live entities. Create/add results must be absent in the
 immediate parent and consume exactly its next ID/counter, not claim an old ID.
+That parent's state must permit the operation: edits/deletes target live entities
+and a new comment has a live parent issue. Later deletion does not invalidate an
+earlier valid receipt.
 The mutation adapter publishes receipts with their entity and counters in one
 commit; the reader can inspect the same files without opening a database.
 

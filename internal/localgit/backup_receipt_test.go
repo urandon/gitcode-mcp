@@ -44,6 +44,7 @@ func TestBundleReceiptRejectsDeleteReceiptForLiveEntity(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restored.git")
 	restored, _, err := RestoreBundle(ctx, target, bundle, snap.project.ID, mainRef, head)
 	if err != nil {
+		requireCode(t, err, "invalid_schema")
 		if _, e := os.Stat(target); !os.IsNotExist(e) {
 			t.Fatal("refused import retained invalid store")
 		}
@@ -118,6 +119,7 @@ func TestBundleReceiptRejectsCreateReceiptForPreexistingEntity(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restored.git")
 	restored, _, err := RestoreBundle(ctx, target, bundle, snap.project.ID, mainRef, head)
 	if err != nil {
+		requireCode(t, err, "invalid_schema")
 		if _, e := os.Stat(target); !os.IsNotExist(e) {
 			t.Fatal("invalid import retained")
 		}
