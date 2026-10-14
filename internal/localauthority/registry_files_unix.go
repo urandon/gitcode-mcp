@@ -23,7 +23,7 @@ func openPrivateDirectory(path string) (*os.File, error) {
 }
 
 func openExistingOwnerAt(directory *os.File, name string) (*os.File, error) {
-	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err == unix.ENOENT {
 		return nil, authority.Error{Code: authority.InitializationRequired}
 	}

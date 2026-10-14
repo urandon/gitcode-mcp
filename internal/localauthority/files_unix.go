@@ -46,7 +46,10 @@ func openInitializationFile(path string) (*os.File, error) {
 }
 
 func openSecureFileLinks(path string, flags int, maxLinks uint64) (*os.File, error) {
-	fd, err := unix.Open(path, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	// A replaced fixed-source/owner name may be a FIFO. Opening must not block
+	// before the regular-file gate can reject its type. Regular-file I/O keeps
+	// the same semantics; no content is read from a special descriptor.
+	fd, err := unix.Open(path, flags|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, Error{DurabilityUnavailable}
 	}

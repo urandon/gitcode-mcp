@@ -166,6 +166,19 @@ func (p *PreparedRegistry) OpenWriter(ctx context.Context, directory string, pro
 		if err := runtime.verify(registry.root); err != nil {
 			return err
 		}
+		// A retained flock/body on an unlinked old owner is not the current
+		// machine-global UUID lease. Reject same-body inode replacement as well
+		// as special names before dependent writer/derivative admission.
+		currentOwner, err := openExistingOwnerAt(runtime.directory, string(project)+".owner")
+		if err != nil {
+			return err
+		}
+		currentOwnerID, currentErr := physicalIdentity(currentOwner)
+		heldOwnerID, heldErr := physicalIdentity(s.lease.file)
+		closedOwner := currentOwner.Close()
+		if currentErr != nil || heldErr != nil || closedOwner != nil || currentOwnerID != heldOwnerID {
+			return authority.Error{Code: authority.Conflict}
+		}
 		currentDirectory, err := openPrivateDirectory(root)
 		if err != nil {
 			return err
