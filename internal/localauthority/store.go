@@ -29,6 +29,9 @@ type Store struct {
 	// A verified reopen must validate repaired authority before any fresh ack.
 	logicalFenced bool
 	closed        bool
+	// One semantic budget per prepared writer lifetime, shared by every
+	// derivative component. This is private memory, never canonical SQL/Git.
+	semanticQuotaOwner *semanticQuota
 	// fault is test-only injection at transaction boundaries; no public option.
 	fault func(string) error
 	// Private deterministic read cancellation seam; never runtime/config input.
@@ -473,6 +476,14 @@ func (s *Store) Close() error {
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
+	}
+	// A claimed derivative cohort must seal and join before the actual writer
+	// lease can disappear. Try-lock failure retains this Store and its physical
+	// ownership; stale quota capabilities cannot outlive a released writer.
+	if s.semanticQuotaOwner != nil {
+		if err := s.semanticQuotaOwner.closeJoined(); err != nil {
+			return err
+		}
 	}
 	s.closed = true
 	var err error
