@@ -23,7 +23,7 @@ type bootstrapFixtureClient struct {
 }
 
 func (c *bootstrapFixtureClient) GetRepositoryMetadata(context.Context, gitcode.RepoRequest) (gitcode.RepositoryMetadata, error) {
-	return gitcode.RepositoryMetadata{ProviderID: "17", Private: true, Owner: "example-owner", Name: "example-repo", DefaultBranch: "main"}, nil
+	return gitcode.RepositoryMetadata{ProviderID: "17", Owner: "example-owner", Name: "example-repo", DefaultBranch: "main"}, nil
 }
 func (c *bootstrapFixtureClient) ListRepositoryLabels(context.Context, gitcode.RepoRequest) (gitcode.RepositoryLabels, error) {
 	c.mu.Lock()

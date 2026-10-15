@@ -125,9 +125,10 @@ gitcode-mcp create-repo-label --repo example-owner/example-repo \
   --idempotency-key bootstrap-label-ready --format json
 ```
 
-Metadata reports canonical `provider_id`, `owner`, `name`, `full_name`, `private`
-and `default_branch`, with an observation timestamp. No binding is changed and
-visibility is not a lease authorizing subsequent writes. Label listing is
+Metadata reports canonical `provider_id`, `owner`, `name`, `full_name` and
+`default_branch`, with an observation timestamp. The `private` field was
+withdrawn in v0.4.1 (#198); metadata does not establish repository visibility.
+No binding is changed and the read does not authorize subsequent writes. Label listing is
 explicitly live and complete within bounded pagination; failure cannot establish
 absence. Standalone creation requires `--live` or non-mutating `--dry-run` and a
 caller key. It never assigns issues, recolors existing names, replaces all

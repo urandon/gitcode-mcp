@@ -290,7 +290,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `export_snapshot` | Export a deterministic snapshot |
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report repository binding plus binary identity, cache schema compatibility, issue/comment counts, and issue-comment queue state |
-| `get_repo_metadata` | Explicit bounded live repository provider identity, owner, visibility and default branch; not cache binding status |
+| `get_repo_metadata` | Explicit bounded live repository provider identity, owner and default branch; no visibility assertion and not cache binding status |
 | `list_repo_labels` | Explicit complete bounded live standalone-label list with cache refresh, including read-only descriptions |
 | `create_repo_label` | Audited standalone label definition by name/color; never assigns an issue; caller key and live intent required |
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
@@ -355,8 +355,10 @@ does not imply either success or rollback.
 For authorized repository bootstrap, `get_repo_metadata` and `list_repo_labels`
 are explicit live reads requiring `repo_id`, available under read-only policy.
 They do not substitute `repo_status` binding coordinates for provider evidence.
-Metadata returns `provider_id`, `owner`, `name`, `full_name`, explicit `private`,
-and `default_branch`. Missing or mismatched identity/visibility data fails
+Metadata returns `provider_id`, `owner`, `name`, `full_name` and `default_branch`.
+The unreliable `private` field was withdrawn in v0.4.1 (#198); no visibility
+assertion replaces it. This read is not proof of publication visibility.
+Missing or mismatched identity/default-branch data fails
 closed. It is an observation, not a lease or permission for a later write.
 
 `list_repo_labels` fetches bounded pages until an explicit empty terminal page

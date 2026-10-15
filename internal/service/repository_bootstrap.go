@@ -38,8 +38,8 @@ func (s *Service) bootstrapClient(ctx context.Context, repoID string) (Repositor
 	return route, client, nil
 }
 
-// Explicit live observation: local RepositoryStatus is never used as proof of
-// visibility. This read neither changes a binding nor authorizes a later write.
+// Explicit identity/default-branch observation, not visibility evidence. This
+// read neither changes a binding nor authorizes a later write.
 func (s *Service) GetRepositoryMetadata(ctx context.Context, repoID string) (RepositoryMetadataResult, error) {
 	route, client, err := s.bootstrapClient(ctx, repoID)
 	if err != nil {
@@ -49,7 +49,7 @@ func (s *Service) GetRepositoryMetadata(ctx context.Context, repoID string) (Rep
 	if err != nil {
 		return RepositoryMetadataResult{}, err
 	}
-	return RepositoryMetadataResult{RepoID: route.RepoID, RepositoryMetadata: meta, Evidence: "explicit adapter-confirmed live observation; not a binding or authorization lease", GeneratedAt: s.now().UTC()}, nil
+	return RepositoryMetadataResult{RepoID: route.RepoID, RepositoryMetadata: meta, Evidence: "explicit adapter-confirmed identity/default-branch observation; not visibility or authorization evidence", GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) ListRepositoryLabels(ctx context.Context, repoID string) (RepositoryLabelsResult, error) {
