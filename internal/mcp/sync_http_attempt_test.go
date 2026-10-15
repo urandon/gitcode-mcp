@@ -88,6 +88,12 @@ func TestMCPSyncLiveHTTPAttemptParity(t *testing.T) {
 				t.Fatal("response decode failed")
 			}
 			ds := envelope.Result.StructuredContent.Diagnostics
+			if tc.empty {
+				coverage := envelope.Result.StructuredContent
+				if coverage.TraversalStatus == "complete" || coverage.Continuation == "" {
+					t.Fatal("nil-result cancelled sibling falsely claimed complete coverage")
+				}
+			}
 			if calls != tc.wantCalls || len(ds) == 0 {
 				t.Fatal("missing diagnostic or unexpected provider traffic")
 			}

@@ -2718,7 +2718,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 					return
 				}
 				part, err := fn(ctx, req)
-				mergeSyncResources(aggregate, part)
+				mergeSyncResources(aggregate, part, err)
 				if err != nil {
 					var contention cache.ErrLockContention
 					if part == nil && errors.As(err, &contention) {
@@ -3716,7 +3716,8 @@ func syncProgressType(ev service.ProgressEvent) string {
 	return "records"
 }
 
-func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult) {
+func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult, operationErrors ...error) {
+	service.MergeSyncTraversal(dst, src, operationErrors...)
 	if dst == nil || src == nil {
 		return
 	}
@@ -3724,7 +3725,6 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	dst.Failures = append(dst.Failures, src.Failures...)
 	dst.SuccessCount = len(dst.Results)
 	dst.FailureCount = len(dst.Failures)
-	service.MergeSyncTraversal(dst, src)
 	if src.IssueComments != nil {
 		queue := *src.IssueComments
 		dst.IssueComments = &queue

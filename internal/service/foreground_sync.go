@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -40,10 +41,40 @@ func ForegroundSyncContext(ctx context.Context) (context.Context, context.Cancel
 
 // MergeSyncTraversal retains bounded/partial evidence when a transport combines
 // collections. A complete sibling must never erase an unfinished collection.
-func MergeSyncTraversal(dst, src *SyncResourcesResult) {
-	if dst == nil || src == nil {
+func MergeSyncTraversal(dst, src *SyncResourcesResult, operationErrors ...error) {
+	if dst == nil {
 		return
 	}
+	var operationErr error
+	for _, err := range operationErrors {
+		if err != nil {
+			operationErr = err
+			break
+		}
+	}
+	if src == nil {
+		if operationErr == nil {
+			return
+		}
+		src = &SyncResourcesResult{}
+	}
+	// Coverage fields alone cannot prove success: early errors may return no
+	// result, and older collection implementations may leave a complete marker
+	// beside resource failures. Do not mutate the caller's resource receipt.
+	coverage := *src
+	if (coverage.TraversalStatus == "" || coverage.TraversalStatus == "complete") && (operationErr != nil || src.FailureCount > 0 || len(src.Failures) > 0) {
+		coverage.TraversalStatus, coverage.StopReason = "partial", "sync_error"
+		var partial *PartialSyncError
+		if errors.As(operationErr, &partial) {
+			switch partial.Diagnostic {
+			case SyncDiagnosticCancelled:
+				coverage.TraversalStatus, coverage.StopReason = "cancelled", "cancelled"
+			case SyncDiagnosticTimeout:
+				coverage.TraversalStatus, coverage.StopReason = "timeout", "timeout"
+			}
+		}
+	}
+	src = &coverage
 	dst.PagesListed += src.PagesListed
 	dst.RecordsListed += src.RecordsListed
 	dst.SkippedByWatermark += src.SkippedByWatermark

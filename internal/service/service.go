@@ -3223,11 +3223,16 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				diag = SyncDiagnosticTimeout
 			}
+			result.TraversalStatus, result.StopReason = "cancelled", "cancelled"
+			if diag == SyncDiagnosticTimeout {
+				result.TraversalStatus, result.StopReason = "timeout", "timeout"
+			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if req.Bounds != nil && req.Bounds.MaxRecords > 0 && len(result.Results) >= req.Bounds.MaxRecords {
+			result.TraversalStatus, result.StopReason = "bounded", "max_records"
 			break
 		}
 		prNumber := targetedPRNumber
@@ -3259,6 +3264,7 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 			}
 			if len(items) > remaining {
 				items = items[:remaining]
+				result.TraversalStatus, result.StopReason = "bounded", "max_records"
 			}
 		}
 		beforeCount := len(result.Results)
@@ -3816,14 +3822,14 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *Sync
 		Results:  make([]SyncResult, 0),
 		Failures: make([]ResourceError, 0),
 	}
+	MergeSyncTraversal(aggregated, issuesResult, issuesErr)
+	MergeSyncTraversal(aggregated, wikiResult, wikiErr)
 	if issuesResult != nil {
-		MergeSyncTraversal(aggregated, issuesResult)
 		aggregated.Results = append(aggregated.Results, issuesResult.Results...)
 		aggregated.Failures = append(aggregated.Failures, issuesResult.Failures...)
 		aggregated.IssueComments = issuesResult.IssueComments
 	}
 	if wikiResult != nil {
-		MergeSyncTraversal(aggregated, wikiResult)
 		aggregated.Results = append(aggregated.Results, wikiResult.Results...)
 		aggregated.Failures = append(aggregated.Failures, wikiResult.Failures...)
 	}

@@ -64,3 +64,24 @@ func TestSyncTraversalAggregationPreservesIncompleteSibling(t *testing.T) {
 		t.Fatal("complete sibling hid bounded coverage")
 	}
 }
+
+func TestSyncTraversalAggregationIncludesFailureAndNilInterruption(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		part *SyncResourcesResult
+		err  error
+	}{
+		{"failure without traversal", &SyncResourcesResult{FailureCount: 1}, nil},
+		{"stale complete marker", &SyncResourcesResult{TraversalStatus: "complete", StopReason: "end_of_collection", FailureCount: 1}, nil},
+		{"nil cancellation", nil, &PartialSyncError{Diagnostic: SyncDiagnosticCancelled}},
+		{"nil timeout", nil, &PartialSyncError{Diagnostic: SyncDiagnosticTimeout}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := &SyncResourcesResult{TraversalStatus: "complete", StopReason: "end_of_collection"}
+			MergeSyncTraversal(result, tc.part, tc.err)
+			if result.TraversalStatus == "complete" || result.StopReason == "end_of_collection" || SyncContinuation(result) == "" {
+				t.Fatal("failed sibling retained a complete traversal receipt")
+			}
+		})
+	}
+}

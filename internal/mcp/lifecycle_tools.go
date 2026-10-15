@@ -242,7 +242,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	if strings.TrimSpace(a.RemoteAlias) != "" {
 		if commentSelection.PR && syncLiveRemoteAliasSurface(a.RemoteAlias) == "pull_request" {
 			part, err := s.svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
-			appendBulkSyncResult(&result, part)
+			appendBulkSyncResult(&result, part, err)
 			result.Collections = []string{"pr_comments"}
 			if err != nil {
 				var contention cache.ErrLockContention
@@ -298,7 +298,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			return
 		}
 		part, err := fn(ctx, req)
-		appendBulkSyncResult(&result, part)
+		appendBulkSyncResult(&result, part, err)
 		if err != nil {
 			var contention cache.ErrLockContention
 			if part == nil && errors.As(err, &contention) {
@@ -366,16 +366,19 @@ func syncLiveJobRequest(a syncLiveArgs, comments syncLiveCommentSelection) servi
 	}
 }
 
-func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult) {
-	if dst == nil || src == nil {
+func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult, operationErrors ...error) {
+	if dst == nil {
 		return
 	}
 	coverage := service.SyncResourcesResult{PagesListed: dst.PagesListed, RecordsListed: dst.RecordsListed, SkippedByWatermark: dst.SkippedByWatermark, TraversalStatus: dst.TraversalStatus, StopReason: dst.StopReason, Ordering: dst.Ordering, WatermarkStatus: dst.WatermarkStatus, WatermarkReason: dst.WatermarkReason}
-	service.MergeSyncTraversal(&coverage, src)
+	service.MergeSyncTraversal(&coverage, src, operationErrors...)
 	dst.PagesListed, dst.RecordsListed, dst.SkippedByWatermark = coverage.PagesListed, coverage.RecordsListed, coverage.SkippedByWatermark
 	dst.TraversalStatus, dst.StopReason, dst.Ordering = coverage.TraversalStatus, coverage.StopReason, coverage.Ordering
 	dst.WatermarkStatus, dst.WatermarkReason = coverage.WatermarkStatus, coverage.WatermarkReason
 	dst.Continuation = service.SyncContinuation(&coverage)
+	if src == nil {
+		return
+	}
 	dst.Results = append(dst.Results, src.Results...)
 	dst.Failures = append(dst.Failures, src.Failures...)
 	dst.SuccessCount = len(dst.Results)

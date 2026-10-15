@@ -32,6 +32,17 @@ func TestCLISyncAggregateKeepsKnownHTTPAndInterruption(t *testing.T) {
 	}
 }
 
+func TestCLISyncAggregateKeepsNilSiblingInterruption(t *testing.T) {
+	for _, diagnostic := range []service.SyncDiagnostic{service.SyncDiagnosticCancelled, service.SyncDiagnosticTimeout} {
+		result := &service.SyncResourcesResult{TraversalStatus: "complete", StopReason: "end_of_collection"}
+		mergeSyncResources(result, nil, &service.PartialSyncError{Diagnostic: diagnostic})
+		summary := syncResourcesSummary(result, nil, time.Now())
+		if summary.TraversalStatus == "complete" || summary.Continuation == "" {
+			t.Fatal("nil-result interruption disappeared from the CLI summary")
+		}
+	}
+}
+
 func TestCLISyncLaterPreDispatchInterruptionKeepsPriorHTTP(t *testing.T) {
 	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
 		for _, entered := range []int{0, 1} {
