@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -138,6 +141,74 @@ class ReleaseBuildTest(unittest.TestCase):
         self.assertTrue(version == "gitcode-mcp 9.8.7", "release binary version mismatch")
         self.assertTrue(self.command(repo, env, str(binary), "commit").strip() == revision, "release binary commit mismatch")
         self.assertFalse(self.command(repo, env, "git", "status", "--porcelain=v1", "--untracked-files=all"), "clean builder polluted source tree")
+
+    def archive_fixture(self, *, native_attributes: bool = False):
+        repo, env = self.fixture()
+        self.commit(repo, env)
+        tools = repo.parent / "tools"
+        tools.mkdir()
+        fake_go = tools / "go"
+        fake_go.write_text(
+            '#!/bin/sh\nset -eu\n'
+            'while [ "$#" -gt 0 ]; do\n'
+            '  if [ "$1" = "-o" ]; then shift; output="$1"; break; fi\n'
+            '  shift\n'
+            'done\n'
+            'printf "fixture executable\\n" > "$output"\nchmod 755 "$output"\n'
+            'if [ "${SYNTHETIC_XATTR:-}" = "1" ]; then\n'
+            '  xattr -w com.example.release-fixture fixture "$output"\nfi\n'
+        )
+        fake_go.chmod(0o755)
+        env.update({"PATH": str(tools) + os.pathsep + env["PATH"],
+                    "RELEASE_VERSION": "v9.8.7", "RELEASE_TARGETS": "linux/amd64 windows/amd64",
+                    "SYNTHETIC_XATTR": "1" if native_attributes else "0"})
+        return repo, env, tools
+
+    def assert_archive_contract(self, repo: Path):
+        dist = repo / "dist"
+        for target, extension, binary in (("linux_amd64", ".tar.gz", "gitcode-mcp"),
+                                          ("windows_amd64", ".zip", "gitcode-mcp.exe")):
+            package = "gitcode-mcp_v9.8.7_" + target
+            archive = dist / (package + extension)
+            expected = {package, package + "/README.txt", package + "/" + binary}
+            if extension == ".tar.gz":
+                with tarfile.open(archive) as stream:
+                    members = stream.getmembers()
+                    self.assertTrue(len(members) == 3 and {m.name.rstrip("/") for m in members} == expected,
+                                    "Unix archive contains unexpected members")
+                    self.assertEqual(stream.getmember(package + "/" + binary).mode & 0o777, 0o755,
+                                     "Unix archive lost executable mode")
+                    files = {name: stream.extractfile(package + "/" + name).read() for name in ("README.txt", binary)}
+            else:
+                with zipfile.ZipFile(archive) as stream:
+                    self.assertTrue(len(stream.infolist()) == 3 and {n.rstrip("/") for n in stream.namelist()} == expected,
+                                    "Windows archive contains unexpected members")
+                    files = {name: stream.read(package + "/" + name) for name in ("README.txt", binary)}
+            self.assertEqual(files[binary], b"fixture executable\n", "archive changed executable bytes")
+            self.assertEqual(files["README.txt"], (dist / package / "README.txt").read_bytes(), "archive changed README bytes")
+            checksum = hashlib.sha256(archive.read_bytes()).hexdigest() + "  " + archive.name
+            self.assertIn(checksum, (dist / "checksums.txt").read_text().splitlines(), "archive checksum mismatch")
+
+    def test_builder_explicitly_suppresses_tar_metadata(self):
+        for caller_value in (None, "0"):
+            with self.subTest(caller_value=caller_value):
+                repo, env, tools = self.archive_fixture()
+                env["REAL_TAR"] = shutil.which("tar")
+                wrapper = tools / "tar"
+                wrapper.write_text('#!/bin/sh\n[ "${COPYFILE_DISABLE:-}" = "1" ] || exit 98\nexec "$REAL_TAR" "$@"\n')
+                wrapper.chmod(0o755)
+                env.pop("COPYFILE_DISABLE", None)
+                if caller_value is not None:
+                    env["COPYFILE_DISABLE"] = caller_value
+                self.command(repo, env, "bash", "scripts/release/build.sh")
+                self.assert_archive_contract(repo)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS copyfile qualification")
+    def test_native_macos_archives_exclude_synthetic_extended_attributes(self):
+        repo, env, _ = self.archive_fixture(native_attributes=True)
+        env.pop("COPYFILE_DISABLE", None)
+        self.command(repo, env, "bash", "scripts/release/build.sh")
+        self.assert_archive_contract(repo)
 
 
 if __name__ == "__main__":

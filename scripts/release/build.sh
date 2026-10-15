@@ -82,7 +82,7 @@ README
   if [[ "$TARGET_OS" == "windows" ]]; then
     (cd "$DIST_DIR" && zip -qr "$(basename "$ARCHIVE")" "$PACKAGE")
   else
-    tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PACKAGE"
+    COPYFILE_DISABLE=1 tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PACKAGE"
   fi
 
   if command -v sha256sum >/dev/null 2>&1; then
