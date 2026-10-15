@@ -13,6 +13,12 @@ class WorkflowTriggerTest(unittest.TestCase):
         self.assertIn("      - main", push_section)
         self.assertIn("  workflow_dispatch:", workflow)
 
+    def test_fixture_commands_explicitly_disable_bytecode(self):
+        for name in ("ci.yml", "release.yml"):
+            with self.subTest(workflow=name):
+                workflow = (REPOSITORY_ROOT / ".github" / "workflows" / name).read_text()
+                self.assertTrue("run: python3 -B -m unittest discover -s scripts/release -p 'test_*.py'" in workflow, "release fixture command may write source-tree bytecode")
+
 
 if __name__ == "__main__":
     unittest.main()

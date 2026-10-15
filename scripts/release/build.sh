@@ -4,6 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+require_clean_source() {
+  local source_status
+  if ! source_status="$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none 2>/dev/null)"; then
+    echo "Cannot verify release source cleanliness" >&2
+    exit 1
+  fi
+  if [[ -n "$source_status" ]]; then
+    echo "Release source tree is not clean (tracked or untracked changes); resolve them explicitly before building" >&2
+    exit 1
+  fi
+}
+require_clean_source
+
 VERSION="${RELEASE_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
   VERSION="$(git describe --tags --exact-match 2>/dev/null || true)"
@@ -46,11 +59,13 @@ for target in $TARGETS; do
   rm -rf "$PACKAGE_DIR" "$ARCHIVE"
   mkdir -p "$PACKAGE_DIR"
 
+  require_clean_source
   CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build \
     -trimpath \
     -ldflags "-s -w -X gitcode-mcp/internal/buildinfo.Version=$BINARY_VERSION -X gitcode-mcp/internal/buildinfo.Commit=$COMMIT -X gitcode-mcp/internal/buildinfo.Date=$DATE -X gitcode-mcp/internal/buildinfo.FeedbackRepository=$FEEDBACK_REPOSITORY" \
     -o "$PACKAGE_DIR/$BINARY" \
     ./cmd/gitcode-mcp
+  require_clean_source
 
   cat > "$PACKAGE_DIR/README.txt" <<README
 gitcode-mcp $VERSION
