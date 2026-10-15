@@ -2176,6 +2176,23 @@ func (s *syncLiveBoundsSpyService) ProviderMode() gitcode.ProviderMode {
 	return gitcode.ProviderModeLive
 }
 
+func (s *syncLiveBoundsSpyService) ResolveSyncSelection(_ context.Context, _ string, selected service.SyncSelection) (service.SyncSelection, error) {
+	return service.SelectSyncCollections([]service.RepositoryScope{service.RepositoryScopeIssues, service.RepositoryScopeWiki}, selected)
+}
+
+func (s *syncLiveBoundsSpyService) BulkSyncAll(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	a, aErr := s.BulkSyncIssues(ctx, req)
+	b, bErr := s.BulkSyncWiki(ctx, req)
+	out := &service.SyncResourcesResult{Results: append(a.Results, b.Results...), Failures: append(a.Failures, b.Failures...)}
+	out.SuccessCount, out.FailureCount = len(out.Results), len(out.Failures)
+	service.MergeSyncTraversal(out, a, aErr)
+	service.MergeSyncTraversal(out, b, bErr)
+	if aErr != nil {
+		return out, aErr
+	}
+	return out, bErr
+}
+
 func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.bulkIssuesCalls = append(s.bulkIssuesCalls, req)
 	if req.IdempotencyKey == "recoverable-prefix" {
@@ -3788,6 +3805,10 @@ type bulkLockContentionService struct {
 	err        error
 	issueCalls int
 	pullCalls  int
+}
+
+func (s *bulkLockContentionService) ResolveSyncSelection(_ context.Context, _ string, selected service.SyncSelection) (service.SyncSelection, error) {
+	return service.SelectSyncCollections([]service.RepositoryScope{service.RepositoryScopeIssues, service.RepositoryScopeWiki}, selected)
 }
 
 func (s *bulkLockContentionService) BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {

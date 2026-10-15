@@ -221,6 +221,15 @@ Service job state is stored separately from the cache in the mode-`0600` service
 
 The sync command supports these live sync selectors:
 
+With no collection selector, CLI, MCP and new manual daemon requests use the
+binding's eligible `issues`/`wiki` scopes. Pulls and comments are never implied.
+Explicit selections are checked as a whole before provider work: a missing
+requested scope returns typed `invalid_query` rather than a partial supported
+subset or silent skip. A binding with no eligible default is rejected. Daemon
+admission resolves this list before work-key/coalescing and persists explicit
+stage intent. Existing recovery workflows and maintenance policies retain their
+already explicit snapshots; they are not reinterpreted against new defaults.
+
 - `--repo REPO` selects the configured repository binding.
 - `--issues` bulk-syncs primary issue records and durably enqueues secondary comment coverage without calling per-issue comment endpoints.
 - `--wiki` bulk-syncs wiki records.

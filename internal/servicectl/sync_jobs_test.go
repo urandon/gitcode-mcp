@@ -667,7 +667,7 @@ func TestDirectCacheWritersNormalizeIdentityAndRespectAuthorityFence(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := store.CacheIdentity(ctx)

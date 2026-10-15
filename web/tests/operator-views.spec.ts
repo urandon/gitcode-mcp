@@ -837,6 +837,24 @@ test('retry delivery replay preserves one key and exposes restart-safe coalescin
   expect(retryKeys[1]).toBe(retryKeys[0]);
 });
 
+test('a scope-resolved default job exposes only its admitted collection', async ({ page }) => {
+  const selected: any = structuredClone(snapshot);
+  selected.jobs = [{
+    ...structuredClone(snapshot.jobs[1]), id: 'job-000009', status: 'succeeded',
+    failure_class: undefined, failure_collection: undefined, failure_message: undefined,
+    retryable: false, sync_health: 'healthy', sync_collections: [
+      { collection: 'issues', outcome: 'success', frontier_ref: 'frontier-public-issues', records_listed: 1, committed: 1, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+    ]
+  }];
+  await mockAdmin(page, selected);
+  await page.goto('/?view=Jobs&job=job-000009&job_state=succeeded');
+  const collections = page.getByLabel('Collection sync health');
+  await expect(collections.getByRole('article')).toHaveCount(1);
+  await expect(collections).toContainText('Issues');
+  await expect(collections).not.toContainText('Wiki');
+  await expect(collections.getByRole('button', { name: 'Retry Wiki' })).toHaveCount(0);
+});
+
 test('collection health is URL-filterable and retries only the selected failed collection', async ({ page }) => {
   const collectionSnapshot: any = structuredClone(snapshot);
   const collectionNow = '2030-01-02T02:04:05.000Z';

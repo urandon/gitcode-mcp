@@ -3808,6 +3808,10 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *Sync
 		return nil, err
 	}
 	req.RepoID = repoID
+	selection, err := s.ResolveSyncSelection(ctx, repoID, SyncSelection{})
+	if err != nil {
+		return nil, err
+	}
 	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-all")
 	if err != nil {
 		return nil, err
@@ -3817,7 +3821,7 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *Sync
 	var issuesErr, wikiErr error
 	var firstDiagnostic SyncDiagnostic
 
-	if err := s.validateRepoScope(ctx, repoID, "issues"); err == nil {
+	if selection.Issues {
 		issuesResult, issuesErr = s.BulkSyncIssues(ctx, req)
 		if issuesErr != nil {
 			if partial, ok := extractPartialSyncError(issuesErr); ok && partial.Diagnostic != "" {
@@ -3826,7 +3830,7 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *Sync
 		}
 	}
 
-	if err := s.validateRepoScope(ctx, repoID, "wiki"); err == nil {
+	if selection.Wiki {
 		wikiResult, wikiErr = s.BulkSyncWiki(ctx, req)
 		if wikiErr != nil && firstDiagnostic == "" {
 			if partial, ok := extractPartialSyncError(wikiErr); ok && partial.Diagnostic != "" {

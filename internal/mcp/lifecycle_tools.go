@@ -280,10 +280,26 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 
 	defaultCollections := len(selected) == 0
-	if len(selected) == 0 {
-		selected = []string{"issues", "wiki"}
-		result.Collections = selected
+	selection, err := s.svc.ResolveSyncSelection(ctx, a.RepoID, service.SyncSelection{Issues: a.Issues, Wiki: a.Wiki, Pulls: a.Pulls, IssueComments: commentSelection.Issue, PRComments: commentSelection.PR})
+	if err != nil {
+		if ctx.Err() != nil {
+			diag := service.SyncDiagnosticCancelled
+			result.TraversalStatus, result.StopReason = "cancelled", "cancelled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				diag = service.SyncDiagnosticTimeout
+				result.TraversalStatus, result.StopReason = "timeout", "timeout"
+			}
+			result.Continuation = service.SyncContinuation(&service.SyncResourcesResult{TraversalStatus: result.TraversalStatus})
+			interrupted := diagnostics.RetainHTTPAttempt(&service.PartialSyncError{Diagnostic: diag}, false)
+			result.Diagnostics = append(result.Diagnostics, syncLifecycleDiagnostic(interrupted, string(diag), "sync_live interrupted before collection selection"))
+			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: "fresh_count=0"}}, StructuredContent: result})
+			return
+		}
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
+		return
 	}
+	selected = selection.Collections()
+	result.Collections = selected
 	req, err := syncLiveBulkRequest(a)
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
@@ -312,7 +328,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		}
 	}
 	switch {
-	case a.Issues && a.Wiki && !a.Pulls && !commentSelection.Issue && !commentSelection.PR:
+	case defaultCollections:
 		runBulk("all", s.svc.BulkSyncAll)
 	default:
 		if a.Issues || defaultCollections {

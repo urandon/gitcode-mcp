@@ -463,6 +463,14 @@ A caller deadline is preserved; without one, foreground collection work has a
 30-second operation budget. Exact targets and daemon stages retain their own
 contracts. See [Cache And Sync Model](cache-and-sync-model.md).
 
+Omitting collection selectors chooses only the configured eligible defaults:
+issues and/or wiki from the canonical repository binding. It never implies
+pulls or comments. Explicit selectors are validated together before provider
+work; an unavailable requested scope returns `invalid_query` instead of being
+silently skipped. No eligible default scope is also an error, not a successful
+no-op. New daemon requests resolve the same intent before enqueue/coalescing;
+already admitted durable workflows keep their explicit collection snapshots.
+
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.
 
 Exact PR-comment refresh validates its cached parent before waiting up to five
