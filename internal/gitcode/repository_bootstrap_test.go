@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -41,14 +42,56 @@ func TestIssue157RepositoryIdentityFailsClosed(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(raw)
 		})
 		result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
-		_, privatePresent := raw["private"]
-		good := fmt.Sprint(raw["id"]) == "17" && privatePresent && raw["private"] != nil && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
+		good := fmt.Sprint(raw["id"]) == "17" && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
 		if (err == nil) != good {
-			t.Fatal("identity/visibility certainty changed")
+			t.Fatal("canonical identity validation changed")
 		}
 		if good && result.ProviderID != "17" {
 			t.Fatal("missing provider identity")
 		}
+	}
+}
+
+func TestIssue198RepositoryMetadataIgnoresVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		omit  bool
+		value any
+	}{
+		{"true", false, true}, {"false", false, false}, {"omitted", true, nil},
+		{"null", false, nil}, {"string", false, "unsupported"}, {"object", false, map[string]any{"unexpected": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw map[string]any
+			if json.Unmarshal([]byte(bootstrapMetadataJSON), &raw) != nil {
+				t.Fatal("fixture decode failed")
+			}
+			if tc.omit {
+				delete(raw, "private")
+			} else {
+				raw["private"] = tc.value
+			}
+			raw["public"], raw["visibility"] = true, "PRIVATE"
+			client := bootstrapHTTPClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" || r.URL.Path != "/api/v5/repos/example-owner/example-repo" {
+					t.Error("unexpected metadata request")
+				}
+				_ = json.NewEncoder(w).Encode(raw)
+			})
+			result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
+			if err != nil {
+				t.Fatal("withdrawn visibility blocked canonical identity")
+			}
+			data, err := json.Marshal(result)
+			var projected map[string]any
+			if err != nil || json.Unmarshal(data, &projected) != nil {
+				t.Fatal("metadata encoding failed")
+			}
+			want := map[string]any{"provider_id": "17", "owner": "example-owner", "name": "example-repo", "full_name": "example-owner/example-repo", "default_branch": "main"}
+			if !reflect.DeepEqual(projected, want) {
+				t.Fatal("identity metadata changed or exposed withdrawn visibility")
+			}
+		})
 	}
 }
 func TestIssue157CompleteLabelPagination(t *testing.T) {

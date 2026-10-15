@@ -48,12 +48,16 @@ func parityCache(t *testing.T) *service.Service {
 }
 
 func parityCLI(t *testing.T, svc queryService, args []string) (json.RawMessage, int) {
+	return parityCLIFormat(t, svc, args, "json")
+}
+
+func parityCLIFormat(t *testing.T, svc queryService, args []string, format string) (json.RawMessage, int) {
 	t.Helper()
 	dir := t.TempDir()
 	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
 	factory := func(context.Context, string) (queryService, func() error, error) { return svc, nil, nil }
 	var out, stderr bytes.Buffer
-	args = append(args, "--repo", "fixture", "--format", "json", "--offline")
+	args = append(args, "--repo", "fixture", "--format", format, "--offline")
 	code := executeWithFactoryAndDeps(args, &out, &stderr, factory, localCommandDeps{Source: src})
 	if code != 0 && out.Len() == 0 {
 		return append(json.RawMessage(nil), stderr.Bytes()...), code
