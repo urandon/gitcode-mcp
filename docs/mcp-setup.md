@@ -316,6 +316,13 @@ PATCH/readback outcomes remain fenced; same-key recovery is GET-only and
 reports `recovered_after_ambiguous_write`, `write_ambiguous_remote`,
 `write_ambiguous_readback_failed`, or `write_conflict` as machine-readable
 states.
+When canonical milestone readback fails after an issue PATCH, the error may
+include `issue_readback` with observed `state`, `milestone_present`, and
+`milestone_matches`. For example, `closed`, `true`, `false` means closing was
+observed but membership did not match the request, not that the whole write
+succeeded. The same bounded fields are available in CLI JSON diagnostics.
+Preserve the original key for GET-only reconciliation; an absent observation
+does not imply either success or rollback.
 
 For authorized repository bootstrap, `get_repo_metadata` and `list_repo_labels`
 are explicit live reads requiring `repo_id`, available under read-only policy.

@@ -648,7 +648,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}}
 	}
 	if preserveMilestone && issueMilestoneRemoteID(readback.Milestone) != issueMilestoneRemoteID(preimage.Milestone) {
-		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}, IssueReadback: &IssueUpdateReadback{State: readback.State, MilestonePresent: readback.Milestone != nil}}
 	}
 	if !preserveMilestone {
 		expectedMilestone, err := requestedIssueMilestoneRemoteID(req.Milestone)
@@ -656,7 +656,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 			return WriteResult[Issue]{}, err
 		}
 		if issueMilestoneRemoteID(readback.Milestone) != expectedMilestone {
-			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}}
+			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}, IssueReadback: &IssueUpdateReadback{State: readback.State, MilestonePresent: readback.Milestone != nil}}
 		}
 	}
 	if preserveLabels && !sameStrings(readback.Labels, preimage.Labels) {
@@ -1722,6 +1722,12 @@ func updateIssuePayload(req UpdateIssueRequest) any {
 	}
 	if len(req.Milestone) > 0 {
 		milestone := req.Milestone
+		// GitCode ignores JSON null; its numeric zero clears membership.
+		// Keep logical null in req for canonical readback/recovery, and
+		// translate only the provider payload (omitted input stays distinct).
+		if strings.TrimSpace(string(milestone)) == "null" {
+			milestone = json.RawMessage("0")
+		}
 		payload.Milestone = &milestone
 	}
 	return payload

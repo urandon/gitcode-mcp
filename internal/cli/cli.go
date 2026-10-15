@@ -4490,6 +4490,9 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 	}
 	if format == "json" {
 		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
+		if readback := gitcode.IssueReadbackFromError(err); readback != nil {
+			payload["issue_readback"] = readback
+		}
 		var writeErr service.ErrWriteFailure
 		if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
 			payload["idempotency_key"], payload["remote_path"], payload["write_phase"] = writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase
@@ -4511,6 +4514,9 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 		return code
 	}
 	fmt.Fprintln(stderr, message)
+	if readback := gitcode.IssueReadbackFromError(err); readback != nil {
+		fmt.Fprintf(stderr, "issue_readback: state=%s milestone_present=%t milestone_matches=%t\n", readback.State, readback.MilestonePresent, readback.MilestoneMatches)
+	}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
 		fmt.Fprintf(stderr, "idempotency_key: %s\nremote_path: %s\nwrite_phase: %s\n", writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase)

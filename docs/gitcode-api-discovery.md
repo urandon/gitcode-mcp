@@ -64,11 +64,22 @@ Metadata is point-in-time evidence, not a provider compare-and-swap guarantee.
 
 ## Issue Update Patch Compatibility
 
-A live compatibility observation on 2026-08-30 showed that the v5 issue update
-route can clear an assigned milestone when an otherwise valid JSON PATCH omits
-`milestone`. The public API documentation describes the update fields but does
-not document an `ETag`, `If-Match`, revision token, or another conditional-write
-precondition for this route.
+A live compatibility observation on 2026-08-30 showed that omitting `milestone`
+could clear an assigned milestone. Requalification on 2026-10-15 (#208) found
+that both omission and JSON `null` instead left membership unchanged, even
+when the same PATCH successfully closed the issue. Neither is a reliable clear
+contract. The public API documentation describes an integer milestone but no
+clear sentinel, `ETag`, `If-Match`, or revision precondition.
+
+The shipped public GitCode issue picker's milestone helper maps a deselection
+to numeric `0` (`milestone_id` in the browser API). This is static frontend
+evidence, not a captured browser request or authorization to use its session
+transport. Separate audited PAT qualification on disposable test issues proved
+that the existing v5 issue PATCH accepts `milestone: 0`; canonical GET confirmed
+removal both alone and combined with closing the issue. The adapter therefore
+maps the logical explicit-clear value (`null`) to numeric `0` only at the HTTP
+payload boundary. Positive assignments and omitted public inputs remain
+distinct. No browser cookies, alternate endpoint, or credential exchange is used.
 
 The adapter therefore treats omitted fields as public patch semantics while
 handling the provider quirk at its boundary. Before a partial issue update it
@@ -76,6 +87,12 @@ reads the canonical issue, carries the existing milestone into the provider
 payload, and leaves omitted labels absent. It then requires canonical readback
 to confirm every requested field and to verify that the omitted milestone and
 labels remain unchanged. A 2xx response alone is not write confirmation.
+If canonical readback confirms the requested state but not milestone membership,
+the write remains ambiguous. CLI and MCP optionally expose bounded
+`issue_readback` evidence: `state` (`open`, `closed`, or `unknown`),
+`milestone_present`, and `milestone_matches`. It contains no issue text, milestone
+identity, or raw response. A retry without that evidence must not reuse an old
+observation as current state.
 
 This read-modify-write compatibility path is not a claim of serializable
 external writes. Without a provider precondition, another client can change an
