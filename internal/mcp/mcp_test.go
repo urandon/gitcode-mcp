@@ -1579,12 +1579,14 @@ func TestSchemasAndResults(t *testing.T) {
 	wg.Wait()
 }
 
-func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
+func TestMCPChunkKindSchemaIncludesGitCodeKinds(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
 	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store), nil)
 	registry := srv.toolRegistry()
-	for _, name := range []string{"list_sources", "search_sources", "search_chunks"} {
+	// Source list/search accepts extensible cached kinds (including ingested
+	// task/doc records); chunk search retains its existing index-kind contract.
+	for _, name := range []string{"search_chunks"} {
 		tool, ok := registry[name]
 		if !ok {
 			t.Fatalf("tool %s is not registered", name)

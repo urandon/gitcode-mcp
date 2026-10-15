@@ -514,7 +514,7 @@ var adminCapabilities = []Capability{
 		ID: "admin_maintenance_plan_apply", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
 		CLIName: "maintenance", ServiceCommand: "maintenance-enable",
 		Description: "Plan and apply bounded cache maintenance policy through explicit browser confirmation and durable receipts.",
-		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `maintenance plan` and `maintenance enable`."), MCP: disabled("Maintenance policy mutation is not exposed through MCP."),
+		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `maintenance plan` and `maintenance enable`."), MCP: disabled("This browser-confirmed workflow is distinct from MCP maintenance_plan / enable_cache_maintenance with explicit trusted-plan intent."),
 	},
 	{
 		ID: "admin_binding_plan_apply", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
@@ -538,7 +538,7 @@ var adminCapabilities = []Capability{
 		ID: "admin_provider_smoke", Category: CategoryAdmin, Safety: SafetyReadOnly,
 		CLIName: "rag", ServiceCommand: "rag-status",
 		Description: "Explicitly verify configured embedding provider and model readiness without sending cached text.",
-		UI:          enabled("Available in the repository Search Lab."), CLI: enabled("Available as `rag status`."), MCP: disabled("The admin smoke transport is UI-specific; MCP already exposes rag_status."),
+		UI:          enabled("Available in the repository Search Lab."), CLI: disabled("No dedicated CLI embedding smoke; rag status inspects model/index readiness, not equivalent embedding-request evidence."), MCP: disabled("No dedicated MCP embedding smoke; rag_status is model/index observation, not an embedding smoke request."),
 	},
 	{
 		ID: "admin_rag_bounded_repair", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
@@ -565,22 +565,18 @@ func Capabilities() []Capability {
 	out = append(out, ragCapabilities...)
 	out = append(out, adminCapabilities...)
 	out = append(out, LocalProjectCapabilities()...)
+	out = append(out, CoreCapabilities()...)
+	for i := range out {
+		if !out[i].UI.Enabled && out[i].UI.DisabledReason == "" {
+			out[i].UI = disabled("No corresponding operator-console action; use the explicitly declared CLI/MCP surface.")
+		}
+	}
 	return out
 }
 
 func LookupByMCPName(name string) (Capability, bool) {
-	for _, cap := range LocalProjectCapabilities() {
+	for _, cap := range Capabilities() {
 		if cap.MCPName == name && name != "" {
-			return cap, true
-		}
-	}
-	for _, cap := range writeCapabilities {
-		if cap.MCPName == name {
-			return cap, true
-		}
-	}
-	for _, cap := range ragCapabilities {
-		if cap.MCPName == name {
 			return cap, true
 		}
 	}

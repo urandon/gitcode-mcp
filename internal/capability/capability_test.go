@@ -2,6 +2,27 @@ package capability
 
 import "testing"
 
+func TestAllCapabilitiesDeclareUniqueIdentityAndSurfaceReasons(t *testing.T) {
+	ids, tools := map[string]bool{}, map[string]bool{}
+	for _, cap := range Capabilities() {
+		if cap.ID == "" || ids[cap.ID] || cap.ServiceCommand == "" || cap.Description == "" {
+			t.Fatalf("incomplete/duplicate capability %q", cap.ID)
+		}
+		ids[cap.ID] = true
+		if cap.MCP.Enabled {
+			if cap.MCPName == "" || tools[cap.MCPName] {
+				t.Fatalf("duplicate/missing tool for %s", cap.ID)
+			}
+			tools[cap.MCPName] = true
+		}
+		for name, surface := range map[string]Surface{"CLI": cap.CLI, "MCP": cap.MCP, "Admin": cap.UI} {
+			if !surface.Enabled && surface.DisabledReason == "" {
+				t.Errorf("%s has no %s exclusion reason", cap.ID, name)
+			}
+		}
+	}
+}
+
 func TestWriteCapabilitiesDeclareSurfaceReasons(t *testing.T) {
 	for _, cap := range WriteCapabilities() {
 		if cap.ID == "" || cap.ServiceCommand == "" || cap.Description == "" {

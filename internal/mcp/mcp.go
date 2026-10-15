@@ -397,12 +397,7 @@ const (
 var writeToolNames = buildWriteToolNames()
 
 func buildWriteToolNames() map[string]bool {
-	names := capability.MCPWriteToolNames()
-	names["sync_live"] = true
-	names["index_repo"] = true
-	names["enable_cache_maintenance"] = true
-	names["service_job_cancel"] = true
-	return names
+	return capability.MCPWriteToolNames()
 }
 
 func normalizeToolAccess(access ToolAccess) ToolAccess {
@@ -477,12 +472,13 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"query":   {Type: "string", Description: "Conceptual, fuzzy, identifier, or exact text query.", MinLength: 1},
-				"mode":    {Type: "string", Description: "hybrid (default) or deterministic full_text retrieval.", Enum: []string{service.SearchModeHybrid, service.SearchModeFullText}, Default: service.SearchModeHybrid},
-				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
-				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id":    {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"query":      {Type: "string", Description: "Conceptual, fuzzy, identifier, or exact text query.", MinLength: 1},
+				"provenance": {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
+				"mode":       {Type: "string", Description: "hybrid (default) or deterministic full_text retrieval.", Enum: []string{service.SearchModeHybrid, service.SearchModeFullText}, Default: service.SearchModeHybrid},
+				"kind":       {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
+				"limit":      {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":     {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
 			Required: []string{"repo_id", "query"},
 		},
@@ -505,11 +501,12 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
-				"status":  {Type: "string", Description: "Source status filter."},
-				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id":    {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"kind":       {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
+				"provenance": {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
+				"status":     {Type: "string", Description: "Source status filter."},
+				"limit":      {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":     {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
 			Required: []string{"repo_id"},
 		},
@@ -1206,12 +1203,13 @@ func (s *Server) toolRegistry() toolRegistry {
 }
 
 type searchSourcesArgs struct {
-	RepoID string `json:"repo_id"`
-	Query  string `json:"query"`
-	Mode   string `json:"mode,omitempty"`
-	Kind   string `json:"kind,omitempty"`
-	Limit  *int   `json:"limit,omitempty"`
-	Offset *int   `json:"offset,omitempty"`
+	RepoID     string `json:"repo_id"`
+	Query      string `json:"query"`
+	Mode       string `json:"mode,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Limit      *int   `json:"limit,omitempty"`
+	Offset     *int   `json:"offset,omitempty"`
 }
 
 func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -1225,7 +1223,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 	if a.Query == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "query is required"})
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_query", Message: "query is required"})
 		return
 	}
 	limit := 20
@@ -1236,31 +1234,28 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 	if a.Offset != nil {
 		offset = *a.Offset
 	}
-	if limit < 1 || limit > 100 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit must be between 1 and 100"})
+	if limit == 0 {
+		s.writeOperationalError(id, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
 		return
 	}
-	if offset < 0 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
-		return
-	}
-	if a.Kind != "" && !validKind(a.Kind) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
+	if _, err := service.SourceQueryPage(limit, offset); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
 		return
 	}
 	mode := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(a.Mode)), "-", "_")
 	if mode != "" && mode != service.SearchModeHybrid && mode != service.SearchModeFullText {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "mode must be hybrid or full_text"})
+		s.writeOperationalError(id, service.ErrInvalidQuery{Field: "mode", Message: "mode must be hybrid or full_text"}, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
 		return
 	}
 
 	results, err := s.svc.SearchSources(ctx, service.SearchSourcesRequest{
-		RepoID: a.RepoID,
-		Query:  a.Query,
-		Mode:   mode,
-		Kind:   a.Kind,
-		Limit:  limit,
-		Offset: offset,
+		RepoID:     a.RepoID,
+		Query:      a.Query,
+		Mode:       mode,
+		Kind:       a.Kind,
+		Provenance: a.Provenance,
+		Limit:      limit,
+		Offset:     offset,
 	})
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
@@ -1322,11 +1317,12 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 }
 
 type listSourcesArgs struct {
-	RepoID string `json:"repo_id"`
-	Kind   string `json:"kind,omitempty"`
-	Status string `json:"status,omitempty"`
-	Limit  *int   `json:"limit,omitempty"`
-	Offset *int   `json:"offset,omitempty"`
+	RepoID     string `json:"repo_id"`
+	Kind       string `json:"kind,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Limit      *int   `json:"limit,omitempty"`
+	Offset     *int   `json:"offset,omitempty"`
 }
 
 func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -1347,25 +1343,22 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 	if a.Offset != nil {
 		offset = *a.Offset
 	}
-	if limit < 1 || limit > 100 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit must be between 1 and 100"})
+	if limit == 0 {
+		s.writeOperationalError(id, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}, domainErrorContext{Operation: "list_sources", RepoID: a.RepoID})
 		return
 	}
-	if offset < 0 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
-		return
-	}
-	if a.Kind != "" && !validKind(a.Kind) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
+	if _, err := service.SourceQueryPage(limit, offset); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_sources", RepoID: a.RepoID})
 		return
 	}
 
 	results, err := s.svc.ListSources(ctx, service.ListSourcesRequest{
-		RepoID: a.RepoID,
-		Kind:   a.Kind,
-		Status: a.Status,
-		Limit:  limit,
-		Offset: offset,
+		RepoID:     a.RepoID,
+		Kind:       a.Kind,
+		Status:     a.Status,
+		Provenance: a.Provenance,
+		Limit:      limit,
+		Offset:     offset,
 	})
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_sources", RepoID: a.RepoID})
