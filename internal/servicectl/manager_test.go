@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,31 +67,90 @@ func newTestManager(t *testing.T, goos string) Manager {
 
 func shortWorkspaceTemp(t *testing.T, pattern string) (string, error) {
 	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	root := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-			break
-		}
-		parent := filepath.Dir(root)
-		if parent == root {
-			return "", os.ErrNotExist
-		}
-		root = parent
-	}
-	base := filepath.Join(root, ".t")
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		return "", err
+	base := os.TempDir()
+	if runtime.GOOS != "windows" {
+		// Both the checkout and the configured temporary directory can be
+		// longer than sun_path. Use a private, uniquely owned short root.
+		base = "/tmp"
 	}
 	dir, err := os.MkdirTemp(base, pattern)
 	if err != nil {
-		return "", err
+		return "", errors.New("create private service test directory")
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir, nil
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error("remove private service test directory")
+		}
+	})
+	physical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", errors.New("resolve private service test directory")
+	}
+	// 103 bytes is the conservative portable limit (Darwin's 104-byte
+	// sun_path minus its NUL terminator; Linux allows a little more).
+	if runtime.GOOS != "windows" && len(filepath.Join(physical, "c", ServiceName, "runtime", "control.sock")) > 103 {
+		return "", errors.New("service test socket exceeds native pathname limit")
+	}
+	return physical, nil
+}
+
+func TestShortWorkspaceTempIsPrivateUniqueAndCleaned(t *testing.T) {
+	var roots []string
+	t.Run("owned roots", func(t *testing.T) {
+		for i := 0; i < 2; i++ {
+			root, err := shortWorkspaceTemp(t, "svc-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(root)
+			if err != nil || !info.IsDir() || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
+				t.Fatal("fixture root must be a private directory")
+			}
+			roots = append(roots, root)
+		}
+		if roots[0] == roots[1] {
+			t.Fatal("fixture roots must be individually owned")
+		}
+	})
+	for _, root := range roots {
+		if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Error("fixture root survived owner cleanup")
+		}
+	}
+}
+
+func TestShortWorkspaceTempRejectsOverlongSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // Windows fixtures do not use a Unix pathname bound.
+	}
+	root, err := shortWorkspaceTemp(t, strings.Repeat("fixture-", 10))
+	if root != "" || err == nil || err.Error() != "service test socket exceeds native pathname limit" {
+		t.Fatal("overlong socket fixture must fail before listener construction")
+	}
+}
+
+func TestSocketFixtureIndependentOfCheckoutPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises native Unix pathname sockets.
+	}
+	root := filepath.Join(t.TempDir(), strings.Repeat("checkout-", 20))
+	cwd := filepath.Join(root, "internal", "servicectl")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal("create isolated long checkout")
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.22\n"), 0o600); err != nil {
+		t.Fatal("create isolated module marker")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartStopUsePlatformRunner$", "-test.count=1")
+	cmd.Dir = cwd
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + cwd, "TMP=" + cwd, "TEMP=" + cwd}
+	if err := cmd.Run(); err != nil {
+		// The child may include private paths in its listener error. Do not
+		// publish its raw output; the selected test and class identify the gate.
+		t.Fatal("real Unix socket fixture failed in isolated long checkout")
+	}
 }
 
 func TestResolvePathsUsesPlatformUserLocations(t *testing.T) {
