@@ -305,8 +305,25 @@ func Locate(src Source) ConfigLocation {
 }
 
 func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
+	return loadEffective(src, overrides, false)
+}
+
+// LoadLocalProjectEffective preserves trusted global and environment settings,
+// but never discovers repository-owned configuration or credentials, even when
+// configuration parsing fails before service.mode can be established.
+func LoadLocalProjectEffective(src Source) (EffectiveConfig, error) {
+	return loadEffective(src, Overrides{}, true)
+}
+
+func loadEffective(src Source, overrides Overrides, explicitLocal bool) (EffectiveConfig, error) {
 	if src == nil {
 		src = OSSource{}
+	}
+	diagnostic := func(err error) error {
+		if explicitLocal {
+			return LocalProjectConfigError{}
+		}
+		return errors.New(RedactDiagnostic(err.Error(), src))
 	}
 	eff := EffectiveConfig{
 		Config:           defaultWithSource(src),
@@ -318,12 +335,20 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 	if eff.Location.Path != "" && (eff.Location.Exists || eff.Location.Explicit) {
 		fileCfg, cred, err := readLocatedConfig(src, eff.Location)
 		if err != nil {
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return EffectiveConfig{}, local
+			}
+			return EffectiveConfig{}, diagnostic(err)
 		}
 		var mergeErr error
 		eff.Config, mergeErr = mergeFile(eff.Config, fileCfg)
 		if mergeErr != nil {
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(mergeErr.Error(), src))
+			var local LocalProjectConfigError
+			if errors.As(mergeErr, &local) {
+				return EffectiveConfig{}, local
+			}
+			return EffectiveConfig{}, diagnostic(mergeErr)
 		}
 		applyFileSources(eff.FieldSources, fileCfg, eff.Location.Source)
 		if fileCfg.CachePath != nil {
@@ -332,7 +357,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		if cred.Store != "" {
 			store, err := NormalizeCredentialStore(cred.Store)
 			if err != nil {
-				return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+				return EffectiveConfig{}, diagnostic(err)
 			}
 			eff.CredentialPolicy.Store = store
 		}
@@ -346,11 +371,18 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		}
 	}
 	if err := applyEnvOverrides(src, &eff); err != nil {
-		return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+		return EffectiveConfig{}, diagnostic(err)
 	}
-	if overrides.CachePath == "" {
+	// Local projects use machine-owned registrations and pre-provisioned
+	// providers. An unrelated checkout's tracked config must not retarget
+	// their content transfer or derived-cache location through cwd discovery.
+	if !explicitLocal && overrides.CachePath == "" && eff.Config.Service.Mode != ServiceModeLocal {
 		if err := applyRepoLocalCache(src, &eff); err != nil {
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return EffectiveConfig{}, local
+			}
+			return EffectiveConfig{}, diagnostic(err)
 		}
 	}
 	beforeCache := eff.Config.CachePath
@@ -499,6 +531,10 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	if loc.Format == "json" || strings.HasSuffix(loc.Path, ".json") {
 		var cfg fileConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
+			var local LocalProjectConfigError
+			if errors.As(err, &local) {
+				return fileConfig{}, CredentialConfig{}, local
+			}
 			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s: %w", loc.Path, err)
 		}
 		var cred CredentialConfig
@@ -549,6 +585,10 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		return invalid()
 	}
 	if err := root.Decode(&decoded); err != nil {
+		var local LocalProjectConfigError
+		if errors.As(err, &local) {
+			return fileConfig{}, CredentialConfig{}, local
+		}
 		return invalid()
 	}
 	cfg := decoded.File
@@ -631,6 +671,9 @@ func defaultFieldSources() map[string]string {
 }
 
 func applyFileSources(sources map[string]string, file fileConfig, source string) {
+	if file.LocalProjects != nil {
+		sources["local_projects"] = source
+	}
 	if file.CachePath != nil {
 		sources["cache_path"] = source
 		if file.LockPath == nil {
@@ -696,6 +739,9 @@ func applyFeedbackFileSources(sources map[string]string, file *feedbackFileConfi
 func applyServiceFileSources(sources map[string]string, file *serviceFileConfig, source string) {
 	if file == nil {
 		return
+	}
+	if file.Mode != nil {
+		sources["service.mode"] = source
 	}
 	if file.RuntimeDir != nil {
 		sources["service.runtime_dir"] = source
@@ -860,11 +906,14 @@ func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
 }
 
 func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *EffectiveConfig) error {
-	if repoConfigPath == "" || repoFile.RAG == nil && repoFile.Service == nil {
+	if repoConfigPath == "" {
 		return nil
 	}
 	if err := validateRepoLocalRuntimeStorage(root, repoConfigPath, repoFile); err != nil {
 		return err
+	}
+	if repoFile.RAG == nil && repoFile.Service == nil {
+		return nil
 	}
 	var err error
 	eff.Config, err = mergeRAGFile(eff.Config, repoFile.RAG)
@@ -876,6 +925,9 @@ func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *Ef
 }
 
 func validateRepoLocalRuntimeStorage(root, repoConfigPath string, file fileConfig) error {
+	if file.LocalProjects != nil || file.Service != nil && file.Service.Mode != nil {
+		return LocalProjectConfigError{}
+	}
 	if file.Service != nil && file.Service.RuntimeDir != nil {
 		return fmt.Errorf("config: repo-local config %s cannot set service.runtime_dir; configure service runtime globally or with %s", repoConfigPath, EnvServiceRuntimeDir)
 	}

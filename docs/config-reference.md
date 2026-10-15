@@ -271,6 +271,15 @@ for migration, readiness, build overrides and unchanged write/privacy gates.
 
 ## Runtime audit
 
+The unreleased isolated epic's strict-local daemon uses global `service.mode:
+local` plus opaque `local_projects` registrations. It does not share the remote
+maintenance/provider graph. Machine registration, private IPC, bounds and
+read-only/conflict status are documented in the [Local Git project
+contract](local-git-project-format.md#strict-local-service-hosting-internal-epic-cohort).
+The first CLI/MCP product workflow is available in the isolated G4 checkpoint;
+protected Admin and the complete feature rollout remain separate
+rollout gates; this internal contract is not a released tool-discovery claim.
+
 ```sh
 gitcode-mcp doctor --runtime-audit
 ```

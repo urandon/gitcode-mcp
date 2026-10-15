@@ -69,12 +69,29 @@ func (m *AdminControlReceiptManager) Load() error {
 	return nil
 }
 
-func (m *AdminControlReceiptManager) Apply(_ context.Context, action, target, idempotencyKey string, intent any, mutate func() (map[string]any, error)) (map[string]any, error) {
+func (m *AdminControlReceiptManager) Apply(ctx context.Context, action, target, idempotencyKey string, intent any, mutate func() (map[string]any, error)) (map[string]any, error) {
 	if m == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Durable admin control receipts are unavailable.", "Use the CLI control surface.")
 	}
-	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// One control owns receipt publication through its callback. Waiting callers
+	// must keep their request/disconnect/shutdown budget instead of blocking on
+	// an unrelated owner's potentially slower foreground work.
+	tick := time.NewTicker(2 * time.Millisecond)
+	defer tick.Stop()
+	for !m.mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
 	if idempotencyKey == "" || strings.TrimSpace(action) == "" || strings.TrimSpace(target) == "" {
 		return nil, controlError(http.StatusBadRequest, "invalid_request", "The control target and idempotency key are required.", "Refresh the target and generate one key for this intent.")

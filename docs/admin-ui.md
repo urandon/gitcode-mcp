@@ -24,6 +24,16 @@ The listener is disabled at daemon startup by default. Its optional runtime conf
 
 To keep the listener disabled, omit `--admin` and do not invoke `admin open`. A lazily or eagerly started listener stops with its owning daemon and is not persisted as a second service; restart the daemon without `--admin` to return to the disabled state.
 
+The isolated `service.mode: local` host is stricter: without `service run
+--admin`, it constructs no Admin controller and `admin open` cannot enable one
+lazily. The explicit local opt-in accepts only loopback IPs and rejects the
+unsafe override. Its minimal snapshot and **Local projects** cohort do not load
+GitCode caches, credentials, remote jobs or maintenance. See the
+[G6 contract](local-git-project-format.md#protected-local-projects-admin-g6) for
+closed typed endpoints, source-edit confirmation, Git receipt replay, bounded
+indexing and CLI-only setup boundaries. The ordinary cache host shows this
+cohort as unavailable rather than falling back to remote operations.
+
 Use `admin open --no-browser` when a browser must be opened manually. The printed URL contains a one-time token in its fragment. The SPA removes the fragment from browser history before exchanging it for a bounded SameSite Strict, HttpOnly session cookie. The launch token expires after one minute and cannot be replayed.
 
 ## Browser boundary

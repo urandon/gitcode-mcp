@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -141,6 +142,19 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		defer cancel()
 		return cli.ExecuteWithSourceContext(ctx, localArgs, stdout, stderr, src)
 	}
+	if len(rest) > 0 && rest[0] == "project" {
+		if opts.live || opts.offline || opts.overrides.CachePath != "" {
+			fmt.Fprintln(stderr, "local_git_invalid_argument: project commands use explicit local intent, not live/fixture/cache routing")
+			return 2
+		}
+		localArgs := append([]string(nil), rest...)
+		if opts.overrides.Format != "" {
+			localArgs = append(localArgs, "--format", opts.overrides.Format)
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return cli.ExecuteWithSourceContextAndInput(ctx, localArgs, stdin, stdout, stderr, src)
+	}
 	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor" || rest[0] == "migrate-cache") {
 		localArgs := append([]string(nil), rest...)
 		if (rest[0] == "auth" || rest[0] == "doctor") && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
@@ -157,10 +171,43 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 
 	eff, err := config.LoadEffective(src, opts.overrides)
 	if err != nil {
+		var local config.LocalProjectConfigError
+		if errors.As(err, &local) {
+			fmt.Fprintln(stderr, local.Error())
+			return 1
+		}
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 1
 	}
 	cfg := eff.Config
+	// Daemon startup is machine-local. In strict-local mode it must never enter
+	// the remote credential/provider dependency graph, even to discover a token.
+	if len(rest) > 0 && rest[0] == "service" {
+		deps := StartupDeps{Config: cfg, Source: src, Stdin: stdin, GitCode: GitCodeStartup{Live: opts.live, Offline: opts.offline}}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if cfg.DefaultTimeout > 0 && !runsUntilSignal(rest) {
+			var stop context.CancelFunc
+			ctx, stop = context.WithTimeout(ctx, cfg.DefaultTimeout)
+			defer stop()
+		}
+		return cliRoute(ctx, rest, stdout, stderr, deps)
+	}
+	if cfg.Service.Mode == config.ServiceModeLocal {
+		if opts.live || opts.offline {
+			fmt.Fprintln(stderr, "local_git_invalid_argument: strict-local mode cannot select live or fixture providers")
+			return 2
+		}
+		deps := StartupDeps{Config: cfg, Source: src, Stdin: stdin}
+		if opts.mcpServe {
+			return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
+		}
+		if opts.mcp {
+			return mcpRoute(context.Background(), stdin, stdout, stderr, deps)
+		}
+		fmt.Fprintln(stderr, "local_git_unsupported_capability: use project commands with explicit local selection")
+		return 2
+	}
 	credentialResolver := auth.NewCredentialResolver(src)
 	token := ""
 	if !opts.mcp && !opts.mcpServe {
@@ -526,6 +573,10 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 	server, closeStore := newMCPStdioServer(ctx, stdin, stdout, stderr, deps)
 	defer closeStore()
 	if err := server.Serve(); err != nil {
+		if deps.Config.Service.Mode == config.ServiceModeLocal {
+			fmt.Fprintln(stderr, "local_git_unavailable: local MCP transport failed")
+			return 1
+		}
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
 	}
@@ -535,6 +586,10 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
 	bootstrap := newMCPBootstrap(deps)
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, nil, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	if deps.Config.Service.Mode == config.ServiceModeLocal {
+		server.SetLocalProjects(bootstrap.ServiceClient)
+		return server, bootstrap.Close
+	}
 	server.SetToolBootstrap(bootstrap.ForTool)
 	server.SetBootstrapDiagnostic(bootstrap.Diagnostic)
 	server.SetServiceClient(bootstrap.ServiceClient)
@@ -544,10 +599,18 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+	if deps.Config.Service.Mode == config.ServiceModeLocal && !localMCPLoopback(bind) {
+		fmt.Fprintln(stderr, "local_git_private_ipc_required: explicit MCP HTTP transport must bind a loopback IP")
+		return 2
+	}
 	handler, bootstrap := newMCPHTTPHandler(deps)
 	defer bootstrap.Close()
 	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: bootstrap.Readiness})
 	if err := transport.Serve(ctx); err != nil {
+		if deps.Config.Service.Mode == config.ServiceModeLocal {
+			fmt.Fprintln(stderr, "local_git_unavailable: local MCP transport failed")
+			return 1
+		}
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
 	}
@@ -636,6 +699,7 @@ func ensureParentDir(path string) error {
 
 func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gitcode-mcp [global flags] <command> [args]")
+	fmt.Fprintln(w, "  project --help        explicit local Git project setup and issue/wiki operations")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
 	fmt.Fprintln(w, "  --live                compatibility alias for live GitCode provider selection")

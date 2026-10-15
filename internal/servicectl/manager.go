@@ -321,6 +321,9 @@ func (m Manager) Doctor() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	if m.EffectiveConfig != nil && m.EffectiveConfig.Service.Mode == config.ServiceModeLocal {
+		return status, nil
+	}
 	if status.Installed {
 		if err := validateInstalledDefinition(status.InstallKind, status.InstallPath); err != nil {
 			status.Status = StatusUnhealthy
@@ -472,6 +475,14 @@ func (m Manager) waitForStopped(ctx context.Context, paths Paths) (Status, error
 }
 
 func (m Manager) Run(ctx context.Context) error {
+	if m.EffectiveConfig != nil {
+		if err := config.ValidateLocalProjects(m.EffectiveConfig.Service.Mode, m.EffectiveConfig.LocalProjects); err != nil {
+			return err
+		}
+		if m.EffectiveConfig.Service.Mode == config.ServiceModeLocal {
+			return m.runLocalProjects(ctx)
+		}
+	}
 	ctx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	paths, err := m.ResolvePaths()

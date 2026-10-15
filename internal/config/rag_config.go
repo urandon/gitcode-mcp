@@ -27,6 +27,7 @@ const (
 )
 
 type ServiceConfig struct {
+	Mode         string                    `json:"mode,omitempty"`
 	RuntimeDir   string                    `json:"runtime_dir,omitempty"`
 	JobRetention ServiceJobRetentionConfig `json:"job_retention"`
 }
@@ -89,6 +90,7 @@ type RAGSearchConfig struct {
 }
 
 type serviceFileConfig struct {
+	Mode         *string                        `json:"mode" yaml:"mode"`
 	RuntimeDir   *string                        `json:"runtime_dir" yaml:"runtime_dir"`
 	JobRetention *serviceJobRetentionFileConfig `json:"job_retention" yaml:"job_retention"`
 }
@@ -214,6 +216,9 @@ func mergeServiceFile(cfg Config, file *serviceFileConfig) (Config, error) {
 	}
 	if file.RuntimeDir != nil {
 		cfg.Service.RuntimeDir = strings.TrimSpace(*file.RuntimeDir)
+	}
+	if file.Mode != nil {
+		cfg.Service.Mode = strings.TrimSpace(*file.Mode)
 	}
 	if file.JobRetention == nil {
 		return cfg, nil

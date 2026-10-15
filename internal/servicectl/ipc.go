@@ -14,6 +14,7 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/observability"
+	"gitcode-mcp/internal/service"
 )
 
 const jsonrpcVersion = "2.0"
@@ -80,6 +81,8 @@ type ServiceHealth struct {
 }
 
 type RPCServer struct {
+	LocalProjects       *service.LocalProjects
+	LocalOnly           bool
 	runtimeContext      context.Context
 	observationHandlers *atomic.Int64
 	Manager             Manager
@@ -178,6 +181,10 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var resp RPCResponse
+		if localProjectMethod(req.Method) || s.LocalOnly {
+			s.handleLocalProjectConn(ctx, conn, raw)
+			return // Local project calls own one connection, including EOF cancellation.
+		}
 		if observationMethod(req.Method) {
 			_ = conn.SetWriteDeadline(readDeadline)
 			if len(raw) > observability.MaxReadRequestBytes+observationEnvelopeBytes || strictObservationEnvelope(raw) != nil {
@@ -231,6 +238,9 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 }
 
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if s.LocalOnly || localProjectMethod(method) {
+		return s.dispatchLocalProject(ctx, method, params)
+	}
 	if observationMethod(method) {
 		return s.dispatchObservation(ctx, method, params)
 	}
@@ -523,6 +533,9 @@ func decodeJobID(params json.RawMessage) (string, error) {
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params any, result any) error {
+	if localProjectMethod(method) {
+		return c.callLocalProject(ctx, method, params, result)
+	}
 	if observationMethod(method) {
 		return c.callObservation(ctx, method, params, result)
 	}
@@ -616,12 +629,11 @@ func rpcCallerError(ctx context.Context, err error) error {
 }
 
 func (c *RPCClient) callMemory(ctx context.Context, address, method string, params any, result any) error {
-	memoryRPC.Lock()
-	server, ok := memoryRPC.servers[address]
-	memoryRPC.Unlock()
-	if !ok {
-		return fmt.Errorf("service memory endpoint not found: %s", address)
+	server, ctx, release, err := memoryRequestOwner(ctx, address)
+	if err != nil {
+		return err
 	}
+	defer release()
 	id := c.nextID.Add(1)
 	req := RPCRequest{JSONRPC: jsonrpcVersion, ID: id, Method: method}
 	if params != nil {

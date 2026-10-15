@@ -21,6 +21,13 @@ audited service boundary.
 The project is self-contained and public-safe. External repositories are inputs,
 not bundled source material; examples and fixtures are sanitized.
 
+For an autonomous/offline research project with no GitCode authority, explicitly
+select the [local Git harness](docs/local-git-project-format.md). Issues,
+comments, wiki, identities, retry receipts and history live in a dedicated Git
+data repository. CLI, MCP and opt-in protected Admin share the same services;
+full-text needs no cache/provider, and optional RAG is disposable. Private Git
+bundle export/restore is a confirmed CLI handoff, never a browser file upload.
+
 ## How It Works
 
 ```mermaid
@@ -55,6 +62,7 @@ flowchart LR
     MCP -. "explicit audited writes" .-> GitCode
 ```
 
+The diagram above describes the unchanged GitCode/cache profile.
 GitCode remains the remote system of record. Local Git remains the repository
 documentation store. The coordinator makes remote collection progress durable,
 while every normal read stays independent from current network health.

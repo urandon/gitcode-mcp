@@ -383,11 +383,17 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 }
 
 func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	if len(args) > 0 && args[0] == "project" {
+		return executeProjectCommand(ctx, args[1:], stdout, stderr, deps)
+	}
 	if IsObservationCommand(args) {
 		return executeObservationCommand(ctx, args[1:], stdout, stderr, deps)
 	}
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
+	}
+	if len(args) > 0 && args[0] == "service" {
+		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if deps.CredentialReporter == nil {
 		provider := config.DefaultCredentialProvider(deps.Source)
@@ -910,7 +916,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
 	}
-	if deps.CredentialReporter == nil {
+	if deps.CredentialReporter == nil && args[0] != "service" {
 		provider := config.DefaultCredentialProvider(deps.Source)
 		deps.CredentialReporter = provider
 	}
@@ -1729,7 +1735,15 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	if configErr != nil {
 		return writeError(stderr, opts.format, configErr)
 	}
+	if eff.Config.Service.Mode == config.ServiceModeLocal && opts.live {
+		return writeError(stderr, opts.format, config.LocalProjectConfigError{})
+	}
 	manager := servicectl.Manager{Source: deps.Source, CredentialReporter: deps.CredentialReporter, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath, JobRetention: &eff.Config.Service.JobRetention, Offline: opts.offline || opts.fixture}
+	if eff.Config.Service.Mode == config.ServiceModeLocal {
+		manager.EffectiveConfig = &eff.Config
+	} else if manager.CredentialReporter == nil {
+		manager.CredentialReporter = config.DefaultCredentialProvider(deps.Source)
+	}
 	var (
 		status servicectl.Status
 		err    error
@@ -5485,6 +5499,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  gitcode-mcp [command] [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  project init|register|status|get|list|history|mutate (explicit local Git project)")
 	for _, command := range commands {
 		fmt.Fprintf(w, "  %s\n", command)
 	}

@@ -59,7 +59,7 @@ An icon's meaning must remain stable across tabs. For example, database denotes 
 
 ### Global navigation
 
-The brand, five top-level destinations, and theme selector are persistent. The selected destination changes color, weight, and surface together. Responsive icon-only navigation retains accessible names and tooltips.
+The brand, top-level destinations, and theme selector are persistent. The selected destination changes color, weight, and surface together. Responsive icon-only navigation retains accessible names and tooltips; the mobile navigation wraps before adding document-level overflow. Local projects reuses this shell, workbench, status and protected confirmation system, not another console or Markdown runtime.
 
 ### Observation
 

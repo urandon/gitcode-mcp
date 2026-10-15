@@ -30,6 +30,10 @@ func newMCPBootstrap(deps StartupDeps) *mcpBootstrap { return &mcpBootstrap{deps
 func newMCPHTTPHandler(deps StartupDeps) (*mcp.RPCHandler, *mcpBootstrap) {
 	b := newMCPBootstrap(deps)
 	h := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(nil, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	if deps.Config.Service.Mode == config.ServiceModeLocal {
+		h.SetLocalProjects(b.ServiceClient)
+		return h, b
+	}
 	h.SetToolBootstrap(b.ForTool)
 	h.SetBootstrapDiagnostic(b.Diagnostic)
 	h.SetServiceClient(b.ServiceClient)
