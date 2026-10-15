@@ -1,6 +1,6 @@
 package service
 
-// SourceQueryPage is the shared public source-list/search pagination contract.
+// SourceQueryPage is the shared public source-list/search/backlinks page contract.
 // Zero is the service-level omission sentinel; transports reject explicit zero.
 const (
 	DefaultSourceQueryLimit = 20
