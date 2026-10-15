@@ -17,8 +17,8 @@ func TestLocalProjectCLIConfigRefusalsNeverDiscoverCredentials(t *testing.T) {
 		{"malformed", "service: {mode: local}\nlocal_projects: [\n", ""},
 		{"missing", "", ""},
 		{"merge", "service: {mode: local}\ncache_mode: invalid\n", ""},
-		{"environment", "service: {mode: local}\n", "invalid"},
-		{"credential-policy", "service: {mode: local}\ncredential: {store: invalid}\n", ""},
+		{"environment", "service: {mode: local}\nlocal_projects: {lab: {backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main}}\n", "invalid"},
+		{"credential-policy", "service: {mode: local}\nlocal_projects: {lab: {backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main}}\ncredential: {store: invalid}\n", ""},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			base := newTestSource(t)
