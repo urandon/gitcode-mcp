@@ -411,6 +411,53 @@ func ValidateRepositoryBinding(req AddRepositoryRequest, now time.Time) (Reposit
 	return normalizeRepositoryRequest(req, now)
 }
 
+// SetRepositoryScopes updates an existing exact identity in the selected cache.
+// Unlike binding replacement, it cannot overwrite concurrent metadata changes.
+// It neither contacts the provider nor changes configuration or cached content.
+func (s *Service) SetRepositoryScopes(ctx context.Context, repoID string, raw []string) (RepositoryBinding, error) {
+	repoID = strings.TrimSpace(repoID)
+	if repoID == "" {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "repo", Message: "an existing exact repo id is required"}
+	}
+	scopes, err := normalizeRepositoryScopes(raw)
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	updater, ok := s.store.(interface {
+		SetRepositoryScopes(context.Context, string, []cache.RepositoryScope, time.Time) error
+	})
+	if !ok {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "repository", Message: "scope updates are unavailable for this store"}
+	}
+	// Binding metadata follows the physical cache authority (also used by
+	// migration), not the legacy configurable provider/sync lock lane.
+	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "repo-set-scopes", RepoID: repoID})
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	defer s.store.ReleaseWriter(context.Background(), lease)
+	storedScopes := make([]cache.RepositoryScope, len(scopes))
+	for i, scope := range scopes {
+		storedScopes[i] = cache.RepositoryScope(scope)
+	}
+	if err := updater.SetRepositoryScopes(ctx, repoID, storedScopes, s.now()); err != nil {
+		return RepositoryBinding{}, normalizeError(err, "repository", repoID)
+	}
+	got, err := s.store.GetRepository(ctx, repoID)
+	if err != nil {
+		return RepositoryBinding{}, normalizeError(err, "repository", repoID)
+	}
+	if len(got.Scopes) != len(storedScopes) {
+		return RepositoryBinding{}, ErrConflict{Kind: "repository", ID: repoID, Message: "scopes changed before readback; inspect repo status"}
+	}
+	for i, scope := range got.Scopes {
+		if scope != storedScopes[i] {
+			return RepositoryBinding{}, ErrConflict{Kind: "repository", ID: repoID, Message: "scopes changed before readback; inspect repo status"}
+		}
+	}
+	return RepositoryBinding{RepoID: got.RepoID, Owner: got.Owner, Name: got.Name, APIBaseURL: sanitizeAPIBaseURL(got.APIBaseURL), Scopes: scopes, DisplayName: got.DisplayName, Aliases: got.Aliases, CreatedAt: got.CreatedAt, UpdatedAt: got.UpdatedAt}, nil
+}
+
 func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest) (ResetLiveCacheResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "cache reset live")
 	if err != nil {

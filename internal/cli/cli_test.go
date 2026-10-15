@@ -3934,6 +3934,10 @@ func (s *spyService) AddRepository(context.Context, service.AddRepositoryRequest
 	s.called("AddRepository")
 	return service.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}}, nil
 }
+func (s *spyService) SetRepositoryScopes(context.Context, string, []string) (service.RepositoryBinding, error) {
+	s.called("SetRepositoryScopes")
+	return service.RepositoryBinding{RepoID: "fixture-a", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}}, nil
+}
 func (s *spyService) RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error) {
 	s.called("RepositoryStatus")
 	return service.RepositoryStatus{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}, BindingState: "ready", AliasConflictState: "none", CacheState: "unknown", IndexState: "unknown"}, nil

@@ -70,6 +70,40 @@ The deprecated `bind --repo-owner OWNER --repo REPO` form remains a working comp
 
 The stable local `repo_id` is formed as `<owner>/<name>`. For example, `example-owner/example-repo`.
 
+## Updating scopes on an existing binding
+
+`repo add` remains add-only: a duplicate identity is a conflict, not an implicit
+update. To replace scopes without a coordinator service:
+
+```sh
+gitcode-mcp repo set-scopes \
+  --repo example-owner/example-repo \
+  --scopes issues,wiki \
+  --format json
+```
+
+Use the exact stored `repo_id`, not a short alias. `--scopes` is a replacement,
+not an addition; include every scope you want to retain. Shared validation
+normalizes `pull`, `pulls`, `pr`, `prs`, `pull_request`, `pull_requests`, `comment`
+and `comments` to the issue-backed `issues` scope. Only `issues` and `wiki` are
+persisted, in that order. Empty and unknown scopes are errors.
+
+The command takes the selected cache's canonical physical writer lease (not a
+legacy provider/sync `lock_path` override) and changes only scopes plus the
+binding's update timestamp, then reads back the binding. Identity, custom API
+route, aliases, display name, cache identity, configuration bytes/cache mode,
+and cached records are preserved. Reducing scopes does not delete cached data.
+Repeating the same scope selection is safe; it does not recreate the binding.
+No credential, daemon installation, GitCode request, remote write, or implicit
+sync is required. Normal cache-selection precedence applies; `--cache-path`
+can explicitly select the existing cache. No `--live` or `--dry-run` is used.
+Identity/endpoint/alias flags are rejected rather than silently ignored.
+
+The existing Admin binding plan/apply controls remain the UI equivalent and
+support full metadata updates. MCP binding mutation remains intentionally
+unavailable. Binding scopes select provider collections; they are not per-agent
+tool permissions or a substitute for GitCode authorization.
+
 ## Viewing repository status
 
 ```sh
