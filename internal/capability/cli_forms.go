@@ -1,0 +1,51 @@
+package capability
+
+// CLIGroupedForms declares concrete verbs, not just a shared namespace root.
+// It is inventory for parity gates, not a second dispatcher. Forms retain the
+// existing capability's safety/transport policy and specialized contract tests.
+func CLIGroupedForms() map[string][]string {
+	return map[string][]string{
+		"feedback_status":              {"feedback status"},
+		"prepare_feedback":             {"feedback prepare"},
+		"submit_feedback":              {"feedback submit"},
+		"admin_feedback_setup":         {"feedback setup"},
+		"config_management":            {"config init", "config locate", "config show"},
+		"auth_status":                  {"auth status"},
+		"service_status":               {"service status"},
+		"maintenance_status":           {"service maintenance"},
+		"service_jobs":                 {"service jobs"},
+		"service_job_status":           {"service job"},
+		"service_job_attach":           {"service attach"},
+		"service_job_cancel":           {"service cancel"},
+		"service_observability":        {"service observe"},
+		"service_metrics":              {"service metrics"},
+		"service_events":               {"service events"},
+		"service_lifecycle":            {"service install", "service upgrade-observation", "service repair", "service uninstall", "service start", "service stop", "service doctor", "service run", "service fake-job", "service reconcile"},
+		"admin_listener":               {"admin open", "admin status"},
+		"maintenance_plan":             {"maintenance plan"},
+		"enable_cache_maintenance":     {"maintenance enable", "rag enable"},
+		"rag_setup":                    {"rag setup"},
+		"rag_index":                    {"rag index"},
+		"rag_status":                   {"rag status"},
+		"rag_search":                   {"rag search"},
+		"repository_docs_registration": {"repo-docs register", "repo-docs rebind"},
+		"repository_docs_policy":       {"repo-docs policy"},
+		"repository_docs_plan":         {"repo-docs plan"},
+		"repository_docs_status":       {"repo-docs status"},
+		"repository_docs_search":       {"repo-docs search"},
+		"repository_docs_index":        {"repo-docs index"},
+		"admin_binding_plan_apply":     {"repo add", "repo set-scopes"},
+		"repository_local_bootstrap":   {"repo init-local"},
+		"repo_status":                  {"repo status"},
+		"cache_maintenance":            {"cache reset"},
+		"local_project_setup":          {"project init", "project register"},
+		"local_project_status":         {"project status"},
+		"local_project_get":            {"project get"},
+		"local_project_list":           {"project list"},
+		"local_project_history":        {"project history"},
+		"local_project_mutate":         {"project mutate"},
+		"local_project_search":         {"project search"},
+		"local_project_index":          {"project index"},
+		"local_project_backup":         {"project export", "project restore"},
+	}
+}

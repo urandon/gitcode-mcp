@@ -210,6 +210,7 @@ type options struct {
 	sourceRegistrationGeneration int64
 	repositoryPath               string
 	limit                        int
+	limitSet                     bool
 	offset                       int
 	lineStart                    int
 	lineEnd                      int
@@ -883,12 +884,24 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	}
 	flags.Visit(func(current *flag.Flag) {
 		switch current.Name {
+		case "limit":
+			opts.limitSet = true
 		case "body":
 			opts.bodySet = true
 		case "body-file":
 			opts.bodyFileSet = true
 		}
 	})
+	if command == "list" || command == "search" || command == "search_sources" {
+		if opts.limitSet && opts.limit == 0 {
+			return opts, nil, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}
+		}
+		limit, err := service.SourceQueryPage(opts.limit, opts.offset)
+		if err != nil {
+			return opts, nil, err
+		}
+		opts.limit = limit
+	}
 	opts.format = strings.ToLower(opts.format)
 	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
 		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
@@ -5616,7 +5629,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --mode MODE       hybrid (default) or full_text")
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind (issue, wiki, doc, task)")
 		fmt.Fprintln(w, "  --provenance P    filter by provenance (live, fixture, remote, projection, bridge)")
-		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --limit N         maximum results (default 20, range 1..100)")
 		fmt.Fprintln(w, "  --offset N        result offset")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
@@ -5628,7 +5641,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind")
 		fmt.Fprintln(w, "  --status STATUS   filter by status")
 		fmt.Fprintln(w, "  --provenance P    filter by provenance (live, fixture, remote, projection, bridge)")
-		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --limit N         maximum results (default 20, range 1..100)")
 		fmt.Fprintln(w, "  --offset N        result offset")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")

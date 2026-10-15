@@ -716,12 +716,9 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	if mode != SearchModeHybrid && mode != SearchModeFullText {
 		return SearchSourcesResult{}, ErrInvalidQuery{Field: "mode", Message: "mode must be hybrid or full_text"}
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 20
-	}
-	if req.Offset < 0 {
-		return SearchSourcesResult{}, ErrInvalidQuery{Field: "offset", Message: "offset must be non-negative"}
+	limit, err := SourceQueryPage(req.Limit, req.Offset)
+	if err != nil {
+		return SearchSourcesResult{}, err
 	}
 	lexicalLimit := limit + req.Offset
 	semanticLimit := lexicalLimit
@@ -1155,6 +1152,17 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 }
 
 func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (ListSourcesResult, error) {
+	limit, err := SourceQueryPage(req.Limit, req.Offset)
+	if err != nil {
+		return ListSourcesResult{}, err
+	}
+	req.Limit = limit
+	return s.listSources(ctx, req)
+}
+
+// Aggregate sync-status retains its historical unbounded omission contract.
+// Public list/search pagination must not silently truncate aggregate coverage.
+func (s *Service) listSources(ctx context.Context, req ListSourcesRequest) (ListSourcesResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "list")
 	if err != nil {
 		return ListSourcesResult{}, err
@@ -1324,7 +1332,7 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 	if err != nil {
 		return SyncStatusSummaryResult{}, err
 	}
-	listed, err := s.ListSources(ctx, req)
+	listed, err := s.listSources(ctx, req)
 	if err != nil {
 		if IsCacheEmpty(err) {
 			return SyncStatusSummaryResult{RepoID: repoID, CacheEmpty: true, Limit: req.Limit, Offset: req.Offset}, nil

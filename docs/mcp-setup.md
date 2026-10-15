@@ -26,6 +26,26 @@ profile and the existing disposable repository-document index; they never set
 up models or contact GitCode. See the linked G5 contract for bounds, exact
 entity citations and requested/effective-mode fallback.
 
+## Cached source query contract
+
+CLI `list` / `search` (`search_sources` alias) and MCP `list_sources` /
+`search_sources` share source filters and service results. Both accept
+`provenance` (`--provenance`) and extensible cached `kind` values, including
+locally ingested records. Omit a filter to include all values. A filter with no
+matching records is not a request to sync or repair the cache.
+
+Both default to 20 results, accept explicit limits 1..100 and a nonnegative
+offset. Continue explicitly with `offset`; CLI `list` no longer treats an
+omitted limit as an unbounded dump. Explicit zero/negative/excessive limits
+return `invalid_query`. Aggregate sync-status keeps its separate coverage
+contract and is not truncated by the source-list default.
+
+Search defaults to hybrid with visible fallback evidence; explicit `full_text`
+does not call an embedding provider. CLI JSON and MCP `structuredContent`
+contain the same service result, including provenance, citations and fallback.
+Error envelopes differ: CLI uses `failure_class` and an exit code, while MCP
+uses JSON-RPC `error.data.code`.
+
 ## Stdio mode
 
 ### Starting the server

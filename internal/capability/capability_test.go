@@ -2,6 +2,43 @@ package capability
 
 import "testing"
 
+func TestMaintenanceStatusUsesActualSharedCLIRead(t *testing.T) {
+	cap, ok := LookupByMCPName("maintenance_status")
+	if !ok || cap.CLIName != "service maintenance" || cap.ServiceCommand != "Maintenance.List" || !cap.CLI.Enabled || cap.Safety != SafetyReadOnly {
+		t.Fatal("maintenance_status must name the real CLI read, not the plan/enable namespace")
+	}
+	forms := CLIGroupedForms()
+	if len(forms["maintenance_status"]) != 1 || forms["maintenance_status"][0] != cap.CLIName {
+		t.Fatal("grouped maintenance read mapping differs")
+	}
+	for _, form := range forms["service_lifecycle"] {
+		if form == cap.CLIName {
+			t.Fatal("maintenance read incorrectly grouped as service lifecycle mutation")
+		}
+	}
+}
+
+func TestAllCapabilitiesDeclareUniqueIdentityAndSurfaceReasons(t *testing.T) {
+	ids, tools := map[string]bool{}, map[string]bool{}
+	for _, cap := range Capabilities() {
+		if cap.ID == "" || ids[cap.ID] || cap.ServiceCommand == "" || cap.Description == "" {
+			t.Fatalf("incomplete/duplicate capability %q", cap.ID)
+		}
+		ids[cap.ID] = true
+		if cap.MCP.Enabled {
+			if cap.MCPName == "" || tools[cap.MCPName] {
+				t.Fatalf("duplicate/missing tool for %s", cap.ID)
+			}
+			tools[cap.MCPName] = true
+		}
+		for name, surface := range map[string]Surface{"CLI": cap.CLI, "MCP": cap.MCP, "Admin": cap.UI} {
+			if !surface.Enabled && surface.DisabledReason == "" {
+				t.Errorf("%s has no %s exclusion reason", cap.ID, name)
+			}
+		}
+	}
+}
+
 func TestWriteCapabilitiesDeclareSurfaceReasons(t *testing.T) {
 	for _, cap := range WriteCapabilities() {
 		if cap.ID == "" || cap.ServiceCommand == "" || cap.Description == "" {

@@ -49,12 +49,30 @@ const snapshot = {
     { id: 'admin_feedback_setup', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply trusted feedback setup.', ui_enabled: true, cli_name: 'feedback setup', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
-    { id: 'admin_provider_smoke', category: 'admin', safety_class: 'read_only', description: 'Smoke provider.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_provider_smoke', category: 'admin', safety_class: 'read_only', description: 'Smoke provider.', ui_enabled: true, cli_name: 'rag', cli_enabled: false, mcp_enabled: false },
     { id: 'admin_rag_bounded_repair', category: 'admin', safety_class: 'background_job', description: 'Bounded RAG repair.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
     { id: 'repository_docs_search', category: 'rag', safety_class: 'read_only', description: 'Search registered repository docs.', ui_enabled: true, cli_name: 'repo-docs', cli_enabled: true, mcp_name: 'repository_docs_search', mcp_enabled: true },
     { id: 'repository_docs_index', category: 'rag', safety_class: 'background_job', description: 'Index registered repository docs.', ui_enabled: true, cli_name: 'repo-docs', cli_enabled: true, mcp_name: 'repository_docs_index', mcp_enabled: true }
   ]
 };
+
+test('capability catalog distinguishes shared source reads from browser-only smoke', async ({ page }) => {
+  const catalogSnapshot: any = structuredClone(snapshot);
+  catalogSnapshot.capabilities.push({ id: 'list_sources', category: 'read', safety_class: 'read_only', description: 'Cached source list with shared pagination and provenance.', ui_enabled: false, ui_reason: 'No standalone Admin action; composed browser workbenches have their own declared capability and bounds.', cli_name: 'list', cli_enabled: true, mcp_name: 'list_sources', mcp_enabled: true });
+  await mockAdmin(page, catalogSnapshot);
+  await page.goto('/?view=Diagnostics');
+  const table = page.getByRole('table', { name: 'Capability safety and availability' });
+  const source = table.getByRole('row').filter({ has: page.getByRole('rowheader', { name: /list_sources/ }) });
+  await expect(source.getByRole('cell').nth(0)).toHaveText('Read Only');
+  await expect(source.getByRole('cell').nth(1)).toContainText('No standalone Admin action');
+  await expect(source.getByRole('cell').nth(2)).toHaveText('list');
+  await expect(source.getByRole('cell').nth(3)).toHaveText('list_sources');
+  await expect(source.getByRole('button')).toHaveCount(0);
+  const smoke = table.getByRole('row').filter({ has: page.getByRole('rowheader', { name: /admin_provider_smoke/ }) });
+  await expect(smoke.getByRole('cell').nth(1)).toHaveText('Available');
+  await expect(smoke.getByRole('cell').nth(2)).toHaveText('Unavailable');
+  await expect(smoke.getByRole('cell').nth(3)).toHaveText('Unavailable');
+});
 
 test('canonical registration deep links redirect and conflict resolution requires an explicit candidate', async ({ page }) => {
   const conflictSnapshot: any = structuredClone(snapshot);
