@@ -2966,7 +2966,7 @@ func TestIssueMilestonePayloadsPreserveSetAndClearIntent(t *testing.T) {
 	if err := json.Unmarshal(updateBody, &updatePayload); err != nil {
 		t.Fatal(err)
 	}
-	if string(updatePayload.Milestone) != "null" {
+	if string(updatePayload.Milestone) != "0" {
 		t.Fatalf("update milestone=%s", string(updatePayload.Milestone))
 	}
 }

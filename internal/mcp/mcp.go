@@ -295,23 +295,24 @@ type rpcError struct {
 }
 
 type errorData struct {
-	Observation          *observability.QueryError `json:"observation,omitempty"`
-	Code                 string                    `json:"code"`
-	Message              string                    `json:"message"`
-	FailureClass         string                    `json:"failure_class,omitempty"`
-	HTTPAttempted        *bool                     `json:"http_attempted,omitempty"`
-	Operation            string                    `json:"operation,omitempty"`
-	RepoID               string                    `json:"repo_id,omitempty"`
-	StartedAt            string                    `json:"started_at,omitempty"`
-	PID                  int                       `json:"pid,omitempty"`
-	CacheRef             string                    `json:"cache_ref,omitempty"`
-	AccessMode           string                    `json:"access_mode,omitempty"`
-	Remediation          string                    `json:"remediation,omitempty"`
-	IdempotencyKey       string                    `json:"idempotency_key,omitempty"`
-	RemotePath           string                    `json:"remote_path,omitempty"`
-	WritePhase           string                    `json:"write_phase,omitempty"`
-	MutationAttempted    *bool                     `json:"mutation_attempted,omitempty"`
-	ProviderFailureClass string                    `json:"provider_failure_class,omitempty"`
+	IssueReadback        *gitcode.IssueUpdateReadback `json:"issue_readback,omitempty"`
+	Observation          *observability.QueryError    `json:"observation,omitempty"`
+	Code                 string                       `json:"code"`
+	Message              string                       `json:"message"`
+	FailureClass         string                       `json:"failure_class,omitempty"`
+	HTTPAttempted        *bool                        `json:"http_attempted,omitempty"`
+	Operation            string                       `json:"operation,omitempty"`
+	RepoID               string                       `json:"repo_id,omitempty"`
+	StartedAt            string                       `json:"started_at,omitempty"`
+	PID                  int                          `json:"pid,omitempty"`
+	CacheRef             string                       `json:"cache_ref,omitempty"`
+	AccessMode           string                       `json:"access_mode,omitempty"`
+	Remediation          string                       `json:"remediation,omitempty"`
+	IdempotencyKey       string                       `json:"idempotency_key,omitempty"`
+	RemotePath           string                       `json:"remote_path,omitempty"`
+	WritePhase           string                       `json:"write_phase,omitempty"`
+	MutationAttempted    *bool                        `json:"mutation_attempted,omitempty"`
+	ProviderFailureClass string                       `json:"provider_failure_class,omitempty"`
 }
 
 type toolDefinition struct {
@@ -2681,6 +2682,7 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 
 func (s *Server) writeOperationalError(id *json.RawMessage, err error, ctx domainErrorContext) {
 	data := classifyDomainError(err, ctx)
+	data.IssueReadback = gitcode.IssueReadbackFromError(err)
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
 		data.IdempotencyKey, data.RemotePath, data.WritePhase = writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase

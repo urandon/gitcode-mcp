@@ -1,6 +1,7 @@
 package gitcode
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -237,6 +238,31 @@ type ErrWriteMutationPhase struct {
 	Phase             string
 	MutationAttempted bool
 	Cause             error
+	IssueReadback     *IssueUpdateReadback
+}
+
+// IssueUpdateReadback is bounded evidence, not confirmation of a whole write.
+// It deliberately excludes source text, identifiers and provider response bodies.
+type IssueUpdateReadback struct {
+	State            string `json:"state"`
+	MilestonePresent bool   `json:"milestone_present"`
+	MilestoneMatches bool   `json:"milestone_matches"`
+}
+
+// IssueReadbackFromError exposes only a fresh canonical milestone mismatch.
+// A transport failure or a later retry without readback has no such evidence.
+func IssueReadbackFromError(err error) *IssueUpdateReadback {
+	var phase ErrWriteMutationPhase
+	var invalid ErrValidationFailed
+	if !errors.As(err, &phase) || phase.Phase != "readback" || phase.IssueReadback == nil ||
+		!errors.As(phase.Cause, &invalid) || invalid.Field != "milestone" {
+		return nil
+	}
+	result := *phase.IssueReadback
+	if result.State != "open" && result.State != "closed" {
+		result.State = "unknown"
+	}
+	return &result
 }
 
 func (e ErrWriteMutationPhase) Error() string {
