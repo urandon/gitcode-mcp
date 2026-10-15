@@ -520,7 +520,7 @@ var adminCapabilities = []Capability{
 		ID: "admin_binding_plan_apply", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
 		CLIName: "repo", ServiceCommand: "repo-add",
 		Description: "Plan and atomically add or update repository bindings without accepting browser-supplied cache paths.",
-		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `repo add`."), MCP: disabled("Repository binding mutation is not exposed through MCP."),
+		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `repo add` and scope-only `repo set-scopes`; full metadata updates use Admin plan/apply."), MCP: disabled("Repository binding mutation is not exposed through MCP."),
 	},
 	{
 		ID: "admin_registration_controls", Category: CategoryAdmin, Safety: SafetyBackgroundJob,

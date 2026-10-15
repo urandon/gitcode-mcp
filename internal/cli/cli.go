@@ -131,6 +131,7 @@ type queryService interface {
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	AddRepository(context.Context, service.AddRepositoryRequest) (service.RepositoryBinding, error)
+	SetRepositoryScopes(context.Context, string, []string) (service.RepositoryBinding, error)
 	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
 	GetRepositoryMetadata(context.Context, string) (service.RepositoryMetadataResult, error)
 	ListRepositoryLabels(context.Context, string) (service.RepositoryLabelsResult, error)
@@ -426,7 +427,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		if command == "repo" {
 			if sub, ok := firstArg(rest); ok {
 				switch sub {
-				case "add", "status", "init-local":
+				case "add", "set-scopes", "status", "init-local":
 					printLocalSubcommandHelp(command, sub, stdout)
 					return 0
 				}
@@ -867,6 +868,19 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
+	if command == "repo" && firstPositional(flags.Args()) == "set-scopes" {
+		var invalid string
+		flags.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "repo", "scopes", "cache-path", "format", "offline", "fixture", "help", "h":
+			default:
+				invalid = f.Name
+			}
+		})
+		if invalid != "" || len(flags.Args()) != 1 {
+			return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: "repo set-scopes accepts only --repo, --scopes, cache selection and output options"}
+		}
+	}
 	flags.Visit(func(current *flag.Flag) {
 		switch current.Name {
 		case "body":
@@ -937,7 +951,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "auth status":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "repo add", "repo status":
+			case "repo add", "repo set-scopes", "repo status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -2779,6 +2793,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "subcommand is required"})
 		}
 		switch sub {
+		case "set-scopes":
+			result, err := svc.SetRepositoryScopes(ctx, opts.repo, []string{opts.scopes})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderRepositoryBindingText)
 		case "add":
 			apiBaseURL := repositoryAPIBaseURL(opts.apiBaseURL, deps.Source)
 			result, err := svc.AddRepository(ctx, service.AddRepositoryRequest{RepoID: opts.repo, Owner: opts.owner, Name: opts.name, APIBaseURL: apiBaseURL, Scopes: []string{opts.scopes}, DisplayName: opts.displayName, Aliases: []string(opts.alias)})
@@ -6247,6 +6267,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Manage GitCode repository bindings.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  add         bind a GitCode repository to the cache")
+		fmt.Fprintln(w, "  set-scopes  replace scopes on an existing exact repository binding")
 		fmt.Fprintln(w, "  init-local  create repo-local cache config and bind the repository")
 		fmt.Fprintln(w, "  status      show repository binding status")
 		fmt.Fprintln(w)
@@ -6493,6 +6514,11 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Cancel a daemon job by id through local JSON-RPC IPC.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "repo set-scopes":
+		fmt.Fprintln(w, "Usage: gitcode-mcp repo set-scopes --repo REPO --scopes SCOPES [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w, "\nReplace scopes on an existing exact repository id; aliases are not mutation targets.")
+		fmt.Fprintln(w, "Preserves identity, endpoint, aliases, configuration and cached records. No daemon or GitCode access.")
+		fmt.Fprintln(w, "Scopes: issues, wiki; pulls/comments and PR aliases normalize to issues. Unknown or empty scopes fail.")
 	case "repo add":
 		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --scopes SCOPES [--api-base-url URL] [--alias ALIAS] [--display-name NAME]")
 		fmt.Fprintln(w)

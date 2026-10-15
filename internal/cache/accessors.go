@@ -41,6 +41,24 @@ func (s *SQLiteStore) UpsertRepo(ctx context.Context, repo RepositoryBinding) er
 	return s.AddRepository(ctx, repo)
 }
 
+// SetRepositoryScopes changes only scopes, never identity, aliases or content.
+// The caller holds the cache writer lease through canonical binding readback.
+func (s *SQLiteStore) SetRepositoryScopes(ctx context.Context, repoID string, scopes []RepositoryScope, now time.Time) error {
+	encoded, err := marshalJSON(scopes)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE repos SET scopes = ?, updated_at = ? WHERE repo_id = ?`, encoded, now.UTC().Format(time.RFC3339Nano), repoID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count == 0 {
+		return notFoundErr("repository", repoID)
+	}
+	return err
+}
+
 // UpdateRepository replaces mutable binding metadata and aliases atomically.
 // Repository removal remains a separate, unsupported product capability.
 func (s *SQLiteStore) UpdateRepository(ctx context.Context, repo RepositoryBinding) (err error) {
