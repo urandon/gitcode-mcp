@@ -356,6 +356,15 @@ test('schema recovery distinguishes unsafe refusal, interrupted upgrade, and com
   await expect(page.locator('body')).not.toContainText('/private/');
 });
 
+test('foreground preview list-page stop remains partial in coverage', async ({ page }) => {
+  const preview = structuredClone(snapshot);
+  preview.caches[0].repositories[0].coverage.tail = { state: 'partial', status: 'bounded', stop_reason: 'max_list_pages', pages_listed: 1 };
+  await mockAdmin(page, preview);
+  await page.goto('/?view=Caches');
+  await page.getByRole('button', { name: /Example repository/ }).click();
+  await expect(page.getByText('Partial · stopped by Max List Pages')).toBeVisible();
+});
+
 test('operator views keep coverage truth, deep links, and recovery states', async ({ page }) => {
   await mockAdmin(page);
   await page.goto('/');

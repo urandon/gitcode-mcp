@@ -55,7 +55,7 @@ func parityCLI(t *testing.T, svc queryService, args []string) (json.RawMessage, 
 	var out, stderr bytes.Buffer
 	args = append(args, "--repo", "fixture", "--format", "json", "--offline")
 	code := executeWithFactoryAndDeps(args, &out, &stderr, factory, localCommandDeps{Source: src})
-	if code != 0 {
+	if code != 0 && out.Len() == 0 {
 		return append(json.RawMessage(nil), stderr.Bytes()...), code
 	}
 	return append(json.RawMessage(nil), out.Bytes()...), code
@@ -210,7 +210,7 @@ func TestBoundedSyncDelegationParity(t *testing.T) {
 	}
 }
 
-func TestSyncDefaultKnownExceptionIssue215(t *testing.T) {
+func TestSyncDefaultDelegationParity(t *testing.T) {
 	spy := &paritySyncSpy{Service: parityCache(t)}
 	_, exit := parityCLI(t, spy, []string{"sync", "--issues", "--progress", "off"})
 	_, failure := parityMCPCall(t, "sync_live", map[string]any{"issues": true}, func(in io.Reader, out io.Writer) *mcp.Server {
@@ -219,11 +219,10 @@ func TestSyncDefaultKnownExceptionIssue215(t *testing.T) {
 	if exit != 0 || failure != "" || len(spy.requests) != 2 {
 		t.Fatal("sync default triage failed to delegate")
 	}
-	a, b := spy.requests[0], spy.requests[1]
-	// #215 owns the work-budget/continuation decision. Keep this known exception
-	// visible rather than silently broadening MCP into an unlimited backfill.
-	if a.PerPage != 100 || a.Bounds == nil || b.PerPage != 25 || b.Bounds != nil {
-		t.Fatal("known default-sync exception changed; update #215 and its shared contract")
+	for _, req := range spy.requests {
+		if req.PerPage != 100 || req.Bounds == nil || req.Bounds.MaxPages != 1 || req.Bounds.MaxRecords != 100 || req.Bounds.MaxListPages != 1 {
+			t.Fatal("foreground sync omission must delegate the same finite collection slice")
+		}
 	}
 }
 

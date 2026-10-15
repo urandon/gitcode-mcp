@@ -4,6 +4,7 @@ import { cliHandoff, humanize, isSnapshotStale, jobNextAction, laneSummary, rela
 describe('admin presentation helpers', () => {
   it('keeps bounded tail language explicitly partial', () => {
     expect(laneSummary('tail', { state: 'partial', status: 'backfilling', stop_reason: 'max_pages' })).toBe('Partial · stopped by Max Pages');
+    expect(laneSummary('tail', { state: 'partial', status: 'bounded', stop_reason: 'max_list_pages' })).toBe('Partial · stopped by Max List Pages');
     expect(laneSummary('tail', { state: 'current', status: 'complete' })).toContain('end-of-collection');
   });
 

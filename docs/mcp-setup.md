@@ -294,7 +294,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `repository_docs_status` | Inspect metadata-only revision-set and vector coverage using opaque Git/worktree references; `repo_id` auto-selects a sole authority |
 | `repository_docs_search` | Search exact local Git blobs with bounded digest-verified citations; `repo_id` auto-selects a sole authority and `mode=fulltext` requires no provider or index |
 | `repository_docs_index` | Submit daemon-owned indexing; `repo_id` auto-selects a sole authority, while ambiguous cases require an exact opaque selector; document text is never persisted |
-| `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
+| `sync_live` | Synchronize selected collections; foreground omission is a bounded preview with traversal/continuation evidence |
 | `feedback_status` | Report side-effect-free preparation/submission readiness, build-owned destination and prerequisite handoffs |
 | `prepare_feedback` | Prepare and deduplicate a context-rich public-safe dogfood report; incomplete context returns targeted questions without creating an issue |
 | `submit_feedback` | Submit a complete prepared report through the audited write lifecycle; missing context is a hard no-write boundary |
@@ -443,6 +443,17 @@ lock-owner hint. `cache_ref` is an opaque correlation value derived from the
 durable cache identity when available.
 
 Before `add_pr_review_comment` performs a POST, it requires the parent `PR-<number>` record in the selected cache. A missing parent returns typed `parent_pr_not_cached` with an MCP-first targeted-sync remediation (`sync_live` with `pulls=true` and `remote_alias=pr:N`) plus the CLI fallback; no audit claim or provider write has occurred. Retry the review write with the same idempotency key after syncing `pr:N`.
+
+Foreground collection `sync_live` and CLI `sync` share page size 100 (explicit
+`per_page`: 1–100). Omitting both max bounds, or setting both to zero, requests
+one bounded slice per selected collection, not unlimited backfill. Actual issue
+and PR list pages are capped at one, including an unchanged cached prefix.
+`traversal_status`, `stop_reason`, list counters, and `continuation` distinguish
+successful partial coverage from a proven complete tail. Continue with explicit
+larger bounds or durable maintenance; repeating the preview is not a cursor.
+A caller deadline is preserved; without one, foreground collection work has a
+30-second operation budget. Exact targets and daemon stages retain their own
+contracts. See [Cache And Sync Model](cache-and-sync-model.md).
 
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.
 

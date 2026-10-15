@@ -35,7 +35,7 @@ func CoreCapabilities() []Capability {
 		read("service_events", "service", "Observability.Events", "Bounded execution ledger; opaque bound cursor and finite query errors."),
 		read("auth_status", "auth", "AuthStatus", "Report redacted credential readiness; never returns a secret."),
 		read("doctor", "doctor", "Doctor", "Read finite local diagnostics and handoffs without setup."),
-		read("sync_live", "sync", "SyncLive", "Explicit bounded provider-to-cache collection synchronization."),
+		read("sync_live", "sync", "SyncLive", "Explicit provider-to-cache synchronization. Foreground omission is a bounded one-slice preview; inspect traversal/continuation, expand with explicit bounds or use durable maintenance."),
 		read("index_repo", "index", "Index", "Explicit derived cache index maintenance."),
 		read("enable_cache_maintenance", "maintenance", "Maintenance.Enable", "Confirm and apply an explicit local maintenance plan with a durable caller key."),
 		read("service_job_cancel", "service", "Jobs.Cancel", "Explicit coordinator job cancellation."),

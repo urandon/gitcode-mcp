@@ -1901,6 +1901,10 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
+		if bounds.MaxListPages > 0 && result.PagesListed >= bounds.MaxListPages {
+			result.StopReason, result.TraversalStatus = "max_list_pages", "bounded"
+			break
+		}
 		if bounds.MaxPages > 0 && pagesAdvanced >= bounds.MaxPages {
 			result.StopReason = "max_pages"
 			result.TraversalStatus = "bounded"
@@ -2863,6 +2867,10 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "pull_request", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
+		if bounds.MaxListPages > 0 && result.PagesListed >= bounds.MaxListPages {
+			result.StopReason, result.TraversalStatus = "max_list_pages", "bounded"
+			break
+		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
 			result.StopReason = "max_pages"
 			result.TraversalStatus = "bounded"
@@ -3809,11 +3817,13 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *Sync
 		Failures: make([]ResourceError, 0),
 	}
 	if issuesResult != nil {
+		MergeSyncTraversal(aggregated, issuesResult)
 		aggregated.Results = append(aggregated.Results, issuesResult.Results...)
 		aggregated.Failures = append(aggregated.Failures, issuesResult.Failures...)
 		aggregated.IssueComments = issuesResult.IssueComments
 	}
 	if wikiResult != nil {
+		MergeSyncTraversal(aggregated, wikiResult)
 		aggregated.Results = append(aggregated.Results, wikiResult.Results...)
 		aggregated.Failures = append(aggregated.Failures, wikiResult.Failures...)
 	}

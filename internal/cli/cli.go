@@ -902,6 +902,11 @@ func parseOptions(command string, args []string) (options, []string, error) {
 		}
 		opts.limit = limit
 	}
+	if command == "sync" && !opts.daemon && !opts.detach && opts.id == "" && opts.input == "" {
+		if _, err := bulkSyncRequest(opts); err != nil {
+			return opts, nil, err
+		}
+	}
 	opts.format = strings.ToLower(opts.format)
 	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
 		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
@@ -2686,7 +2691,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return render(stdout, opts.format, result, renderSyncText)
 		}
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || opts.issueComments || opts.prComments || (opts.id == "" && opts.input == "") {
-			req := bulkSyncRequest(opts)
+			req, err := bulkSyncRequest(opts)
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			ctx, cancel := service.ForegroundSyncContext(ctx)
+			defer cancel()
 			started := time.Now().UTC()
 			progressCh, stopProgress := startSyncProgress(stderr, started, syncProgressMode(opts, stderr))
 			req.ProgressChan = progressCh
@@ -3331,12 +3341,8 @@ func syncScopedKey(base string, scope string) string {
 	return base + "-" + scope
 }
 
-func bulkSyncRequest(opts options) service.BulkSyncRequest {
-	perPage := opts.perPage
-	if perPage <= 0 {
-		perPage = 100
-	}
-	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
+func bulkSyncRequest(opts options) (service.BulkSyncRequest, error) {
+	return service.ForegroundSyncRequest(opts.repo, opts.idempotencyKey, opts.maxPages, opts.maxRecords, opts.perPage)
 }
 
 func syncJobRequest(opts options) servicectl.StartSyncJobRequest {
@@ -3718,44 +3724,7 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	dst.Failures = append(dst.Failures, src.Failures...)
 	dst.SuccessCount = len(dst.Results)
 	dst.FailureCount = len(dst.Failures)
-	dst.PagesListed += src.PagesListed
-	dst.RecordsListed += src.RecordsListed
-	dst.SkippedByWatermark += src.SkippedByWatermark
-	if src.StopReason != "" {
-		if dst.StopReason == "" {
-			dst.StopReason = src.StopReason
-		} else if dst.StopReason != src.StopReason {
-			dst.StopReason = "mixed"
-		}
-	}
-	if src.Ordering != "" {
-		if dst.Ordering == "" {
-			dst.Ordering = src.Ordering
-		} else if dst.Ordering != src.Ordering {
-			dst.Ordering = "mixed"
-		}
-	}
-	if src.TraversalStatus != "" {
-		if dst.TraversalStatus == "" {
-			dst.TraversalStatus = src.TraversalStatus
-		} else if dst.TraversalStatus != src.TraversalStatus {
-			dst.TraversalStatus = "mixed"
-		}
-	}
-	if src.WatermarkStatus != "" {
-		if dst.WatermarkStatus == "" {
-			dst.WatermarkStatus = src.WatermarkStatus
-		} else if dst.WatermarkStatus != src.WatermarkStatus {
-			dst.WatermarkStatus = "mixed"
-		}
-	}
-	if src.WatermarkReason != "" {
-		if dst.WatermarkReason == "" {
-			dst.WatermarkReason = src.WatermarkReason
-		} else if dst.WatermarkReason != src.WatermarkReason {
-			dst.WatermarkReason = "mixed"
-		}
-	}
+	service.MergeSyncTraversal(dst, src)
 	if src.IssueComments != nil {
 		queue := *src.IssueComments
 		dst.IssueComments = &queue
@@ -3778,6 +3747,7 @@ func mergeSyncError(existing error, result *service.SyncResourcesResult, err err
 }
 
 type syncResourcesCompactSummary struct {
+	Continuation       string                            `json:"continuation,omitempty"`
 	HTTPAttempted      *bool                             `json:"http_attempted,omitempty"`
 	Status             string                            `json:"status"`
 	FailureClass       string                            `json:"failure_class,omitempty"`
@@ -3947,6 +3917,7 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 		summary.TraversalStatus = result.TraversalStatus
 		summary.WatermarkStatus = result.WatermarkStatus
 		summary.WatermarkReason = result.WatermarkReason
+		summary.Continuation = service.SyncContinuation(result)
 		summary.IssueComments = result.IssueComments
 		for _, item := range result.Results {
 			summary.Counts.Fetched += item.Counts.Fetched
@@ -4051,6 +4022,9 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 	}
 	if summary.StopReason != "" {
 		fmt.Fprintf(w, " stop_reason=%s", summary.StopReason)
+	}
+	if summary.Continuation != "" {
+		fmt.Fprintf(w, " continuation=%s", summary.Continuation)
 	}
 	if summary.TraversalStatus != "" {
 		fmt.Fprintf(w, " traversal_status=%s", summary.TraversalStatus)
@@ -5733,9 +5707,11 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")
 		fmt.Fprintln(w, "  --detach            start collection sync as a service-owned job and return the job id")
 		fmt.Fprintln(w, "  --index             build index after sync")
-		fmt.Fprintln(w, "  --max-pages N       collection-only page bound; omit to traverse until end/frontier")
-		fmt.Fprintln(w, "  --max-records N     collection-only record bound; omit to traverse until end/frontier")
-		fmt.Fprintln(w, "  --per-page N        collection-only records per page")
+		fmt.Fprintln(w, "  --max-pages N       explicit collection coverage bound; expand from head, never a raw page cursor")
+		fmt.Fprintln(w, "  --max-records N     explicit collection record/work bound")
+		fmt.Fprintln(w, "  --per-page N        collection-only records per page, 1..100 (default 100)")
+		fmt.Fprintln(w, "  Foreground omission is one bounded slice; inspect traversal_status/stop_reason/continuation.")
+		fmt.Fprintln(w, "  Continue with explicit larger bounds or durable maintenance. Bare callers get a 30s operation deadline.")
 		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
 		fmt.Fprintln(w, "  --quiet             suppress non-result progress output")
 		fmt.Fprintln(w, "  --id ID             stable record id")

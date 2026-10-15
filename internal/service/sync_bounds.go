@@ -14,6 +14,7 @@ type ProgressEvent = progress.Event
 
 type SyncBounds struct {
 	MaxPages     int                  `json:"-"`
+	MaxListPages int                  `json:"-"` // Hard list-traffic cap, unlike issue coverage MaxPages.
 	MaxRecords   int                  `json:"-"`
 	MaxBytes     int64                `json:"-"`
 	ProgressChan chan<- ProgressEvent `json:"-"`
