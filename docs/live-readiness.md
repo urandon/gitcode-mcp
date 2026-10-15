@@ -74,7 +74,10 @@ Live sync fetches issue records, comments, and wiki pages through the live GitCo
 
 Live writes require both provider readiness and local cache write readiness. Credential and repository binding checks can pass while the selected cache is still schema-blocked for writes. In that case write commands fail before any provider HTTP request with `failure_class: cache_schema_blocked`, `http_attempted: false`, and remediation to run `gitcode-mcp migrate-cache --confirm --cache-path <selected-cache>` or retry with `--cache-path <alternate-current-cache>`. The command must not bypass cache/audit safety by writing to the provider without a writer-capable cache.
 
-For large repositories, bound collection work explicitly:
+CLI and MCP foreground collection sync default to a bounded preview: page size
+100, one page/one page-size of work per selected collection. Repeating the
+preview does not advance an uncached tail. Expand coverage explicitly or use
+durable maintenance:
 
 ```sh
 gitcode-mcp --timeout 30s sync --repo "YOUR_REPO" --issues --max-pages 3 --per-page 50
@@ -82,7 +85,7 @@ gitcode-mcp --timeout 30s sync --repo "YOUR_REPO" --issues --max-pages 3 --per-p
 
 The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. During bulk sync, progress lines are written to stderr with the current collection, page, committed record count, and elapsed time. If the operation times out or is cancelled after some records are written, the command reports partial counts, grouped failures, elapsed time, and typed diagnostics while keeping successful records in the cache.
 
-Use `Ctrl-C` to cancel the current foreground sync process, or start sync with `--timeout DURATION` when an automatic stop is required. Cancelled and timed-out collection runs persist a non-complete frontier, so rerunning sync later will not treat the old tail as cache-covered. To resume backfill after a bounded or cancelled run, rerun the same collection sync without `--max-pages` or `--max-records`; it will list from the newest page, skip unchanged detail work by revision, continue past the previous bounded frontier, and record a complete frontier only after reaching the collection tail or a safe complete watermark.
+Use `Ctrl-C` to cancel foreground sync, or `--timeout DURATION` to choose its deadline. A foreground MCP caller without a deadline receives a 30-second operation budget; an explicit caller deadline is preserved. Cancelled and timed-out runs persist a non-complete frontier, so the old tail is not treated as covered. To continue backfill, rerun with explicit larger `--max-pages`/`--max-records` bounds or use durable maintenance. Expanded traversal restarts at the newest page, skips unchanged detail work by revision, and records a complete frontier only after reaching the tail or a safe complete watermark. Inspect `traversal_status`, `stop_reason`, and the returned `continuation` hint instead of treating a successful bounded slice as complete coverage.
 
 Bulk sync text output defaults to an aggregate summary:
 

@@ -3491,20 +3491,23 @@ func TestMarkdownBodyFileResolutionIsRetryStable(t *testing.T) {
 	}
 }
 
-func TestBulkSyncRequestUsesTraversalBoundsByDefault(t *testing.T) {
-	req := bulkSyncRequest(options{repo: "fixture-a"})
+func TestBulkSyncRequestUsesFinitePreviewByDefault(t *testing.T) {
+	req, err := bulkSyncRequest(options{repo: "fixture-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if req.Bounds == nil {
 		t.Fatal("Bounds is nil, want default traversal bounds for collection sync")
 	}
-	if req.Bounds.MaxPages != 0 || req.Bounds.MaxRecords != 0 {
-		t.Fatalf("Bounds = %#v, want unlimited traversal bounds", req.Bounds)
+	if req.Bounds.MaxPages != 1 || req.Bounds.MaxRecords != 100 || req.Bounds.MaxListPages != 1 {
+		t.Fatalf("Bounds = %#v, want one finite preview slice", req.Bounds)
 	}
 	if req.PerPage != 100 {
 		t.Fatalf("PerPage = %d, want default 100", req.PerPage)
 	}
 
-	limited := bulkSyncRequest(options{repo: "fixture-a", perPage: 25, maxPages: 2, maxRecords: 40})
-	if limited.Bounds == nil || limited.Bounds.MaxPages != 2 || limited.Bounds.MaxRecords != 40 || limited.PerPage != 25 {
+	limited, err := bulkSyncRequest(options{repo: "fixture-a", perPage: 25, maxPages: 2, maxRecords: 40})
+	if err != nil || limited.Bounds == nil || limited.Bounds.MaxPages != 2 || limited.Bounds.MaxRecords != 40 || limited.Bounds.MaxListPages != 0 || limited.PerPage != 25 {
 		t.Fatalf("limited request = %#v", limited)
 	}
 }

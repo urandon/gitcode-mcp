@@ -144,17 +144,26 @@ type syncLiveCommentSelection struct {
 }
 
 type syncLiveResult struct {
-	RepoID        string                            `json:"repo_id"`
-	Collections   []string                          `json:"collections"`
-	FreshCount    int                               `json:"fresh_count"`
-	SuccessCount  int                               `json:"success_count"`
-	FailureCount  int                               `json:"failure_count"`
-	Results       []service.SyncResult              `json:"results,omitempty"`
-	Failures      []service.ResourceError           `json:"failures,omitempty"`
-	IssueComments *service.IssueCommentQueueSummary `json:"issue_comments,omitempty"`
-	Job           *servicectl.Job                   `json:"job,omitempty"`
-	Diagnostics   []lifecycleDiagnostic             `json:"diagnostics,omitempty"`
-	GeneratedAt   time.Time                         `json:"generated_at"`
+	PagesListed        int                               `json:"pages_listed,omitempty"`
+	RecordsListed      int                               `json:"records_listed,omitempty"`
+	SkippedByWatermark int                               `json:"skipped_by_watermark,omitempty"`
+	TraversalStatus    string                            `json:"traversal_status,omitempty"`
+	StopReason         string                            `json:"stop_reason,omitempty"`
+	Ordering           string                            `json:"ordering,omitempty"`
+	WatermarkStatus    string                            `json:"watermark_status,omitempty"`
+	WatermarkReason    string                            `json:"watermark_reason,omitempty"`
+	Continuation       string                            `json:"continuation,omitempty"`
+	RepoID             string                            `json:"repo_id"`
+	Collections        []string                          `json:"collections"`
+	FreshCount         int                               `json:"fresh_count"`
+	SuccessCount       int                               `json:"success_count"`
+	FailureCount       int                               `json:"failure_count"`
+	Results            []service.SyncResult              `json:"results,omitempty"`
+	Failures           []service.ResourceError           `json:"failures,omitempty"`
+	IssueComments      *service.IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+	Job                *servicectl.Job                   `json:"job,omitempty"`
+	Diagnostics        []lifecycleDiagnostic             `json:"diagnostics,omitempty"`
+	GeneratedAt        time.Time                         `json:"generated_at"`
 }
 
 func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -168,7 +177,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		return
 	}
 	if a.MaxPages < 0 || a.MaxRecords < 0 || a.PerPage < 0 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "bounds must be non-negative"})
+		s.writeOperationalError(id, service.ErrInvalidQuery{Field: "bounds", Message: "bounds must be non-negative"}, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
 		return
 	}
 	commentSelection, message := resolveSyncLiveCommentSelection(a)
@@ -183,6 +192,12 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	if message := syncLiveTargetError(a); message != "" {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
 		return
+	}
+	if !a.Daemon && !a.Detach && strings.TrimSpace(a.RemoteAlias) == "" {
+		if _, err := syncLiveBulkRequest(a); err != nil {
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
+			return
+		}
 	}
 	selected := syncLiveCollections(a, commentSelection)
 	result := syncLiveResult{RepoID: a.RepoID, Collections: selected, GeneratedAt: time.Now().UTC()}
@@ -227,7 +242,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	if strings.TrimSpace(a.RemoteAlias) != "" {
 		if commentSelection.PR && syncLiveRemoteAliasSurface(a.RemoteAlias) == "pull_request" {
 			part, err := s.svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
-			appendBulkSyncResult(&result, part)
+			appendBulkSyncResult(&result, part, err)
 			result.Collections = []string{"pr_comments"}
 			if err != nil {
 				var contention cache.ErrLockContention
@@ -269,7 +284,13 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		selected = []string{"issues", "wiki"}
 		result.Collections = selected
 	}
-	req := syncLiveBulkRequest(a)
+	req, err := syncLiveBulkRequest(a)
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
+		return
+	}
+	ctx, cancel := service.ForegroundSyncContext(ctx)
+	defer cancel()
 	var syncErr error
 	var admissionErr error
 	runBulk := func(collection string, fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
@@ -277,7 +298,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			return
 		}
 		part, err := fn(ctx, req)
-		appendBulkSyncResult(&result, part)
+		appendBulkSyncResult(&result, part, err)
 		if err != nil {
 			var contention cache.ErrLockContention
 			if part == nil && errors.As(err, &contention) {
@@ -325,16 +346,8 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
-func syncLiveBulkRequest(a syncLiveArgs) service.BulkSyncRequest {
-	perPage := a.PerPage
-	if perPage <= 0 {
-		perPage = 25
-	}
-	req := service.BulkSyncRequest{RepoID: a.RepoID, IdempotencyKey: strings.TrimSpace(a.IdempotencyKey), PerPage: perPage}
-	if a.MaxPages > 0 || a.MaxRecords > 0 {
-		req.Bounds = &service.SyncBounds{MaxPages: a.MaxPages, MaxRecords: a.MaxRecords}
-	}
-	return req
+func syncLiveBulkRequest(a syncLiveArgs) (service.BulkSyncRequest, error) {
+	return service.ForegroundSyncRequest(a.RepoID, a.IdempotencyKey, a.MaxPages, a.MaxRecords, a.PerPage)
 }
 
 func syncLiveJobRequest(a syncLiveArgs, comments syncLiveCommentSelection) servicectl.StartSyncJobRequest {
@@ -353,8 +366,17 @@ func syncLiveJobRequest(a syncLiveArgs, comments syncLiveCommentSelection) servi
 	}
 }
 
-func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult) {
-	if dst == nil || src == nil {
+func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult, operationErrors ...error) {
+	if dst == nil {
+		return
+	}
+	coverage := service.SyncResourcesResult{PagesListed: dst.PagesListed, RecordsListed: dst.RecordsListed, SkippedByWatermark: dst.SkippedByWatermark, TraversalStatus: dst.TraversalStatus, StopReason: dst.StopReason, Ordering: dst.Ordering, WatermarkStatus: dst.WatermarkStatus, WatermarkReason: dst.WatermarkReason}
+	service.MergeSyncTraversal(&coverage, src, operationErrors...)
+	dst.PagesListed, dst.RecordsListed, dst.SkippedByWatermark = coverage.PagesListed, coverage.RecordsListed, coverage.SkippedByWatermark
+	dst.TraversalStatus, dst.StopReason, dst.Ordering = coverage.TraversalStatus, coverage.StopReason, coverage.Ordering
+	dst.WatermarkStatus, dst.WatermarkReason = coverage.WatermarkStatus, coverage.WatermarkReason
+	dst.Continuation = service.SyncContinuation(&coverage)
+	if src == nil {
 		return
 	}
 	dst.Results = append(dst.Results, src.Results...)
