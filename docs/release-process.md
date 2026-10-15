@@ -29,9 +29,19 @@ gitcode-mcp 0.1.0
 
 ```sh
 go test ./...
-python3 -m unittest discover -s scripts/release -p 'test_*.py'
+python3 -B -m unittest discover -s scripts/release -p 'test_*.py'
 git diff --check
 ```
+
+The explicit `-B` keeps fixture imports from creating source-tree bytecode even
+when the interpreter has no external cache prefix. `git diff` alone does not
+detect untracked files: the release builder also checks full Git status and
+rejects tracked, staged or untracked changes before invoking Go or creating
+artifacts. It prints a finite cleanliness diagnostic, not filenames or raw
+status, and never cleans user files or disables Go VCS stamping.
+The check repeats immediately before and after each Go build, so generated
+artifacts in an unignored custom directory or source changes during a build
+cannot silently reach packaging.
 
 3. Create and push a tag in GitCode:
 
@@ -81,7 +91,11 @@ To build a single target:
 GOOS=linux GOARCH=amd64 ./scripts/release/build.sh
 ```
 
-The script writes artifacts to `dist/` and generates `dist/checksums.txt`.
+Start from a clean Git checkout. The script writes artifacts to ignored `dist/`
+and generates `dist/checksums.txt`; it refuses a dirty source checkout. If the
+check fails, inspect local Git status and resolve the changes explicitly before
+retrying. An overridden artifact directory inside the checkout must also be
+ignored or outside the source tree to keep subsequent target builds clean.
 
 Preview the next release notes without creating a tag:
 
@@ -107,7 +121,7 @@ section. The generated file itself is not committed.
 Run the generator fixture tests locally:
 
 ```sh
-python3 -m unittest discover -s scripts/release -p 'test_*.py'
+python3 -B -m unittest discover -s scripts/release -p 'test_*.py'
 ```
 
 The generator emits deterministic Markdown and reports its SHA-256 fingerprint.
@@ -123,6 +137,10 @@ After both publishers complete:
    `checksums.txt`; use the GitHub mirror as a fallback.
 3. Verify the checksum.
 4. Run `gitcode-mcp --version`.
+5. Inspect `go version -m` for each extracted target binary: `vcs.revision` must
+   match the tag commit and `vcs.modified` must be `false`. Check every archive,
+   not only the executable that runs on the local host. A dirty stamp leaves
+   release verification incomplete; do not hide it by disabling VCS metadata.
 
 Release assets must not include local config, credentials, cache files, or repository-local `.gitcode/mcp` data.
 

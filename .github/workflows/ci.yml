@@ -89,7 +89,7 @@ jobs:
           GITCODE_MCP_NATIVE_FIXTURE_BINARY="$RUNNER_TEMP/native-observation-daemon" GITCODE_MCP_NATIVE_SYSTEMD_ISOLATED=1 GITCODE_MCP_NATIVE_OBSERVATION_UPGRADE=1 go test ./internal/servicectl -run '^TestNativeObservationUpgradeRecovery$' -count=1 -timeout=180s
 
       - name: Run release automation tests
-        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
+        run: python3 -B -m unittest discover -s scripts/release -p 'test_*.py'
 
       - name: Check diff whitespace
         run: git diff --check
