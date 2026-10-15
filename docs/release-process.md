@@ -97,6 +97,14 @@ check fails, inspect local Git status and resolve the changes explicitly before
 retrying. An overridden artifact directory inside the checkout must also be
 ignored or outside the source tree to keep subsequent target builds clean.
 
+The Unix archive command explicitly sets `COPYFILE_DISABLE=1`, so native macOS
+tar does not serialize host extended attributes as AppleDouble entries. No
+caller environment setup is required. Windows ZIP packaging is unchanged.
+Validate actual archive members with an independent reader (for example Python
+`tarfile`/`zipfile`), not only native `tar -t`, which can hide metadata entries.
+Each archive contains only its package directory, `README.txt`, and the target
+executable; Unix executable mode remains `0755`.
+
 Preview the next release notes without creating a tag:
 
 ```sh
@@ -141,6 +149,10 @@ After both publishers complete:
    match the tag commit and `vcs.modified` must be `false`. Check every archive,
    not only the executable that runs on the local host. A dirty stamp leaves
    release verification incomplete; do not hide it by disabling VCS metadata.
+6. Inspect actual member inventory in every archive, including Windows ZIP:
+   only the package directory, README and executable are allowed. Reject
+   AppleDouble or other unexpected metadata. Verify extracted executable bytes
+   against the inspected binary and check Unix executable mode.
 
 Release assets must not include local config, credentials, cache files, or repository-local `.gitcode/mcp` data.
 
