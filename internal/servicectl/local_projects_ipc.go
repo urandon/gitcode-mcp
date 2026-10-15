@@ -30,6 +30,24 @@ func DecodeLocalProjectJSON(raw []byte, dst any) error {
 	return nil
 }
 
+// DecodeLocalProjectLinks is the CLI's array-shaped metadata boundary. Object
+// requests keep their own closed shape; null roots/items and aliased, duplicate
+// or unknown fields never become silently empty link metadata.
+func DecodeLocalProjectLinks(raw []byte) ([]localgit.Reference, error) {
+	invalid := localHostError("invalid_argument")
+	var items []json.RawMessage
+	if len(raw) > maxRPCRequestBytes || !utf8.Valid(raw) || strictObservationResponse(raw, &items) != nil || items == nil || len(items) > 64 {
+		return nil, invalid
+	}
+	links := make([]localgit.Reference, len(items))
+	for i, item := range items {
+		if !localSearchRequestShape(item, "kind", "id") || strictObservationResponse(item, &links[i]) != nil {
+			return nil, invalid
+		}
+	}
+	return links, nil
+}
+
 func localProjectMethod(method string) bool { return strings.HasPrefix(method, "LocalProjects.") }
 
 func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw []byte) (any, error) {

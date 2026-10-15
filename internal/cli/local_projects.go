@@ -182,7 +182,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		}
 		return 0
 	}
-	eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+	eff, err := config.LoadLocalProjectEffective(deps.Source)
 	if err != nil {
 		return writeError(stderr, format, config.LocalProjectConfigError{})
 	}
@@ -242,8 +242,11 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		if labels != "" {
 			mut.Labels = strings.Split(labels, ",")
 		}
-		if links != "" && servicectl.DecodeLocalProjectJSON([]byte(links), &mut.Links) != nil {
-			return writeError(stderr, format, invalid())
+		if seen["links"] {
+			mut.Links, err = servicectl.DecodeLocalProjectLinks([]byte(links))
+			if err != nil {
+				return writeError(stderr, format, invalid())
+			}
 		}
 		mut.ID = q.ID
 		method += "Mutate"

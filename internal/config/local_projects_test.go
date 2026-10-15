@@ -3,9 +3,50 @@ package config
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+type localEffectiveSource struct{ Source }
+
+func (s localEffectiveSource) Env(key string) string {
+	if key == EnvToken {
+		panic("local configuration consulted credentials")
+	}
+	return s.Source.Env(key)
+}
+func (s localEffectiveSource) WorkingDir() (string, error) {
+	panic("explicit local configuration discovered cwd")
+}
+
+func TestLocalProjectEffectivePreservesTrustedOverrides(t *testing.T) {
+	src := newMemorySource(t)
+	path := filepath.Join(src.configDir, "local.yaml")
+	src.env[EnvMCPConfigPath] = path
+	src.files[path] = []byte("service: {mode: local}\nlocal_projects:\n  lab: {backend: local_git, project_id: lab, storage_ref: data, ref: refs/heads/main, rag_profile: disabled}\n")
+	src.env[EnvServiceRuntimeDir] = filepath.Join(src.cacheDir, "runtime")
+	src.env[EnvMCPCacheDir] = filepath.Join(src.cacheDir, "derived")
+	src.env[EnvMCPToolAccess] = "read"
+	src.env[EnvRAGProfile] = "fixture"
+	src.env[EnvRAGModelStore] = filepath.Join(src.cacheDir, "models")
+	src.env[EnvRAGProviderEndpoint] = "http://127.0.0.1:11434"
+	ordinary, err := LoadEffective(src, Overrides{})
+	if err != nil {
+		t.Fatal("trusted fixture unavailable")
+	}
+	local, err := LoadLocalProjectEffective(localEffectiveSource{src})
+	if err != nil || !reflect.DeepEqual(local, ordinary) || local.Config.MCPToolAccess != "read" || local.Config.Service.RuntimeDir != src.env[EnvServiceRuntimeDir] || local.Config.CachePath != filepath.Join(src.env[EnvMCPCacheDir], "cache.db") || local.Config.RAG.DefaultProfile != "fixture" {
+		t.Fatal("explicit local loading changed trusted override semantics")
+	}
+	// Even before local mode is configured, explicit project intent does not
+	// inspect cwd. The caller can refuse the non-local mode without fallback.
+	src.files[path] = []byte("cache_mode: global\n")
+	local, err = LoadLocalProjectEffective(localEffectiveSource{src})
+	if err != nil || local.Config.Service.Mode == ServiceModeLocal || local.RepoRoot != "" {
+		t.Fatal("explicit local intent discovered remote repository configuration")
+	}
+}
 
 func TestLocalProjectConfigOpaqueMachineBindings(t *testing.T) {
 	src := newMemorySource(t)

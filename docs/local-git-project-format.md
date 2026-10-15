@@ -281,6 +281,11 @@ contract above. CLI metadata flags are `--state`, `--labels` (comma-separated),
 typed `kind`/`id` references). `--body-file` is CLI-only; `-` reads bounded stdin.
 Updates replace editable fields, including empty body/labels/links; explicitly
 preserve data you intend to retain. Only delete operations create tombstones.
+Use `--links '[]'` to explicitly clear links. The array accepts at most 64
+closed `kind`/`id` objects; null, duplicate, unknown and aliased fields are
+rejected. Explicit `project` commands load trusted global/environment settings
+only. Invalid or missing selected configuration returns
+`local_git_invalid_configuration` without credential discovery or cwd fallback.
 
 `project init` refuses any existing destination rather than overwriting or
 implicitly importing it. If initialization succeeded but config registration

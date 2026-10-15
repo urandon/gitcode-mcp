@@ -305,8 +305,25 @@ func Locate(src Source) ConfigLocation {
 }
 
 func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
+	return loadEffective(src, overrides, false)
+}
+
+// LoadLocalProjectEffective preserves trusted global and environment settings,
+// but never discovers repository-owned configuration or credentials, even when
+// configuration parsing fails before service.mode can be established.
+func LoadLocalProjectEffective(src Source) (EffectiveConfig, error) {
+	return loadEffective(src, Overrides{}, true)
+}
+
+func loadEffective(src Source, overrides Overrides, explicitLocal bool) (EffectiveConfig, error) {
 	if src == nil {
 		src = OSSource{}
+	}
+	diagnostic := func(err error) error {
+		if explicitLocal {
+			return LocalProjectConfigError{}
+		}
+		return errors.New(RedactDiagnostic(err.Error(), src))
 	}
 	eff := EffectiveConfig{
 		Config:           defaultWithSource(src),
@@ -322,7 +339,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 			if errors.As(err, &local) {
 				return EffectiveConfig{}, local
 			}
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			return EffectiveConfig{}, diagnostic(err)
 		}
 		var mergeErr error
 		eff.Config, mergeErr = mergeFile(eff.Config, fileCfg)
@@ -331,7 +348,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 			if errors.As(mergeErr, &local) {
 				return EffectiveConfig{}, local
 			}
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(mergeErr.Error(), src))
+			return EffectiveConfig{}, diagnostic(mergeErr)
 		}
 		applyFileSources(eff.FieldSources, fileCfg, eff.Location.Source)
 		if fileCfg.CachePath != nil {
@@ -340,7 +357,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		if cred.Store != "" {
 			store, err := NormalizeCredentialStore(cred.Store)
 			if err != nil {
-				return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+				return EffectiveConfig{}, diagnostic(err)
 			}
 			eff.CredentialPolicy.Store = store
 		}
@@ -354,18 +371,18 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		}
 	}
 	if err := applyEnvOverrides(src, &eff); err != nil {
-		return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+		return EffectiveConfig{}, diagnostic(err)
 	}
 	// Local projects use machine-owned registrations and pre-provisioned
 	// providers. An unrelated checkout's tracked config must not retarget
 	// their content transfer or derived-cache location through cwd discovery.
-	if overrides.CachePath == "" && eff.Config.Service.Mode != ServiceModeLocal {
+	if !explicitLocal && overrides.CachePath == "" && eff.Config.Service.Mode != ServiceModeLocal {
 		if err := applyRepoLocalCache(src, &eff); err != nil {
 			var local LocalProjectConfigError
 			if errors.As(err, &local) {
 				return EffectiveConfig{}, local
 			}
-			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			return EffectiveConfig{}, diagnostic(err)
 		}
 	}
 	beforeCache := eff.Config.CachePath
