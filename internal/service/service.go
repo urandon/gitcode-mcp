@@ -429,7 +429,9 @@ func (s *Service) SetRepositoryScopes(ctx context.Context, repoID string, raw []
 	if !ok {
 		return RepositoryBinding{}, ErrInvalidQuery{Field: "repository", Message: "scope updates are unavailable for this store"}
 	}
-	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "repo-set-scopes", RepoID: repoID, LockPath: s.lockPath})
+	// Binding metadata follows the physical cache authority (also used by
+	// migration), not the legacy configurable provider/sync lock lane.
+	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "repo-set-scopes", RepoID: repoID})
 	if err != nil {
 		return RepositoryBinding{}, err
 	}

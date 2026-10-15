@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -78,5 +79,55 @@ func TestIntegrationRepoSetScopesPreservesSelectedCacheAndConfig(t *testing.T) {
 	}
 	if code, out, _ := run("repo", "set-scopes", "--help"); code != 0 || !strings.Contains(out, "existing exact") {
 		t.Fatal("scope-update help missing")
+	}
+}
+
+func TestRepoSetScopesUsesPhysicalWriterWithRealFactory(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		t.Run(map[bool]string{false: "canonical path", true: "symlink path"}[alias], func(t *testing.T) {
+			if alias && runtime.GOOS == "windows" {
+				t.Skip("file symlink requires privileges on Windows")
+			}
+			ctx := context.Background()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", APIBaseURL: "https://api.example.invalid/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+				t.Fatal(err)
+			}
+			if alias {
+				path = filepath.Join(dir, "alias.db")
+				if err := os.Symlink(filepath.Join(dir, "cache.db"), path); err != nil {
+					t.Fatal("cannot create fixture file alias")
+				}
+			}
+			lease, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "fixture-physical-holder"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.ReleaseWriter(ctx, lease)
+			src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+			var out, stderr bytes.Buffer
+			args := []string{"repo", "set-scopes", "--cache-path", path, "--repo", "owner/repo", "--scopes", "wiki", "--format", "json"}
+			if code := executeWithFactoryAndDeps(args, &out, &stderr, nil, localCommandDeps{Source: src}); code == 0 {
+				t.Fatal("CLI crossed held physical writer")
+			}
+			got, err := store.GetRepository(ctx, "owner/repo")
+			if err != nil || !reflect.DeepEqual(got.Scopes, []cache.RepositoryScope{cache.RepositoryScopeIssues}) {
+				t.Fatal("blocked scope writer mutated the binding")
+			}
+			if err := store.ReleaseWriter(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			out.Reset()
+			stderr.Reset()
+			if code := executeWithFactoryAndDeps(args, &out, &stderr, nil, localCommandDeps{Source: src}); code != 0 {
+				t.Fatal("scope writer did not recover after release")
+			}
+		})
 	}
 }

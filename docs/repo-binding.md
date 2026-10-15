@@ -88,7 +88,8 @@ normalizes `pull`, `pulls`, `pr`, `prs`, `pull_request`, `pull_requests`, `comme
 and `comments` to the issue-backed `issues` scope. Only `issues` and `wiki` are
 persisted, in that order. Empty and unknown scopes are errors.
 
-The command takes the cache writer lease and changes only scopes plus the
+The command takes the selected cache's canonical physical writer lease (not a
+legacy provider/sync `lock_path` override) and changes only scopes plus the
 binding's update timestamp, then reads back the binding. Identity, custom API
 route, aliases, display name, cache identity, configuration bytes/cache mode,
 and cached records are preserved. Reducing scopes does not delete cached data.
