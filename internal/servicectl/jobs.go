@@ -57,6 +57,7 @@ type Job struct {
 	ErrorClass                   string                  `json:"error_class,omitempty"`
 	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
 	SyncHealth                   SyncAggregateHealth     `json:"sync_health,omitempty"`
+	SyncSelectedCollections      []string                `json:"sync_selected_collections,omitempty"` // Admitted intent, not asynchronous stage outcome.
 	SyncCollections              []SyncCollectionView    `json:"sync_collections,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
@@ -843,6 +844,7 @@ type JobRecoveryIntent struct {
 	SourceRegistrationGeneration int64
 	ExpectedRevisionSetID        string
 	ActionIntentRef              string
+	SyncSelectedCollections      []string
 }
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
@@ -904,8 +906,9 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
 		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
 		SourceRegistrationID: intent.SourceRegistrationID, SourceRegistrationGeneration: intent.SourceRegistrationGeneration, ExpectedRevisionSetID: intent.ExpectedRevisionSetID,
-		ActionIntentRefs: appendActionIntentRef(nil, intent.ActionIntentRef),
-		Status:           JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
+		ActionIntentRefs:        appendActionIntentRef(nil, intent.ActionIntentRef),
+		SyncSelectedCollections: append([]string(nil), intent.SyncSelectedCollections...),
+		Status:                  JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
 	}
 	if intentRef := strings.TrimSpace(intent.ActionIntentRef); intentRef != "" {
 		job.ActionIntentOutcomes = map[string]string{intentRef: "created"}
@@ -1563,6 +1566,7 @@ func cloneJob(job *Job) Job {
 		out.FinishedAt = &finished
 	}
 	out.Progress = append([]service.ProgressEvent(nil), job.Progress...)
+	out.SyncSelectedCollections = append([]string(nil), job.SyncSelectedCollections...)
 	out.SyncCollections = append([]SyncCollectionView(nil), job.SyncCollections...)
 	for i := range out.SyncCollections {
 		out.SyncCollections[i].FirstRetryAt = cloneOptionalTime(out.SyncCollections[i].FirstRetryAt)

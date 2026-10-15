@@ -151,13 +151,17 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
-	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef}, cancel)
+	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef, SyncSelectedCollections: selection.Collections()}, cancel)
 	if err != nil {
 		cancel()
 		return Job{}, false, err
 	}
 	if !created {
 		cancel()
+		// The exact work key includes the resolved collection set. Older retained
+		// jobs may lack this additive metadata; report the equivalent admitted
+		// intent without reinterpreting or mutating their recovery snapshots.
+		job.SyncSelectedCollections = selection.Collections()
 		return job, false, nil
 	}
 	if strings.TrimSpace(req.IdempotencyKey) == "" {

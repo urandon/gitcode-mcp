@@ -2,7 +2,9 @@ package servicectl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -61,6 +63,14 @@ func TestSyncSelectionDaemonDefaultAndExplicitAdmission(t *testing.T) {
 			if err != nil || job.RepoID != "owner/repo" {
 				t.Fatal("default canonical admission failed")
 			}
+			if !reflect.DeepEqual(job.SyncSelectedCollections, tc.want) {
+				t.Fatal("immediate job reply lost admitted intent")
+			}
+			job.SyncSelectedCollections[0] = "mutated-copy"
+			retained, _ := jobs.Get(job.ID)
+			if !reflect.DeepEqual(retained.SyncSelectedCollections, tc.want) {
+				t.Fatal("job reply shared admitted intent storage")
+			}
 			for ctx.Err() == nil {
 				observed, _ := jobs.Get(job.ID)
 				if observed.Status == JobStatusSucceeded {
@@ -70,6 +80,11 @@ func TestSyncSelectionDaemonDefaultAndExplicitAdmission(t *testing.T) {
 					}
 					if !reflect.DeepEqual(got, tc.want) {
 						t.Fatalf("admitted workflow=%v want=%v", got, tc.want)
+					}
+					data, readErr := os.ReadFile(filepath.Join(manager.RuntimeDir, "jobs.json"))
+					var persisted []jobSnapshotDisk
+					if readErr != nil || json.Unmarshal(data, &persisted) != nil || len(persisted) != 1 || !reflect.DeepEqual(persisted[0].SyncSelectedCollections, tc.want) {
+						t.Fatal("persisted job lost admitted intent")
 					}
 					return
 				}
@@ -106,9 +121,21 @@ func TestSyncSelectionDaemonCoalescesResolvedDefaultIntent(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("fixture did not retain staged intent")
 	}
+	// An older retained job can have the same exact work key but no additive
+	// intent metadata. Coalescing may report equivalence, not rewrite recovery.
+	jobs.mu.Lock()
+	jobs.jobs[first.ID].SyncSelectedCollections = nil
+	jobs.mu.Unlock()
 	second, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: path, ProviderMode: "fixture", Issues: true})
 	if err != nil || second.ID != first.ID || len(jobs.List()) != 1 {
 		t.Fatal("resolved default and explicit work did not coalesce")
+	}
+	if !reflect.DeepEqual(first.SyncSelectedCollections, []string{"issues"}) || !reflect.DeepEqual(second.SyncSelectedCollections, first.SyncSelectedCollections) {
+		t.Fatal("coalesced reply lost exact admitted intent")
+	}
+	retained, _ := jobs.Get(first.ID)
+	if len(retained.SyncSelectedCollections) != 0 {
+		t.Fatal("coalescing reinterpreted the legacy retained snapshot")
 	}
 	release()
 	for ctx.Err() == nil {

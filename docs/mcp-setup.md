@@ -470,6 +470,10 @@ work; an unavailable requested scope returns `invalid_query` instead of being
 silently skipped. No eligible default scope is also an error, not a successful
 no-op. New daemon requests resolve the same intent before enqueue/coalescing;
 already admitted durable workflows keep their explicit collection snapshots.
+Immediate daemon responses use admitted `sync_selected_collections`, not guessed
+defaults or asynchronous outcome rows. If an older daemon omits that metadata,
+MCP returns an empty collection list and `service_sync_selection_unavailable`;
+inspect the job and update the daemon rather than assuming both collections ran.
 
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.
 

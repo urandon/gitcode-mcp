@@ -206,9 +206,6 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "daemon sync_live supports collection selectors only; omit remote_alias"})
 			return
 		}
-		if len(result.Collections) == 0 {
-			result.Collections = []string{"issues", "wiki"}
-		}
 		client, err := serviceRPCClient()
 		if err != nil {
 			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID, Subsystem: "service"})
@@ -220,6 +217,14 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			return
 		}
 		result.Job = &job
+		result.Collections = append([]string{}, job.SyncSelectedCollections...)
+		if len(result.Collections) == 0 {
+			result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{
+				Code: "service_sync_selection_unavailable", ErrorClass: "compatibility",
+				Message: "the daemon did not report admitted collection intent; no collection list is inferred",
+				Remediation: "inspect the job status and update the daemon to report admitted sync collections",
+			})
+		}
 		text := fmt.Sprintf("job=%s status=%s collections=%s", job.ID, job.Status, strings.Join(result.Collections, ","))
 		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 		return

@@ -229,6 +229,10 @@ subset or silent skip. A binding with no eligible default is rejected. Daemon
 admission resolves this list before work-key/coalescing and persists explicit
 stage intent. Existing recovery workflows and maintenance policies retain their
 already explicit snapshots; they are not reinterpreted against new defaults.
+Immediate daemon replies carry `sync_selected_collections` as admitted intent,
+separate from asynchronous collection outcome rows. MCP reports that intent;
+an older daemon without this metadata produces an explicit compatibility
+diagnostic and an unknown/empty list, never fabricated `issues,wiki` defaults.
 
 - `--repo REPO` selects the configured repository binding.
 - `--issues` bulk-syncs primary issue records and durably enqueues secondary comment coverage without calling per-issue comment endpoints.
