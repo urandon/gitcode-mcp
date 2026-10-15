@@ -3763,6 +3763,10 @@ type spyService struct {
 	lastFeedbackSubmit service.SubmitFeedbackRequest
 }
 
+func (s *spyService) ResolveSyncSelection(_ context.Context, _ string, selected service.SyncSelection) (service.SyncSelection, error) {
+	return service.SelectSyncCollections([]service.RepositoryScope{service.RepositoryScopeIssues, service.RepositoryScopeWiki}, selected)
+}
+
 func (s *spyService) called(name string) {
 	if s.calls == nil {
 		s.calls = map[string]int{}

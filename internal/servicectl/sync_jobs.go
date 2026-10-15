@@ -85,35 +85,40 @@ func (e syncCollectionEvidenceError) DiagnosticCode() string {
 }
 
 func normalizeCacheWriterIdentity(ctx context.Context, manager Manager, cachePath, cacheUUID, registrationID, repoID *string) error {
+	_, err := normalizeCacheWriterBinding(ctx, manager, cachePath, cacheUUID, registrationID, repoID)
+	return err
+}
+
+func normalizeCacheWriterBinding(ctx context.Context, manager Manager, cachePath, cacheUUID, registrationID, repoID *string) (cache.RepositoryBinding, error) {
 	eff, err := effectiveJobConfig(manager, strings.TrimSpace(*cachePath))
 	if err != nil {
-		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
 	if err != nil {
-		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	defer store.Close()
 	identity, err := store.CacheIdentity(ctx)
 	if err != nil {
-		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	if provided := strings.TrimSpace(*cacheUUID); provided != "" && provided != identity.UUID {
-		return CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "cache_uuid_mismatch"}
 	}
 	binding, err := store.ResolveRepositoryBinding(ctx, strings.TrimSpace(*repoID))
 	if err != nil {
-		return CacheWriterIdentityError{code: "repository_binding_unavailable"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "repository_binding_unavailable"}
 	}
 	*cachePath = eff.Config.CachePath
 	*cacheUUID = identity.UUID
 	*repoID = binding.RepoID
 	wantRegistration := maintenanceRegistrationID(identity.UUID, binding.RepoID)
 	if provided := strings.TrimSpace(*registrationID); provided != "" && provided != wantRegistration {
-		return CacheWriterIdentityError{code: "registration_id_mismatch"}
+		return cache.RepositoryBinding{}, CacheWriterIdentityError{code: "registration_id_mismatch"}
 	}
 	*registrationID = wantRegistration
-	return nil
+	return binding, nil
 }
 
 func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSyncJobRequest) (Job, error) {
@@ -126,23 +131,37 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 	if req.RepoID == "" {
 		return Job{}, false, errors.New("repo_id is required")
 	}
-	if err := normalizeCacheWriterIdentity(ctx, manager, &req.CachePath, &req.CacheUUID, &req.RegistrationID, &req.RepoID); err != nil {
+	binding, err := normalizeCacheWriterBinding(ctx, manager, &req.CachePath, &req.CacheUUID, &req.RegistrationID, &req.RepoID)
+	if err != nil {
 		return Job{}, false, err
 	}
-	var err error
+	scopes := make([]service.RepositoryScope, len(binding.Scopes))
+	for i, scope := range binding.Scopes {
+		scopes[i] = service.RepositoryScope(scope)
+	}
+	selection, err := service.SelectSyncCollections(scopes, service.SyncSelection{Issues: req.Issues, Wiki: req.Wiki, Pulls: req.Pulls, IssueComments: req.IssueComments, PRComments: req.PRComments || req.Comments})
+	if err != nil {
+		return Job{}, false, err
+	}
+	req.Issues, req.Wiki, req.Pulls = selection.Issues, selection.Wiki, selection.Pulls
+	req.IssueComments, req.PRComments, req.Comments = selection.IssueComments, selection.PRComments, false
 	req, err = normalizeSyncAdmissionRequest(req)
 	if err != nil {
 		return Job{}, false, err
 	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
-	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef}, cancel)
+	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef, SyncSelectedCollections: selection.Collections()}, cancel)
 	if err != nil {
 		cancel()
 		return Job{}, false, err
 	}
 	if !created {
 		cancel()
+		// The exact work key includes the resolved collection set. Older retained
+		// jobs may lack this additive metadata; report the equivalent admitted
+		// intent without reinterpreting or mutating their recovery snapshots.
+		job.SyncSelectedCollections = selection.Collections()
 		return job, false, nil
 	}
 	if strings.TrimSpace(req.IdempotencyKey) == "" {

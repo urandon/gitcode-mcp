@@ -125,6 +125,7 @@ type queryService interface {
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	ResolveSyncSelection(context.Context, string, service.SyncSelection) (service.SyncSelection, error)
 	ListPRDiscussions(context.Context, service.PRDiscussionRequest) (service.PRDiscussionsResult, error)
 	ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
@@ -2691,6 +2692,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return render(stdout, opts.format, result, renderSyncText)
 		}
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || opts.issueComments || opts.prComments || (opts.id == "" && opts.input == "") {
+			if _, err := svc.ResolveSyncSelection(ctx, opts.repo, service.SyncSelection{Issues: opts.issues, Wiki: opts.wiki, Pulls: opts.pulls, IssueComments: opts.issueComments, PRComments: opts.comments || opts.prComments}); err != nil {
+				if ctx.Err() != nil {
+					return writeCommandError(stderr, opts.format, plan, diagnostics.RetainHTTPAttempt(ctx.Err(), false))
+				}
+				return writeError(stderr, opts.format, err)
+			}
 			req, err := bulkSyncRequest(opts)
 			if err != nil {
 				return writeError(stderr, opts.format, err)
@@ -5711,6 +5718,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --max-records N     explicit collection record/work bound")
 		fmt.Fprintln(w, "  --per-page N        collection-only records per page, 1..100 (default 100)")
 		fmt.Fprintln(w, "  Foreground omission is one bounded slice; inspect traversal_status/stop_reason/continuation.")
+		fmt.Fprintln(w, "  No collection selectors: configured issues/wiki scopes only; explicit unavailable scopes fail before fetch.")
 		fmt.Fprintln(w, "  Continue with explicit larger bounds or durable maintenance. Bare callers get a 30s operation deadline.")
 		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
 		fmt.Fprintln(w, "  --quiet             suppress non-result progress output")
