@@ -25,7 +25,7 @@ func CoreCapabilities() []Capability {
 		read("repo_status", "repo", "RepositoryStatus", "Read local repository bindings and cache state, not live repository metadata."),
 		read("list_pr_discussions", "pr-discussions", "ListPRDiscussions", "Read cached PR discussions and unresolved state.", "pr-review-discussions"),
 		read("service_status", "service", "Service.Status", "Read coordinator status without implicit start or setup."),
-		read("maintenance_status", "maintenance", "Maintenance.Status", "Read registered maintenance policies and coverage."),
+		read("maintenance_status", "service maintenance", "Maintenance.List", "Read registered maintenance policies and coverage."),
 		read("maintenance_plan", "maintenance", "Maintenance.Plan", "Inspect a local maintenance effect ledger; planning does not apply effects."),
 		read("service_jobs", "service", "Jobs.List", "Read bounded coordinator job inventory."),
 		read("service_job_status", "service", "Jobs.Get", "Read one coordinator job."),

@@ -2,6 +2,22 @@ package capability
 
 import "testing"
 
+func TestMaintenanceStatusUsesActualSharedCLIRead(t *testing.T) {
+	cap, ok := LookupByMCPName("maintenance_status")
+	if !ok || cap.CLIName != "service maintenance" || cap.ServiceCommand != "Maintenance.List" || !cap.CLI.Enabled || cap.Safety != SafetyReadOnly {
+		t.Fatal("maintenance_status must name the real CLI read, not the plan/enable namespace")
+	}
+	forms := CLIGroupedForms()
+	if len(forms["maintenance_status"]) != 1 || forms["maintenance_status"][0] != cap.CLIName {
+		t.Fatal("grouped maintenance read mapping differs")
+	}
+	for _, form := range forms["service_lifecycle"] {
+		if form == cap.CLIName {
+			t.Fatal("maintenance read incorrectly grouped as service lifecycle mutation")
+		}
+	}
+}
+
 func TestAllCapabilitiesDeclareUniqueIdentityAndSurfaceReasons(t *testing.T) {
 	ids, tools := map[string]bool{}, map[string]bool{}
 	for _, cap := range Capabilities() {

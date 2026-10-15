@@ -108,6 +108,7 @@ func TestGroupedCLIFormsDeclareCapabilityAndExceptions(t *testing.T) {
 	for _, target := range []struct{ file, function, root, tag string }{
 		{"cli.go", "executeLocalCommand", "", "combined"},
 		{"cli.go", "executeServiceCommand", "service", "sub"},
+		{"cli.go", "executeMaintenanceCommand", "maintenance", "sub"},
 		{"cli.go", "executeRAGCommand", "rag", "sub"},
 		{"cli.go", "executeRepositoryDocsCommand", "repo-docs", "sub"},
 		{"cli.go", "executeAdminCommand", "admin", "sub"},
@@ -126,6 +127,13 @@ func TestGroupedCLIFormsDeclareCapabilityAndExceptions(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				// Some grouped routers use if/validation predicates instead of
+				// switch arms. Include literal equality/inequality on the actual
+				// verb variable, not only their optional help declarations.
+				if verb, ok := inventoryPredicateVerb(node, target.tag); ok {
+					actual[strings.TrimSpace(target.root+" "+verb)] = true
+					found = true
+				}
 				sw, ok := node.(*ast.SwitchStmt)
 				if !ok {
 					return true
@@ -174,6 +182,41 @@ func TestGroupedCLIFormsDeclareCapabilityAndExceptions(t *testing.T) {
 	for form := range declared {
 		if !actual[form] {
 			t.Errorf("declared grouped form %q lacks dispatch/help coverage", form)
+		}
+	}
+}
+
+func inventoryPredicateVerb(node ast.Node, tag string) (string, bool) {
+	comparison, ok := node.(*ast.BinaryExpr)
+	if !ok || (comparison.Op != token.EQL && comparison.Op != token.NEQ) {
+		return "", false
+	}
+	for _, pair := range [][2]ast.Expr{{comparison.X, comparison.Y}, {comparison.Y, comparison.X}} {
+		id, isVerb := pair[0].(*ast.Ident)
+		literal, isLiteral := pair[1].(*ast.BasicLit)
+		if isVerb && id.Name == tag && isLiteral && literal.Kind == token.STRING {
+			verb, err := strconv.Unquote(literal.Value)
+			return verb, err == nil
+		}
+	}
+	return "", false
+}
+
+func TestGroupedInventoryFindsHiddenIfAliasesWithoutHelp(t *testing.T) {
+	for _, tc := range []struct{ expression, want string }{
+		{`sub == "new-hidden-alias"`, "new-hidden-alias"},
+		{`"rebind" == sub`, "rebind"},
+		{`sub != "plan"`, "plan"},
+		{`other == "not-a-verb"`, ""},
+		{`sub == dynamicValue`, ""},
+	} {
+		expr, err := parser.ParseExpr(tc.expression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, found := inventoryPredicateVerb(expr, "sub")
+		if got != tc.want || found != (tc.want != "") {
+			t.Fatal("if-routed command escaped verb inventory")
 		}
 	}
 }
