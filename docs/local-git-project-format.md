@@ -1,8 +1,9 @@
 # Local Git project format (schema 1)
 
 This is the isolated implementation of epic #200. The G4 CLI/MCP checkpoint,
-G5 search/index and G6 explicit protected Admin slice are usable on this branch;
-whole-feature rollout remains gated by G7. Its child PRs integrate into
+G5 search/index, G6 explicit protected Admin and G7 private Git bundle/restore
+are implemented on this branch. Whole-feature rollout still requires final
+whole-epic review and integration evidence. Its child PRs integrate into
 `codex/epic-200-git-backed-harness`; the whole cohort enters `main` together.
 Git owns all project content and history. No cache database is required by the
 adapter, and no source or chunk bytes are copied into an index by this package.
@@ -74,6 +75,12 @@ characters; the result blob is a full Git object ID. Operation must match the
 result kind. JSON key names are exact and case-sensitive, including nested
 result fields. Unknown/duplicate keys and content fields are rejected. A receipt
 does not contain its own producing commit ID: Git history supplies that locator.
+At that commit, a delete result must be a tombstone with an empty body; other
+operations must return live entities. Create/add results must be absent in the
+immediate parent and consume exactly its next ID/counter, not claim an old ID.
+That parent's state must permit the operation: edits/deletes target live entities
+and a new comment has a live parent issue. Later deletion does not invalidate an
+earlier valid receipt.
 The mutation adapter publishes receipts with their entity and counters in one
 commit; the reader can inspect the same files without opening a database.
 
@@ -234,7 +241,7 @@ original result even if the entity was subsequently edited.
 
 Reader, writer and private-service tests create real temporary Git stores
 without credentials or external network. G5 adds explicit search/index below;
-G6 adds protected Admin below; bundle restore remains the required G7 child.
+G6 adds protected Admin below; G7 adds private bundle/restore below.
 
 ## CLI/MCP first usable checkpoint (G4)
 
@@ -487,4 +494,118 @@ Deterministic tests exercise a real Git store through Unix IPC plus authenticate
 HTTP, independent of credentials or external network, and semantic browser
 tests cover confirmation/cancel, lost replies, conflict/draft recovery,
 read-only/unavailable projects, lexical fallback, themes and narrow layout.
-Complete feature rollout and backup/restore remain gated by #207.
+Complete feature rollout remains gated by whole-epic review/integration.
+
+## Private Git backup and restore (G7)
+
+Git contains every authoritative project byte, ID, counter, receipt and revision.
+The backup is an ordinary self-contained [Git bundle](https://git-scm.com/docs/git-bundle),
+not a semantic snapshot format or a copy of a SQLite authority. It contains the
+configured branch and its complete reachable history, including tombstoned
+content. **Keep it private.** Do not attach real bundles to issues/PRs, publish
+them in this code repository, or treat tombstones as an erasure guarantee.
+Encryption, off-machine storage and retention are deployment/operator concerns.
+
+Export uses trusted machine configuration and the existing store writer lane;
+the daemon may be running, but concurrent writes can return `writer_busy`.
+Confirm the file effect explicitly:
+
+```sh
+gitcode-mcp project export --project lab --bundle lab.bundle --confirm
+```
+
+No existing output file is overwritten. The new file is mode 0600. Structured
+output names only selector, stable project ID, exact commit, bounded commit
+count, status and next action; it never embeds the file or a filesystem path.
+Keep the full `commit` alongside the bundle for restore verification. Export
+validates source history, uses an explicit revision/path separator, detects an
+out-of-band HEAD change, and bounds binary output in request-local memory.
+Binary bundle bytes never enter normal tool responses or logs.
+
+Restore requires a new absent managed store, an unregistered selector and an
+inactive daemon in the selected configuration. Use a trusted global YAML on the
+destination machine (possibly initially absent), not repository-owned config:
+
+```sh
+# Explicitly stop any daemon using this selected runtime before restoring.
+gitcode-mcp service stop
+gitcode-mcp project restore --project lab --project-id example-project \
+  --storage-ref restored-data --ref refs/heads/main \
+  --bundle lab.bundle --expected-head EXPECTED_FULL_BUNDLE_COMMIT --confirm
+gitcode-mcp service run
+# In a second terminal using the same configuration:
+gitcode-mcp project get --project lab --kind issue --id ISSUE-1
+gitcode-mcp project history --project lab --kind issue --id ISSUE-1 --max-commits 64
+```
+
+`project-id` and ref must match the backed-up identity and branch, not invent a
+new identity. `expected-head` is the full export commit, not a short SHA. Store
+references use the same managed directory rule as setup. Existing destinations
+(even empty directories), registered selectors, storage references and duplicate
+project authorities are rejected, never retargeted. On the original machine,
+deliberately remove an obsolete registration from trusted YAML only after
+stopping that daemon, or restore in another trusted configuration/machine.
+No automatic experimental-store import, SQLite reinterpretation, active-store
+replacement, history rewriting, provider setup or daemon restart occurs.
+
+The CLI observes selected daemon PID state before restore. It is an operational
+guard over the existing lifecycle, not OS-level sandbox/descriptor attestation.
+The filesystem no-overwrite rule and final complete-candidate registration lock
+are still authoritative if setup calls race. Out-of-band filesystem changes,
+malicious Git installations and concurrently launched unregistered processes
+remain outside the service-owned-store contract.
+
+Restore snapshots a bounded regular local file privately, rejects incremental
+prerequisites, filtered bundles or additional refs, checks the exact advertised
+ref/HEAD, imports objects into a new private bare store, runs strict Git object
+validation and validates the complete linear project history before publishing
+the branch/registering it. SHA-1 and SHA-256 object formats retain their exact
+commit identities. It verifies schema/project identity on every commit, fixed
+regular entity paths/metadata/parents, monotonic counters, retained entities and
+unchanged receipts, including each receipt's result blob at its introducing
+commit, operation outcome and fresh creation allocation in the immediate parent.
+Removed/changed or internally inconsistent receipts cannot become an unsafe
+same-key retry.
+
+Bounds: 64 MiB input/export bundle, at most 40,256 advertised pack objects;
+existing 1 MiB entity, 16 KiB metadata/envelope, 4 MiB tree/10,000 entries,
+256 commits and 8 MiB distinct validated source blobs. Distinct validation
+metadata is also bounded by 10,000 entries. Git commands and whole export/restore
+have a ten-second ceiling/caller cancellation. Pack import uses a small delta
+cache/large-blob streaming threshold. These are application/Git operation
+limits, not a native allocator or power-loss certification. Exhaustion returns
+typed `limit_exceeded`/`history_unavailable`/unavailable errors, never a truncated
+successful backup. Larger histories need an explicit future archival workflow;
+no receipt pruning or partial-history success is silently substituted.
+
+Invalid unregistered imports are cleaned up by their creating operation. Once
+validated ref publication is attempted, the store is preserved even after
+ambiguity; inspect it instead of overwriting/retrying restore. A successfully
+restored Git store also survives a later registration failure. Repair the
+trusted configuration, then explicitly recover registration:
+
+```sh
+gitcode-mcp project register --project lab --project-id example-project \
+  --storage-ref restored-data --ref refs/heads/main --confirm
+```
+
+The config uses the existing atomic locked registration writer, not a backup
+journal. Current project reads and citations/history come from the same restored
+commits/blobs. Same-key logical mutations return their original Git receipt
+results before stale guards; new stale writes still conflict. Normal Git
+process-crash/object/ref semantics apply, not a new sudden-power-loss guarantee.
+
+Derived SQLite/vector files are not exported or restored. After losing them,
+strict-private startup, get/list/history/mutate and full-text still work;
+explicit hybrid reports lexical fallback until the existing index is rebuilt.
+To opt in again, configure a pre-provisioned local-boundary profile in trusted
+global YAML, restart the daemon explicitly and use bounded `project index`.
+Index chunk caps are per attempt; interrupted derived work reuses the existing
+engine, not a new project receipt protocol. No model install/download happens.
+
+MCP discovery does not offer bundle uploads/restore/file selectors. The existing
+protected Admin exposes restored project status, guarded edits, citations,
+history and search, with backup/setup as CLI handoffs. Default `service run`
+still has only private IPC; `service run --admin` explicitly enables protected
+loopback HTTP and is not a zero-network claim. Existing GitCode/cache mode is
+unchanged. No release tag or local installation is performed by this workflow.
