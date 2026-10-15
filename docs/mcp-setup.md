@@ -46,6 +46,14 @@ contain the same service result, including provenance, citations and fallback.
 Error envelopes differ: CLI uses `failure_class` and an exit code, while MCP
 uses JSON-RPC `error.data.code`.
 
+Standalone CLI `backlinks` and MCP `source_backlinks` use the same default 20,
+explicit 1..100 and nonnegative overflow-safe offset policy. They return the
+actual requested page of incoming sources, ordered by stable source id, with
+the canonical target id and applied limit/offset. Aliases remain repo-scoped;
+an exhausted page is an empty array. This query never syncs GitCode. The
+embedded backlinks field in `get_source` retains its separate complete-record
+contract and is not truncated by the standalone query default.
+
 ## Stdio mode
 
 ### Starting the server

@@ -892,7 +892,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 			opts.bodyFileSet = true
 		}
 	})
-	if command == "list" || command == "search" || command == "search_sources" {
+	if command == "list" || command == "search" || command == "search_sources" || command == "backlinks" {
 		if opts.limitSet && opts.limit == 0 {
 			return opts, nil, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}
 		}
@@ -5631,7 +5631,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "List sources that link to the given id.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
-		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --limit N         maximum results (default 20, range 1..100)")
 		fmt.Fprintln(w, "  --offset N        result offset")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")

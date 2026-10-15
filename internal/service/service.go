@@ -1144,7 +1144,7 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 	if err != nil {
 		return SourceRecord{}, normalizeError(err, "links", source.ID)
 	}
-	backlinks, err := s.GetBacklinks(ctx, GetBacklinksRequest{RepoID: repoID, ID: source.ID})
+	backlinks, err := s.getBacklinks(ctx, GetBacklinksRequest{RepoID: repoID, ID: source.ID})
 	if err != nil && !IsCacheEmpty(err) {
 		return SourceRecord{}, err
 	}
@@ -1189,6 +1189,17 @@ func (s *Service) listSources(ctx context.Context, req ListSourcesRequest) (List
 }
 
 func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) (BacklinksResult, error) {
+	limit, err := SourceQueryPage(req.Limit, req.Offset)
+	if err != nil {
+		return BacklinksResult{}, err
+	}
+	req.Limit = limit
+	return s.getBacklinks(ctx, req)
+}
+
+// Embedded source records retain their complete backlink graph; only the public
+// standalone query supplies a normalized page limit.
+func (s *Service) getBacklinks(ctx context.Context, req GetBacklinksRequest) (BacklinksResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "backlinks")
 	if err != nil {
 		return BacklinksResult{}, err
@@ -1201,11 +1212,17 @@ func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) (Ba
 	if err != nil {
 		return BacklinksResult{}, normalizeError(err, "backlinks", id)
 	}
+	sort.SliceStable(backlinks, func(i, j int) bool {
+		if backlinks[i].ID != backlinks[j].ID {
+			return backlinks[i].ID < backlinks[j].ID
+		}
+		return backlinks[i].Path < backlinks[j].Path
+	})
+	backlinks = sliceSources(backlinks, req.Offset, req.Limit)
 	out := make([]BacklinkResult, 0, len(backlinks))
 	for _, source := range backlinks {
 		out = append(out, BacklinkResult{SourceSummary: sourceSummary(source), TargetID: id})
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return BacklinksResult{RepoID: repoID, ID: id, Backlinks: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 

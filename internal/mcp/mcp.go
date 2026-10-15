@@ -558,13 +558,13 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "source_backlinks",
-		Description: "List sources that link to the given id.",
+		Description: "List cached sources that link to the given id, ordered by stable source id. Defaults to 20 results; continue with offset.",
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
 				"id":      {Type: "string", Description: "Target source id or record alias.", MinLength: 1},
-				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(200), Default: 50.0},
+				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
 			Required: []string{"repo_id", "id"},
@@ -2269,7 +2269,7 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "id is required"})
 		return
 	}
-	limit := 50
+	limit := service.DefaultSourceQueryLimit
 	if a.Limit != nil {
 		limit = *a.Limit
 	}
@@ -2277,12 +2277,12 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 	if a.Offset != nil {
 		offset = *a.Offset
 	}
-	if limit < 1 || limit > 200 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit must be between 1 and 200"})
+	if limit == 0 {
+		s.writeOperationalError(id, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}, domainErrorContext{Operation: "source_backlinks", RepoID: a.RepoID})
 		return
 	}
-	if offset < 0 {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
+	if _, err := service.SourceQueryPage(limit, offset); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "source_backlinks", RepoID: a.RepoID})
 		return
 	}
 
