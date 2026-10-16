@@ -2867,7 +2867,11 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, func(w io.Writer, r service.RepositoryMetadataResult) {
-			fmt.Fprintf(w, "repo_id=%s provider_id=%s private=%t default_branch=%s\n", r.RepoID, r.ProviderID, r.Private, r.DefaultBranch)
+			fmt.Fprintf(w, "repo_id=%s provider_id=%s", r.RepoID, r.ProviderID)
+			if r.Private != nil {
+				fmt.Fprintf(w, " private=%t", *r.Private)
+			}
+			fmt.Fprintf(w, " default_branch=%s\n", r.DefaultBranch)
 		})
 	case "list-repo-labels":
 		result, err := svc.ListRepositoryLabels(ctx, opts.repo)

@@ -290,7 +290,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `export_snapshot` | Export a deterministic snapshot |
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report repository binding plus binary identity, cache schema compatibility, issue/comment counts, and issue-comment queue state |
-| `get_repo_metadata` | Explicit bounded live repository identity, provider-reported `private` and default branch; not an independent accessibility check or cache binding status |
+| `get_repo_metadata` | Explicit bounded live repository identity, optional provider-reported `private` and default branch; not an independent accessibility check or cache binding status |
 | `list_repo_labels` | Explicit complete bounded live standalone-label list with cache refresh, including read-only descriptions |
 | `create_repo_label` | Audited standalone label definition by name/color; never assigns an issue; caller key and live intent required |
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
@@ -356,10 +356,11 @@ For authorized repository bootstrap, `get_repo_metadata` and `list_repo_labels`
 are explicit live reads requiring `repo_id`, available under read-only policy.
 They do not substitute `repo_status` binding coordinates for provider evidence.
 Metadata returns `provider_id`, `owner`, `name`, `full_name`, `private` and
-`default_branch`. `private` is the point-in-time boolean returned by GitCode,
+`default_branch`. Optional `private` is the point-in-time boolean returned by GitCode,
 not independent proof of anonymous accessibility or historical settings changes.
 It was withdrawn in v0.4.1 and restored by the later owner decision in #198.
-Missing/null/non-boolean `private` or mismatched identity/default-branch data fails
+Missing or null `private` is simply omitted; true and false are preserved exactly.
+A present non-boolean or mismatched required identity/default-branch data fails
 closed. It is an observation, not a lease or permission for a later write.
 
 `list_repo_labels` fetches bounded pages until an explicit empty terminal page

@@ -35,11 +35,12 @@ Discovery status for metadata-first sync:
 
 The explicit bootstrap read uses `GET /api/v5/repos/{owner}/{repo}` and requires
 a positive numeric provider id, matching `owner.login`, `name`, `full_name`, and
-nonempty `default_branch`, plus a boolean `private`. Local bindings do not supply
-missing remote identity. `private` is copied directly from the provider response;
+nonempty `default_branch`. Local bindings do not supply missing remote identity.
+The optional boolean `private` is copied directly from the provider response;
 it is not an independent anonymous-access check, settings history or authorization
-for publication. Missing, null or non-boolean `private` fails closed rather than
-becoming false. No alternative visibility field is used to override it. The field
+for publication. Missing or null `private` is omitted from output, not an error
+or inferred false; a present non-boolean is a schema error. No alternative
+visibility field is used to override it. The field
 was withdrawn in v0.4.1 and restored by the later owner decision in #198 with this
 explicit provider-observation boundary.
 
