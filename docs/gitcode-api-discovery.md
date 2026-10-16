@@ -35,11 +35,13 @@ Discovery status for metadata-first sync:
 
 The explicit bootstrap read uses `GET /api/v5/repos/{owner}/{repo}` and requires
 a positive numeric provider id, matching `owner.login`, `name`, `full_name`, and
-nonempty `default_branch`. Local bindings do not supply missing remote identity.
-Provider visibility fields are intentionally neither decoded nor reported
-(#198): the observed boolean was not qualified as publication-visibility proof.
-Missing or unrecognized visibility does not block an otherwise valid identity
-read; identity/default-branch validation still fails closed.
+nonempty `default_branch`, plus a boolean `private`. Local bindings do not supply
+missing remote identity. `private` is copied directly from the provider response;
+it is not an independent anonymous-access check, settings history or authorization
+for publication. Missing, null or non-boolean `private` fails closed rather than
+becoming false. No alternative visibility field is used to override it. The field
+was withdrawn in v0.4.1 and restored by the later owner decision in #198 with this
+explicit provider-observation boundary.
 
 The [label list](https://docs.gitcode.com/docs/apis/get-api-v-5-repos-owner-repo-labels/)
 returns an array with numeric `id`/`repository_id`, `name`, `color`, and

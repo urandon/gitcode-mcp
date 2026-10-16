@@ -58,7 +58,7 @@ var writeCapabilities = []Capability{
 	{
 		ID: "get_repo_metadata", Category: CategoryWrite, Safety: SafetyReadOnly,
 		CLIName: "repo-metadata", MCPName: "get_repo_metadata", ServiceCommand: "repo-metadata",
-		Description: "Explicit bounded live repository identity/default-branch read: provider_id, owner, name, full_name and default_branch. Does not report repository visibility, modify a binding or grant later write authority.",
+		Description: "Explicit bounded live repository metadata read: provider_id, owner, name, full_name, private and default_branch. private is the provider-reported boolean, not an independent accessibility check. Does not modify a binding or grant later write authority.",
 		UI:          disabled("Admin manages local bindings; live remote bootstrap verification is explicit CLI/MCP only."), CLI: enabled(), MCP: enabled(),
 	},
 	{

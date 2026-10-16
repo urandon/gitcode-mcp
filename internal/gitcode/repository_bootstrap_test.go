@@ -42,7 +42,8 @@ func TestIssue157RepositoryIdentityFailsClosed(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(raw)
 		})
 		result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
-		good := fmt.Sprint(raw["id"]) == "17" && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
+		_, hasPrivate := raw["private"].(bool)
+		good := hasPrivate && fmt.Sprint(raw["id"]) == "17" && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
 		if (err == nil) != good {
 			t.Fatal("canonical identity validation changed")
 		}
@@ -52,14 +53,14 @@ func TestIssue157RepositoryIdentityFailsClosed(t *testing.T) {
 	}
 }
 
-func TestIssue198RepositoryMetadataIgnoresVisibility(t *testing.T) {
+func TestIssue198RepositoryMetadataPreservesProviderPrivate(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		omit  bool
 		value any
 	}{
 		{"true", false, true}, {"false", false, false}, {"omitted", true, nil},
-		{"null", false, nil}, {"string", false, "unsupported"}, {"object", false, map[string]any{"unexpected": true}},
+		{"null", false, nil}, {"string", false, "unsupported"}, {"number", false, 0}, {"object", false, map[string]any{"unexpected": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var raw map[string]any
@@ -79,17 +80,23 @@ func TestIssue198RepositoryMetadataIgnoresVisibility(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(raw)
 			})
 			result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
+			if _, valid := tc.value.(bool); tc.omit || !valid {
+				if err == nil {
+					t.Fatal("invalid or missing private became a successful metadata observation")
+				}
+				return
+			}
 			if err != nil {
-				t.Fatal("withdrawn visibility blocked canonical identity")
+				t.Fatal("valid provider boolean blocked canonical identity")
 			}
 			data, err := json.Marshal(result)
 			var projected map[string]any
 			if err != nil || json.Unmarshal(data, &projected) != nil {
 				t.Fatal("metadata encoding failed")
 			}
-			want := map[string]any{"provider_id": "17", "owner": "example-owner", "name": "example-repo", "full_name": "example-owner/example-repo", "default_branch": "main"}
+			want := map[string]any{"provider_id": "17", "owner": "example-owner", "name": "example-repo", "full_name": "example-owner/example-repo", "private": tc.value, "default_branch": "main"}
 			if !reflect.DeepEqual(projected, want) {
-				t.Fatal("identity metadata changed or exposed withdrawn visibility")
+				t.Fatal("metadata did not preserve the canonical provider fields")
 			}
 		})
 	}

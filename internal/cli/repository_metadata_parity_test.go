@@ -15,8 +15,8 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
-func TestIssue198MetadataTransportFieldWithdrawal(t *testing.T) {
-	for _, visibility := range []string{"true", "false", "null", `"unsupported"`, "omitted"} {
+func TestIssue198MetadataProviderPrivateParity(t *testing.T) {
+	for _, visibility := range []string{"true", "false", "null", `"unsupported"`, "0", "{}", "omitted"} {
 		t.Run(visibility, func(t *testing.T) {
 			var requests atomic.Int32
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,8 +45,20 @@ func TestIssue198MetadataTransportFieldWithdrawal(t *testing.T) {
 			}
 			cliResult, exit := parityCLI(t, svc, []string{"repo-metadata"})
 			mcpResult, code := parityMCP(t, svc, "get_repo_metadata", map[string]any{})
+			if visibility != "true" && visibility != "false" {
+				var failure struct {
+					FailureClass string `json:"failure_class"`
+				}
+				if exit == 0 || json.Unmarshal(cliResult, &failure) != nil || failure.FailureClass != "schema_decode" || code != "schema_decode" {
+					t.Fatalf("invalid provider boolean did not fail closed: CLI=%d MCP=%s", exit, code)
+				}
+				if requests.Load() != 2 {
+					t.Fatal("invalid metadata caused extra provider operations")
+				}
+				return
+			}
 			if exit != 0 || code != "" {
-				t.Fatal("withdrawn visibility blocked identity read")
+				t.Fatal("valid provider boolean blocked metadata read")
 			}
 			for _, data := range []json.RawMessage{cliResult, mcpResult} {
 				var result map[string]any
@@ -56,15 +68,21 @@ func TestIssue198MetadataTransportFieldWithdrawal(t *testing.T) {
 				if result["repo_id"] != "fixture" || result["provider_id"] != "17" || result["full_name"] != "owner/repo" || result["default_branch"] != "main" {
 					t.Fatal("canonical identity/default-branch changed")
 				}
-				for _, key := range []string{"private", "public", "visibility", "visibility_level"} {
+				if value, ok := result["private"].(bool); !ok || value != (visibility == "true") {
+					t.Fatal("transport did not preserve provider private boolean")
+				}
+				if !strings.Contains(fmt.Sprint(result["evidence"]), "provider-reported private") || !strings.Contains(fmt.Sprint(result["evidence"]), "not independent accessibility or authorization evidence") {
+					t.Fatal("provider observation lacks its evidence boundary")
+				}
+				for _, key := range []string{"public", "visibility", "visibility_level"} {
 					if _, exists := result[key]; exists {
-						t.Fatal("transport exposed withdrawn visibility")
+						t.Fatal("transport invented a visibility projection")
 					}
 				}
 			}
 			text, exit := parityCLIFormat(t, svc, []string{"repo-metadata"}, "text")
-			if exit != 0 || strings.Contains(string(text), "private=") || !strings.Contains(string(text), "provider_id=17 default_branch=main") {
-				t.Fatal("CLI text metadata retained visibility or lost identity")
+			if exit != 0 || !strings.Contains(string(text), "private="+visibility) || !strings.Contains(string(text), "provider_id=17") || !strings.Contains(string(text), "default_branch=main") {
+				t.Fatal("CLI text metadata lost provider private or identity")
 			}
 			if requests.Load() != 3 {
 				t.Fatal("metadata read did not remain one explicit GET per transport call")
