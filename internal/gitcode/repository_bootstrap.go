@@ -39,6 +39,7 @@ type RepositoryMetadata struct {
 	Owner         string `json:"owner"`
 	Name          string `json:"name"`
 	FullName      string `json:"full_name"`
+	Private       bool   `json:"private"`
 	DefaultBranch string `json:"default_branch"`
 }
 
@@ -89,15 +90,16 @@ func (c *HTTPClient) GetRepositoryMetadata(ctx context.Context, req RepoRequest)
 		} `json:"owner"`
 		Name          string `json:"name"`
 		FullName      string `json:"full_name"`
+		Private       *bool  `json:"private"`
 		DefaultBranch string `json:"default_branch"`
 	}
 	if err := c.getJSON(ctx, getRepoEndpoint(req.Owner, req.Repo), nil, &raw); err != nil {
 		return RepositoryMetadata{}, err
 	}
-	if !positiveBootstrapID(raw.ID) || raw.Owner.Login != req.Owner || raw.Name != req.Repo || raw.FullName != req.Owner+"/"+req.Repo || strings.TrimSpace(raw.DefaultBranch) == "" {
+	if !positiveBootstrapID(raw.ID) || raw.Owner.Login != req.Owner || raw.Name != req.Repo || raw.FullName != req.Owner+"/"+req.Repo || raw.Private == nil || strings.TrimSpace(raw.DefaultBranch) == "" {
 		return RepositoryMetadata{}, bootstrapSchema("repository")
 	}
-	return RepositoryMetadata{ProviderID: raw.ID.String(), Owner: raw.Owner.Login, Name: raw.Name, FullName: raw.FullName, DefaultBranch: raw.DefaultBranch}, nil
+	return RepositoryMetadata{ProviderID: raw.ID.String(), Owner: raw.Owner.Login, Name: raw.Name, FullName: raw.FullName, Private: *raw.Private, DefaultBranch: raw.DefaultBranch}, nil
 }
 
 // All pages are required before absence or an exact name can be established.

@@ -151,7 +151,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `update_pr` | Update pull request title, body, or state |
 | `merge_pr` | Merge an authorized reviewed PR at a required full expected `sha`, with `write_mode=live`, caller idempotency key and canonical readback; provider protections remain authoritative |
 | `list_milestones` | List repository milestones and refresh cached milestone records |
-| `get_repo_metadata` | Explicit live provider identity/default branch, distinct from local binding; does not report visibility |
+| `get_repo_metadata` | Explicit live identity/default branch and provider-reported `private`, distinct from local binding; not an independent accessibility check |
 | `list_repo_labels` | Complete bounded live standalone-label list, read-only descriptions and cached label sources |
 | `create_repo_label` | One audited standalone definition POST with canonical readback, caller key and GET-only recovery; no issue assignment |
 | `create_milestone` | Create a milestone; GitCode requires `due_on` |
