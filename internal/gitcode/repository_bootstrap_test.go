@@ -42,8 +42,7 @@ func TestIssue157RepositoryIdentityFailsClosed(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(raw)
 		})
 		result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
-		_, hasPrivate := raw["private"].(bool)
-		good := hasPrivate && fmt.Sprint(raw["id"]) == "17" && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
+		good := fmt.Sprint(raw["id"]) == "17" && raw["default_branch"] != "" && raw["name"] == "example-repo" && raw["full_name"] == "example-owner/example-repo" && raw["owner"].(map[string]any)["login"] == "example-owner"
 		if (err == nil) != good {
 			t.Fatal("canonical identity validation changed")
 		}
@@ -80,9 +79,9 @@ func TestIssue198RepositoryMetadataPreservesProviderPrivate(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(raw)
 			})
 			result, err := client.GetRepositoryMetadata(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
-			if _, valid := tc.value.(bool); tc.omit || !valid {
+			if _, valid := tc.value.(bool); !tc.omit && tc.value != nil && !valid {
 				if err == nil {
-					t.Fatal("invalid or missing private became a successful metadata observation")
+					t.Fatal("invalid private became a successful metadata observation")
 				}
 				return
 			}
@@ -94,13 +93,44 @@ func TestIssue198RepositoryMetadataPreservesProviderPrivate(t *testing.T) {
 			if err != nil || json.Unmarshal(data, &projected) != nil {
 				t.Fatal("metadata encoding failed")
 			}
-			want := map[string]any{"provider_id": "17", "owner": "example-owner", "name": "example-repo", "full_name": "example-owner/example-repo", "private": tc.value, "default_branch": "main"}
+			want := map[string]any{"provider_id": "17", "owner": "example-owner", "name": "example-repo", "full_name": "example-owner/example-repo", "default_branch": "main"}
+			if !tc.omit && tc.value != nil {
+				want["private"] = tc.value
+			}
 			if !reflect.DeepEqual(projected, want) {
 				t.Fatal("metadata did not preserve the canonical provider fields")
 			}
 		})
 	}
 }
+
+func TestIssue198OptionalPrivateDoesNotBlockLabelBootstrap(t *testing.T) {
+	for _, field := range []string{"", `,"private":null`} {
+		t.Run(field, func(t *testing.T) {
+			var requests atomic.Int32
+			client := bootstrapHTTPClient(t, func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodGet {
+					t.Error("bootstrap attempted a mutation")
+				}
+				switch r.URL.Path {
+				case "/api/v5/repos/example-owner/example-repo":
+					fmt.Fprint(w, strings.Replace(bootstrapMetadataJSON, `,"private":true`, field, 1))
+				case "/api/v5/repos/example-owner/example-repo/labels":
+					fmt.Fprint(w, `[]`)
+				default:
+					t.Error("unexpected bootstrap request")
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			result, err := client.ListRepositoryLabels(context.Background(), RepoRequest{Owner: "example-owner", Repo: "example-repo"})
+			if err != nil || result.RepositoryID != "17" || len(result.Labels) != 0 || requests.Load() != 2 {
+				t.Fatal("optional private blocked the bounded label list")
+			}
+		})
+	}
+}
+
 func TestIssue157CompleteLabelPagination(t *testing.T) {
 	for _, scenario := range []string{"complete", "short-pages", "duplicate", "duplicate-name", "foreign", "malformed", "null", "limit"} {
 		t.Run(scenario, func(t *testing.T) {

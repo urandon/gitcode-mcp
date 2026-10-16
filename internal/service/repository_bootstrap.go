@@ -49,7 +49,7 @@ func (s *Service) GetRepositoryMetadata(ctx context.Context, repoID string) (Rep
 	if err != nil {
 		return RepositoryMetadataResult{}, err
 	}
-	return RepositoryMetadataResult{RepoID: route.RepoID, RepositoryMetadata: meta, Evidence: "explicit adapter-confirmed identity/default-branch and provider-reported private observation; not independent accessibility or authorization evidence", GeneratedAt: s.now().UTC()}, nil
+	return RepositoryMetadataResult{RepoID: route.RepoID, RepositoryMetadata: meta, Evidence: "explicit adapter-confirmed identity/default-branch and provider-reported private (when available) observation; not independent accessibility or authorization evidence", GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) ListRepositoryLabels(ctx context.Context, repoID string) (RepositoryLabelsResult, error) {
