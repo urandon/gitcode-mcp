@@ -108,7 +108,7 @@ func InspectPlan(ctx context.Context, repo *Repository, req PlanRequest) (PlanRe
 		if entry.Type != "blob" {
 			return nil
 		}
-		if entry.Size < 0 || entry.Size > DefaultMaxDocumentBytes {
+		if entry.Size > DefaultMaxDocumentBytes {
 			result.ExcludedFiles++
 			return nil
 		}
