@@ -2,13 +2,14 @@ package repositorydocs
 
 import (
 	"context"
-	"gitcode-mcp/internal/cache"
-	"gitcode-mcp/internal/rag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/rag"
 )
 
 func TestBADSizeParser(t *testing.T) {
@@ -77,12 +78,20 @@ func TestMissingBlobCoverage(t *testing.T) {
 			if !included && result.State != cache.RepoDocSetReady {
 				t.Fatalf("unrelated missing blob blocks ready: %+v", result)
 			}
-			hit, e := NewRetriever(store, provider).Search(ctx, SearchRequest{RepoID: "owner/repo", Repository: repo, Revision: rev, Query: "documentation", Mode: SearchModeHybrid, Limit: 5})
-			if e != nil {
-				t.Fatal(e)
-			}
-			if included && hit.EffectiveMode == SearchModeHybrid {
-				t.Fatal("partial corpus falsely hybrid")
+			for _, mode := range []string{SearchModeHybrid, SearchModeFullText} {
+				hit, e := NewRetriever(store, provider).Search(ctx, SearchRequest{RepoID: "owner/repo", Repository: repo, Revision: rev, Query: "documentation", Mode: mode, Limit: 5})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if included && mode == SearchModeHybrid && hit.EffectiveMode == SearchModeHybrid {
+					t.Fatal("partial corpus falsely hybrid")
+				}
+				if hit.Coverage.MissingObjects != want {
+					t.Fatalf("search missing-object coverage = %d, want %d", hit.Coverage.MissingObjects, want)
+				}
+				if included && len(hit.Warnings) == 0 {
+					t.Fatal("missing document has no diagnostic")
+				}
 			}
 		})
 	}
