@@ -514,11 +514,14 @@ func (s Source) GetProvenance() string {
 }
 
 type SourceFilter struct {
-	RepoID     string
-	Kind       string
-	Status     string
-	Provenance Provenance
-	Limit      int
+	RepoID        string
+	Kind          string
+	Status        string
+	Labels        []string
+	LabelsMatch   string
+	TitleContains string
+	Provenance    Provenance
+	Limit         int
 }
 
 func (f *SourceFilter) SetProvenance(provenance Provenance) {
@@ -526,11 +529,15 @@ func (f *SourceFilter) SetProvenance(provenance Provenance) {
 }
 
 type SearchQuery struct {
-	RepoID     string
-	Query      string
-	Kind       string
-	Provenance Provenance
-	Limit      int
+	RepoID        string
+	Query         string
+	Kind          string
+	Status        string
+	Labels        []string
+	LabelsMatch   string
+	TitleContains string
+	Provenance    Provenance
+	Limit         int
 }
 
 func (q *SearchQuery) SetProvenance(provenance Provenance) {

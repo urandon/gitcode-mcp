@@ -147,28 +147,33 @@ type LiveRepositoryBindingRequest struct {
 }
 
 type SearchSourcesRequest struct {
-	RepoID     string `json:"repo_id"`
-	Query      string `json:"query"`
-	Mode       string `json:"mode,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	Offset     int    `json:"offset,omitempty"`
+	RepoID        string   `json:"repo_id"`
+	Query         string   `json:"query"`
+	Mode          string   `json:"mode,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Provenance    string   `json:"provenance,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+	Offset        int      `json:"offset,omitempty"`
 }
 
 type SearchSourcesResult struct {
-	RepoID         string               `json:"repo_id"`
-	Query          string               `json:"query"`
-	SearchMode     string               `json:"search_mode"`
-	RequestedMode  string               `json:"requested_mode"`
-	EffectiveMode  string               `json:"effective_mode"`
-	RAGState       string               `json:"rag_state"`
-	FallbackReason string               `json:"fallback_reason,omitempty"`
-	Coverage       SearchRAGCoverage    `json:"coverage"`
-	Repair         SearchRepairStatus   `json:"repair"`
-	Results        []SearchSourceResult `json:"results"`
-	Limit          int                  `json:"limit"`
-	Offset         int                  `json:"offset"`
+	Filters        *SourceMetadataFilters `json:"filters,omitempty"`
+	RepoID         string                 `json:"repo_id"`
+	Query          string                 `json:"query"`
+	SearchMode     string                 `json:"search_mode"`
+	RequestedMode  string                 `json:"requested_mode"`
+	EffectiveMode  string                 `json:"effective_mode"`
+	RAGState       string                 `json:"rag_state"`
+	FallbackReason string                 `json:"fallback_reason,omitempty"`
+	Coverage       SearchRAGCoverage      `json:"coverage"`
+	Repair         SearchRepairStatus     `json:"repair"`
+	Results        []SearchSourceResult   `json:"results"`
+	Limit          int                    `json:"limit"`
+	Offset         int                    `json:"offset"`
 }
 
 type SearchSourceResult struct {
@@ -246,12 +251,15 @@ type SourceRecord struct {
 }
 
 type ListSourcesRequest struct {
-	RepoID     string `json:"repo_id"`
-	Kind       string `json:"kind,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	Offset     int    `json:"offset,omitempty"`
+	RepoID        string   `json:"repo_id"`
+	Kind          string   `json:"kind,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
+	Provenance    string   `json:"provenance,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+	Offset        int      `json:"offset,omitempty"`
 }
 
 func (r ListSourcesRequest) limitPlusOffset() int {
@@ -262,10 +270,11 @@ func (r ListSourcesRequest) limitPlusOffset() int {
 }
 
 type ListSourcesResult struct {
-	RepoID  string          `json:"repo_id"`
-	Results []SourceSummary `json:"results"`
-	Limit   int             `json:"limit"`
-	Offset  int             `json:"offset"`
+	Filters *SourceMetadataFilters `json:"filters,omitempty"`
+	RepoID  string                 `json:"repo_id"`
+	Results []SourceSummary        `json:"results"`
+	Limit   int                    `json:"limit"`
+	Offset  int                    `json:"offset"`
 }
 
 type SourceSummary struct {

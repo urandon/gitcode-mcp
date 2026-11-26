@@ -705,7 +705,11 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	if err != nil {
 		return SearchSourcesResult{}, err
 	}
-	if strings.TrimSpace(req.Query) == "" {
+	filters, err := metadataFilters(req.Status, req.TitleContains, req.Labels, req.LabelsMatch)
+	if err != nil {
+		return SearchSourcesResult{}, err
+	}
+	if strings.TrimSpace(req.Query) == "" && filters == nil {
 		return SearchSourcesResult{}, ErrInvalidQuery{Field: "query", Message: "query is required"}
 	}
 	mode := strings.ToLower(strings.TrimSpace(req.Mode))
@@ -720,6 +724,9 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	if err != nil {
 		return SearchSourcesResult{}, err
 	}
+	if strings.TrimSpace(req.Query) == "" {
+		return s.searchMetadataOnly(ctx, req, filters, mode, limit)
+	}
 	lexicalLimit := limit + req.Offset
 	semanticLimit := lexicalLimit
 	if semanticLimit < 40 {
@@ -733,6 +740,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		return SearchSourcesResult{}, err
 	}
 	base := SearchSourcesResult{
+		Filters:       filters,
 		RepoID:        repoID,
 		Query:         req.Query,
 		RequestedMode: mode,
@@ -766,6 +774,12 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	semanticSourceIDs, err := s.searchSemanticSourceIDs(ctx, repoID, req)
 	if err != nil {
 		return SearchSourcesResult{}, err
+	}
+	if semanticSourceIDs != nil && len(semanticSourceIDs) == 0 {
+		base.RAGState = "not_requested"
+		base.Results = pageSearchSources(lexical, req.Offset, limit)
+		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
+		return base, nil
 	}
 	ragLimit := semanticLimit * 2
 	ragResult, ragErr := s.ragSearch(ctx, rag.SearchRequest{RepoID: repoID, Query: req.Query, SourceIDs: semanticSourceIDs, TopK: semanticLimit, Limit: ragLimit})
@@ -830,10 +844,10 @@ func ragProviderErrorFallbackReason(err error) (string, bool) {
 }
 
 func (s *Service) searchSemanticSourceIDs(ctx context.Context, repoID string, req SearchSourcesRequest) ([]string, error) {
-	if req.Kind == "" && req.Provenance == "" {
+	if req.Kind == "" && req.Provenance == "" && req.Status == "" && req.TitleContains == "" && len(req.Labels) == 0 {
 		return nil, nil
 	}
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance)})
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Status: req.Status, Labels: req.Labels, LabelsMatch: req.LabelsMatch, TitleContains: req.TitleContains})
 	if err != nil {
 		return nil, normalizeError(err, "search", req.Query)
 	}
@@ -845,7 +859,7 @@ func (s *Service) searchSemanticSourceIDs(ctx context.Context, repoID string, re
 }
 
 func (s *Service) searchSourceLexicalCandidates(ctx context.Context, repoID string, req SearchSourcesRequest, limit int) ([]SearchSourceResult, map[string]time.Time, error) {
-	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Limit: limit})
+	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Status: req.Status, Labels: req.Labels, LabelsMatch: req.LabelsMatch, TitleContains: req.TitleContains, Limit: limit})
 	if err != nil {
 		return nil, nil, normalizeError(err, "search", req.Query)
 	}
@@ -870,7 +884,7 @@ func (s *Service) searchSourceLexicalCandidates(ctx context.Context, repoID stri
 		}
 		if !seen {
 			source, getErr := s.store.GetSourceScoped(ctx, repoID, stableID)
-			if getErr == nil && (req.Kind == "" || source.Kind == req.Kind) && (req.Provenance == "" || string(source.Provenance) == req.Provenance) {
+			if getErr == nil && sourceMatchesMetadata(source, req) {
 				line := 1
 				snippet := strings.TrimSpace(source.Title)
 				if body := strings.TrimSpace(source.Body); body != "" {
@@ -926,10 +940,7 @@ func (s *Service) fuseSearchSources(ctx context.Context, repoID string, req Sear
 			}
 			return nil, normalizeError(err, "source", hit.SourceID)
 		}
-		if req.Kind != "" && source.Kind != req.Kind {
-			continue
-		}
-		if req.Provenance != "" && string(source.Provenance) != req.Provenance {
+		if !sourceMatchesMetadata(source, req) {
 			continue
 		}
 		item := semantic[source.ID]
@@ -1152,6 +1163,9 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 }
 
 func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (ListSourcesResult, error) {
+	if _, err := metadataFilters(req.Status, req.TitleContains, req.Labels, req.LabelsMatch); err != nil {
+		return ListSourcesResult{}, err
+	}
 	limit, err := SourceQueryPage(req.Limit, req.Offset)
 	if err != nil {
 		return ListSourcesResult{}, err
@@ -1167,11 +1181,15 @@ func (s *Service) listSources(ctx context.Context, req ListSourcesRequest) (List
 	if err != nil {
 		return ListSourcesResult{}, err
 	}
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Provenance: cache.Provenance(req.Provenance), Limit: req.limitPlusOffset()})
+	filters, err := metadataFilters(req.Status, req.TitleContains, req.Labels, req.LabelsMatch)
+	if err != nil {
+		return ListSourcesResult{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Labels: req.Labels, LabelsMatch: req.LabelsMatch, TitleContains: req.TitleContains, Provenance: cache.Provenance(req.Provenance), Limit: req.limitPlusOffset()})
 	if err != nil {
 		return ListSourcesResult{}, normalizeError(err, "sources", "")
 	}
-	if len(sources) == 0 {
+	if len(sources) == 0 && filters == nil {
 		return ListSourcesResult{}, ErrCacheEmpty{Message: "cache has no sources"}
 	}
 	sort.SliceStable(sources, func(i, j int) bool {
@@ -1185,7 +1203,7 @@ func (s *Service) listSources(ctx context.Context, req ListSourcesRequest) (List
 	for _, source := range sources {
 		out = append(out, sourceSummary(source))
 	}
-	return ListSourcesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
+	return ListSourcesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset, Filters: filters}, nil
 }
 
 func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) (BacklinksResult, error) {

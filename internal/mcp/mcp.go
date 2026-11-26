@@ -469,19 +469,23 @@ type toolRegistry map[string]registeredTool
 var toolDefs = []toolDefinition{
 	{
 		Name:        "search_sources",
-		Description: "Search cached sources with hybrid lexical plus semantic retrieval by default. Results are grouped by source with citations and score provenance. Use mode=full_text for deterministic exact/token matching without an embedding-provider call.",
+		Description: "Search cached sources with hybrid retrieval, constrained by status, exact labels (all/any) and literal case-sensitive title_contains. Omit query for metadata-only selection without embedding calls. Results describe cached positive metadata, never complete remote coverage. Use mode=full_text for deterministic text search.",
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"repo_id":    {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"query":      {Type: "string", Description: "Conceptual, fuzzy, identifier, or exact text query.", MinLength: 1},
-				"provenance": {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
-				"mode":       {Type: "string", Description: "hybrid (default) or deterministic full_text retrieval.", Enum: []string{service.SearchModeHybrid, service.SearchModeFullText}, Default: service.SearchModeHybrid},
-				"kind":       {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
-				"limit":      {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset":     {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id":        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"query":          {Type: "string", Description: "Text query; may be omitted when metadata predicates are supplied."},
+				"status":         {Type: "string", Description: "Exact cached source status, e.g. open."},
+				"labels":         {Type: "array", Description: "Exact case-sensitive label names; positive cached membership only.", Items: &schemaProp{Type: "string"}},
+				"labels_match":   {Type: "string", Enum: []string{"all", "any"}, Description: "Match all labels (default) or any label."},
+				"title_contains": {Type: "string", Description: "Literal case-sensitive Unicode title substring; no regex or wildcard expansion."},
+				"provenance":     {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
+				"mode":           {Type: "string", Description: "hybrid (default) or deterministic full_text retrieval.", Enum: []string{service.SearchModeHybrid, service.SearchModeFullText}, Default: service.SearchModeHybrid},
+				"kind":           {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
+				"limit":          {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":         {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
-			Required: []string{"repo_id", "query"},
+			Required: []string{"repo_id"},
 		},
 	},
 	{
@@ -498,16 +502,19 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "list_sources",
-		Description: "List cached sources with optional filters.",
+		Description: "List cached sources with status, exact labels (labels_match=all|any) and literal case-sensitive title_contains filters. Example: kind=issue, status=open, labels=[bug]. No embedding or live fetch; cached positive membership only.",
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"repo_id":    {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"kind":       {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
-				"provenance": {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
-				"status":     {Type: "string", Description: "Source status filter."},
-				"limit":      {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset":     {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id":        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"kind":           {Type: "string", Description: "Cached source kind filter, including locally ingested kinds."},
+				"provenance":     {Type: "string", Description: "Cached source provenance filter (live, fixture, remote, projection, bridge)."},
+				"status":         {Type: "string", Description: "Source status filter."},
+				"labels":         {Type: "array", Items: &schemaProp{Type: "string"}, Description: "Exact case-sensitive label names."},
+				"labels_match":   {Type: "string", Enum: []string{"all", "any"}, Description: "All (default) or any label."},
+				"title_contains": {Type: "string", Description: "Literal case-sensitive Unicode title substring."},
+				"limit":          {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":         {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
 			Required: []string{"repo_id"},
 		},
@@ -1204,16 +1211,24 @@ func (s *Server) toolRegistry() toolRegistry {
 }
 
 type searchSourcesArgs struct {
-	RepoID     string `json:"repo_id"`
-	Query      string `json:"query"`
-	Mode       string `json:"mode,omitempty"`
-	Kind       string `json:"kind,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	Limit      *int   `json:"limit,omitempty"`
-	Offset     *int   `json:"offset,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
+	RepoID        string   `json:"repo_id"`
+	Query         string   `json:"query"`
+	Mode          string   `json:"mode,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Provenance    string   `json:"provenance,omitempty"`
+	Limit         *int     `json:"limit,omitempty"`
+	Offset        *int     `json:"offset,omitempty"`
 }
 
 func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	if !validSourceMetadataJSON(args) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "metadata filters cannot be null"})
+		return
+	}
 	var a searchSourcesArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
@@ -1223,7 +1238,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
-	if a.Query == "" {
+	if a.Query == "" && a.Status == "" && a.TitleContains == "" && len(a.Labels) == 0 {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_query", Message: "query is required"})
 		return
 	}
@@ -1250,6 +1265,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 	}
 
 	results, err := s.svc.SearchSources(ctx, service.SearchSourcesRequest{
+		Status: a.Status, Labels: a.Labels, LabelsMatch: a.LabelsMatch, TitleContains: a.TitleContains,
 		RepoID:     a.RepoID,
 		Query:      a.Query,
 		Mode:       mode,
@@ -1318,15 +1334,22 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 }
 
 type listSourcesArgs struct {
-	RepoID     string `json:"repo_id"`
-	Kind       string `json:"kind,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	Limit      *int   `json:"limit,omitempty"`
-	Offset     *int   `json:"offset,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
+	RepoID        string   `json:"repo_id"`
+	Kind          string   `json:"kind,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Provenance    string   `json:"provenance,omitempty"`
+	Limit         *int     `json:"limit,omitempty"`
+	Offset        *int     `json:"offset,omitempty"`
 }
 
 func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	if !validSourceMetadataJSON(args) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "metadata filters cannot be null"})
+		return
+	}
 	var a listSourcesArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
@@ -1354,6 +1377,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 	}
 
 	results, err := s.svc.ListSources(ctx, service.ListSourcesRequest{
+		Labels: a.Labels, LabelsMatch: a.LabelsMatch, TitleContains: a.TitleContains,
 		RepoID:     a.RepoID,
 		Kind:       a.Kind,
 		Status:     a.Status,

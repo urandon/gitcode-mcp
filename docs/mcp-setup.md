@@ -46,6 +46,47 @@ contain the same service result, including provenance, citations and fallback.
 Error envelopes differ: CLI uses `failure_class` and an exit code, while MCP
 uses JSON-RPC `error.data.code`.
 
+### Issue metadata selection
+
+`list_sources` and `search_sources` accept `status`, `labels` (at most 32
+distinct names), `labels_match: all|any` (default `all`), and `title_contains`.
+Predicates combine by AND. Labels match exact case-sensitive Unicode names:
+spaces, commas and punctuation are literal, with no case folding or Unicode
+normalization. Names must be nonblank, at most 128 characters, without NUL or
+newlines. `title_contains` is a literal case-sensitive substring of at most
+512 characters, not FTS, regex or wildcard syntax. Omitted/empty lists and
+empty strings remove that predicate; null metadata arguments are invalid.
+Unknown label names produce a valid empty result.
+
+```json
+{"repo_id":"example/repo","kind":"issue","status":"open","labels":["bug"]}
+```
+
+Pass this to `list_sources` to list cached open issues labelled `bug`. To
+`search_sources`, pass the same object plus `title_contains: "Bootstrap"`
+to constrain titles. Omit `query` for metadata-only selection: both list and
+metadata-only search need neither embeddings nor live GitCode. Add `query`
+for ordinary hybrid/full-text retrieval within the selected metadata cohort.
+Filters are applied before candidate limits/top-k and again to semantic/ID
+boosts; provider fallback cannot widen them. Pagination follows filtering.
+
+```sh
+gitcode-mcp list --repo example/repo --kind issue --status open --filter-label bug
+gitcode-mcp search --repo example/repo --status open --filter-label mcp --title-contains Bootstrap
+gitcode-mcp search --repo example/repo --status open --filter-label 'area, 中文' --filter-label bug --labels-match any 'retry failures'
+```
+
+`--filter-label` is repeatable and never comma-splits; the existing write
+`--labels` option is unchanged. Results include applied `filters` with scope
+`cached_sources` and `label_evidence=positive_membership_only_unknown_excluded`.
+Only positively cached membership qualifies. Nil/legacy unknown labels do not
+prove absence, and no result or empty page certifies complete/current remote
+coverage. Explicit sync refreshes metadata; queries never repair/sync it.
+Search Lab in protected Admin offers the same filters and bounded pagination;
+metadata-only comparisons do not embed. These are cached-source operations,
+not new fields on the separately versioned `local_project_*` Git-authority
+contracts. Local project queries retain their existing declared capabilities.
+
 Standalone CLI `backlinks` and MCP `source_backlinks` use the same default 20,
 explicit 1..100 and nonnegative overflow-safe offset policy. They return the
 actual requested page of incoming sources, ordered by stable source id, with
