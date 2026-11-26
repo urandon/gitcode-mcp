@@ -1377,6 +1377,32 @@ test('binding control defaults API in the plan and stale apply stays non-mutatin
   expect(applyCalls).toBe(1);
 });
 
+test('Search Lab selects open issues by exact metadata and pages the filtered cohort', async ({ page }) => {
+  await mockAdmin(page);
+  const requests: Record<string, unknown>[] = [];
+  await page.route('**/api/admin/v1/search/compare', async (route) => {
+    const body = route.request().postDataJSON(); requests.push(body);
+    const filters = { status: body.status, labels: body.labels, labels_match: body.labels_match, title_contains: body.title_contains, scope: 'cached_sources', label_evidence: 'positive_membership_only_unknown_excluded' };
+    const result = { id: `ISSUE-${body.offset + 1}`, path: 'issues/example.md', title: 'Bootstrap issue', kind: 'issue', status: 'open', provenance: 'live', snippet: 'Metadata match', rank: body.offset + 1, match: { exact_match: false, fusion_score: 0 }, citations: [] };
+    const run = { requested_mode: 'full_text', effective_mode: 'full_text', rag_state: 'not_requested', results: body.offset ? [] : [result], coverage: {}, repair: { state: 'not_needed' }, filters, limit: body.limit, offset: body.offset };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.admin-search-comparison.v1', repo_id: body.repo_id, cache_ref: body.cache_ref, query: '', full_text: run, hybrid: run } }) });
+  });
+  await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=search');
+  await page.getByLabel('Issue status').selectOption('open');
+  await page.getByLabel('Labels (one exact name per line)').fill('bug\narea, 中文');
+  await page.getByLabel('Title contains (case-sensitive)').fill('Bootstrap');
+  await page.getByLabel('Limit', { exact: true }).fill('1');
+  await page.getByRole('button', { name: 'Compare modes' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Applied metadata:' })).toContainText('positive_membership_only_unknown_excluded');
+  expect(requests[0]).toMatchObject({ query: '', status: 'open', labels: ['bug', 'area, 中文'], labels_match: 'all', title_contains: 'Bootstrap', limit: 1, offset: 0 });
+  await page.getByRole('button', { name: 'Next results', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Applied metadata:' })).toContainText('Offset 1');
+  expect(requests[1]).toMatchObject({ labels: ['bug', 'area, 中文'], offset: 1 });
+  await expect(page.getByRole('button', { name: 'Next results', exact: true })).toBeDisabled();
+  await page.getByLabel('Title contains (case-sensitive)').fill('Other');
+  await expect(page.getByRole('status').filter({ hasText: 'Applied metadata:' })).toHaveCount(0);
+});
+
 test('Search Lab explains hybrid fallback and applies one bounded repair intent', async ({ page }) => {
   await mockAdmin(page);
   let compareBody: Record<string, unknown> = {};

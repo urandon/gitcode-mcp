@@ -60,7 +60,7 @@ func (m *AdminControlManager) CompareSearch(ctx context.Context, req adminhttp.S
 		return nil, err
 	}
 	query := strings.TrimSpace(req.Query)
-	if query == "" || len([]rune(query)) > 512 {
+	if (query == "" && req.Status == "" && len(req.Labels) == 0 && req.TitleContains == "") || len([]rune(query)) > 512 {
 		return nil, controlError(http.StatusBadRequest, "invalid_query", "Search query must contain 1 to 512 characters.", "Use one bounded experiment query.")
 	}
 	limit := req.Limit
@@ -81,7 +81,7 @@ func (m *AdminControlManager) CompareSearch(ctx context.Context, req adminhttp.S
 	defer store.Close()
 	svc := service.New(store)
 	svc.ConfigureRAGSearch(effective.Config)
-	base := service.SearchSourcesRequest{RepoID: strings.TrimSpace(req.RepoID), Query: query, Kind: strings.TrimSpace(req.Kind), Provenance: strings.TrimSpace(req.Provenance), Limit: limit}
+	base := service.SearchSourcesRequest{RepoID: strings.TrimSpace(req.RepoID), Query: query, Kind: strings.TrimSpace(req.Kind), Provenance: strings.TrimSpace(req.Provenance), Status: req.Status, Labels: req.Labels, LabelsMatch: req.LabelsMatch, TitleContains: req.TitleContains, Limit: limit, Offset: req.Offset}
 	fullRequest := base
 	fullRequest.Mode = service.SearchModeFullText
 	full, err := svc.SearchSources(ctx, fullRequest)

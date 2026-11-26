@@ -60,12 +60,17 @@ type FeedbackSetupRequest struct {
 }
 
 type SearchCompareRequest struct {
-	CacheRef   string `json:"cache_ref"`
-	RepoID     string `json:"repo_id"`
-	Query      string `json:"query"`
-	Kind       string `json:"kind,omitempty"`
-	Provenance string `json:"provenance,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
+	Offset        int      `json:"offset,omitempty"`
+	CacheRef      string   `json:"cache_ref"`
+	RepoID        string   `json:"repo_id"`
+	Query         string   `json:"query"`
+	Kind          string   `json:"kind,omitempty"`
+	Provenance    string   `json:"provenance,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
 }
 
 // RepositoryDocsSearchRequest deliberately carries no filesystem path. The

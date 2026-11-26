@@ -425,6 +425,9 @@ export type SearchResult = {
 };
 
 export type SearchRun = {
+	filters?: { status?: string; labels?: string[]; labels_match: string; title_contains?: string; scope: string; label_evidence: string };
+	limit?: number;
+	offset?: number;
   requested_mode: string;
   effective_mode: string;
   rag_state: string;
