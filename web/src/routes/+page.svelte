@@ -102,14 +102,15 @@
   let requestedRegistrationID = '';
   let registrationRedirectNotice = '';
   let searchQuery = '';
-	let searchStatus = '';
-	let searchLabels = '';
-	let searchLabelsMatch = 'all';
-	let searchTitle = '';
-	let searchOffset = 0;
-	let searchSubmittedKey = '';
-	$: searchIntentKey = JSON.stringify([searchQuery, searchKind, searchProvenance, searchStatus, searchLabels, searchLabelsMatch, searchTitle, searchLimit]);
-	$: if (searchComparison && searchIntentKey !== searchSubmittedKey) searchComparison = undefined;
+  let searchStatus = '';
+  let searchLabels = '';
+  let searchLabelsMatch = 'all';
+  let searchTitle = '';
+  let searchOffset = 0;
+  let observedSearchIntent = '';
+  let searchGeneration = 0;
+  $: searchIntentKey = JSON.stringify([active, selectedCacheRef, selectedRepoID, repoTab, searchOffset, searchQuery, searchKind, searchProvenance, searchStatus, searchLabels, searchLabelsMatch, searchTitle, searchLimit]);
+  $: invalidateSearchIntent(searchIntentKey);
   let searchKind = '';
   let searchProvenance = '';
   let searchLimit = 8;
@@ -658,17 +659,31 @@
     } catch { feedbackHandoffCopied = false; }
   }
 
+  function invalidateSearchIntent(key: string): void {
+    if (observedSearchIntent === key) return;
+    observedSearchIntent = key;
+    searchGeneration++;
+    searchComparison = undefined; searchError = ''; searchRunning = false;
+  }
+
   async function runSearchComparison(offset = 0): Promise<void> {
     if (!csrfToken || !searchCompareEnabled || !selectedCache || !selectedRepo || (!searchQuery.trim() && !searchStatus && !searchLabels && !searchTitle)) return;
-	searchOffset = offset;
-	searchSubmittedKey = searchIntentKey;
+    searchOffset = offset;
+    // Settle page/intent invalidation before admitting this request generation.
+    await tick();
+    if (active !== 'Caches' || repoTab !== 'search' || !selectedCache || !selectedRepo) return;
+    const generation = ++searchGeneration, intent = searchIntentKey;
+    const current = () => generation === searchGeneration && intent === searchIntentKey;
     searchRunning = true; searchError = ''; searchComparison = undefined; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined;
     updateLocation(true);
     try {
-      searchComparison = await controlPost<SearchComparison>('/api/admin/v1/search/compare', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, query: searchQuery.trim(), kind: searchKind, provenance: searchProvenance, status:searchStatus, labels:searchLabels.split('\n').filter((value) => value !== ''), labels_match:searchLabelsMatch, title_contains:searchTitle, limit: searchLimit, offset:searchOffset });
+      const comparison = await controlPost<SearchComparison>('/api/admin/v1/search/compare', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, query: searchQuery.trim(), kind: searchKind, provenance: searchProvenance, status:searchStatus, labels:searchLabels.split('\n').filter((value) => value !== ''), labels_match:searchLabelsMatch, title_contains:searchTitle, limit: searchLimit, offset:searchOffset });
+      await tick();
+      if (!current()) return;
+      searchComparison = comparison;
       repairProfile = snapshot.maintenance.find((item) => item.cache_ref === selectedCache?.cache_ref && item.repo_id === selectedRepo?.repo_id)?.policy.profile || '';
-    } catch (value) { searchError = value instanceof Error ? value.message : 'Search comparison failed.'; }
-    finally { searchRunning = false; }
+    } catch (value) { await tick(); if (current()) searchError = value instanceof Error ? value.message : 'Search comparison failed.'; }
+    finally { if (current()) searchRunning = false; }
   }
 
   async function smokeSearchProvider(): Promise<void> {
