@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"gitcode-mcp/internal/capability"
 	"gopkg.in/yaml.v3"
 )
 
@@ -320,6 +321,10 @@ func loadEffective(src Source, overrides Overrides, explicitLocal bool) (Effecti
 		src = OSSource{}
 	}
 	diagnostic := func(err error) error {
+		var policy capability.PolicyError
+		if errors.As(err, &policy) {
+			return policy
+		} // already finite and path-free
 		if explicitLocal {
 			return LocalProjectConfigError{}
 		}
@@ -386,6 +391,7 @@ func loadEffective(src Source, overrides Overrides, explicitLocal bool) (Effecti
 		}
 	}
 	beforeCache := eff.Config.CachePath
+	eff.Config.CapabilityPolicy = PolicyFromSource(src)
 	eff.Config = mergeOverrides(eff.Config, overrides)
 	applyCommandOverrideSources(&eff, overrides, beforeCache)
 	return eff, nil
@@ -393,6 +399,10 @@ func loadEffective(src Source, overrides Overrides, explicitLocal bool) (Effecti
 
 func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus) string {
 	var b strings.Builder
+	if p := eff.Config.CapabilityPolicy; p != nil {
+		fmt.Fprintf(&b, "capability_policy_fingerprint: %s\n", p.Fingerprint())
+		fmt.Fprintf(&b, "capability_policy_profile: %s\n", p.View().Profile)
+	}
 	fmt.Fprintf(&b, "config_path: %s\n", emptyAsNone(eff.Location.Path))
 	fmt.Fprintf(&b, "config_source: %s\n", eff.Location.Source)
 	fmt.Fprintf(&b, "config_format: %s\n", eff.Location.Format)

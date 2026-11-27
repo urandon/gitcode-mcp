@@ -127,6 +127,9 @@ func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSy
 }
 
 func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSyncJobRequest) (Job, bool, error) {
+	if err := manager.requirePolicy("job", SyncJobType); err != nil {
+		return Job{}, false, err
+	}
 	req.RepoID = strings.TrimSpace(req.RepoID)
 	if req.RepoID == "" {
 		return Job{}, false, errors.New("repo_id is required")
@@ -239,6 +242,11 @@ func normalizeSyncAdmissionRequest(req StartSyncJobRequest) (StartSyncJobRequest
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
+	if err := manager.requirePolicy("job", SyncJobType); err != nil {
+		m.blockPolicyJob(jobID, err)
+		m.markWorkerFinished(jobID)
+		return
+	}
 	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
@@ -1298,6 +1306,14 @@ func rejectCancelledSyncStageObserved(ctx context.Context, journal *SyncStageJou
 // snapshot has been loaded and active jobs have been marked interrupted. No
 // provider client is constructed: recovery is a cache-only commit replay.
 func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) error {
+	if err := manager.requirePolicy("job", SyncJobType); err != nil {
+		// Leave the durable stage journal untouched: an operator can restore
+		// authority and resume fetched work without another provider fetch.
+		if holdErr := m.holdInterruptedSyncRecoveriesByPolicy(); holdErr != nil {
+			return holdErr
+		}
+		return nil
+	}
 	runtimeDir := strings.TrimSpace(manager.RuntimeDir)
 	if runtimeDir == "" {
 		paths, err := manager.ResolvePaths()
@@ -2178,7 +2194,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		return nil, stage, err
 	}
 	defer store.Close()
-	svc := service.NewWithClientConfig(store, nil, service.ServiceConfig{LockPath: eff.Config.LockPath})
+	svc := service.NewWithClientConfig(store, nil, service.ServiceConfig{LockPath: eff.Config.LockPath, CapabilityPolicy: manager.instancePolicy()})
 	commit := func(commitCtx context.Context) (*service.SyncResourcesResult, error) {
 		switch stage.Collection {
 		case "issues":
@@ -2689,13 +2705,14 @@ func newSyncJobService(ctx context.Context, manager Manager, req StartSyncJobReq
 	}
 	maxResponseSize := durableSyncResponseLimit(eff.Config.MaxResponseSize)
 	svc, err := service.NewWithMode(store, mode, token, service.ServiceConfig{
-		BaseURL:         eff.Config.GitCodeBaseURL,
-		LockPath:        eff.Config.LockPath,
-		Timeout:         eff.Config.DefaultTimeout,
-		MaxResponseSize: maxResponseSize,
-		MaxRetries:      eff.Config.MaxRetries,
-		RateLimitRPS:    eff.Config.RateLimitRPS,
-		RateLimitBurst:  eff.Config.RateLimitBurst,
+		CapabilityPolicy: manager.instancePolicy(),
+		BaseURL:          eff.Config.GitCodeBaseURL,
+		LockPath:         eff.Config.LockPath,
+		Timeout:          eff.Config.DefaultTimeout,
+		MaxResponseSize:  maxResponseSize,
+		MaxRetries:       eff.Config.MaxRetries,
+		RateLimitRPS:     eff.Config.RateLimitRPS,
+		RateLimitBurst:   eff.Config.RateLimitBurst,
 	})
 	if err != nil {
 		store.Close()

@@ -20,7 +20,7 @@ func IsObservationCommand(args []string) bool {
 	return args[1] == "observe" || args[1] == "metrics" || args[1] == "events"
 }
 
-func executeObservationCommand(ctx context.Context, args []string, stdout, stderr io.Writer, deps localCommandDeps) int {
+func executeObservationCommand(ctx context.Context, args []string, stdout, stderr io.Writer, deps localCommandDeps, authorize func() (config.Source, error)) int {
 	sub := args[0]
 	format := "text"
 	help := false
@@ -96,6 +96,12 @@ func executeObservationCommand(ctx context.Context, args []string, stdout, stder
 	}
 	if err != nil {
 		return writeError(stderr, format, err)
+	}
+	if authorize != nil {
+		deps.Source, err = authorize()
+		if err != nil {
+			return writeError(stderr, format, err)
+		}
 	}
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}

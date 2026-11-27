@@ -41,6 +41,9 @@ func (s *Service) bootstrapClient(ctx context.Context, repoID string) (Repositor
 // Explicit point-in-time provider metadata, not an independent accessibility
 // check. This read neither changes a binding nor authorizes a later write.
 func (s *Service) GetRepositoryMetadata(ctx context.Context, repoID string) (RepositoryMetadataResult, error) {
+	if policyErr := s.authorizePolicy("GetRepositoryMetadata"); policyErr != nil {
+		return zeroPolicyValue[RepositoryMetadataResult](), policyErr
+	}
 	route, client, err := s.bootstrapClient(ctx, repoID)
 	if err != nil {
 		return RepositoryMetadataResult{}, err
@@ -53,6 +56,9 @@ func (s *Service) GetRepositoryMetadata(ctx context.Context, repoID string) (Rep
 }
 
 func (s *Service) ListRepositoryLabels(ctx context.Context, repoID string) (RepositoryLabelsResult, error) {
+	if policyErr := s.authorizePolicy("ListRepositoryLabels"); policyErr != nil {
+		return zeroPolicyValue[RepositoryLabelsResult](), policyErr
+	}
 	route, client, err := s.bootstrapClient(ctx, repoID)
 	if err != nil {
 		return RepositoryLabelsResult{}, err
@@ -70,6 +76,9 @@ func (s *Service) ListRepositoryLabels(ctx context.Context, repoID string) (Repo
 }
 
 func (s *Service) CreateRepositoryLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("CreateRepositoryLabel"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(req.Description) != "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "description", Message: "repository label description writes are not qualified; name and color only"}
 	}

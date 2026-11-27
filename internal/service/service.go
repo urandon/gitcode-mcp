@@ -20,6 +20,7 @@ import (
 	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/feedback"
@@ -36,6 +37,7 @@ const (
 type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
 
 type Service struct {
+	policy                    *capability.Policy
 	store                     cache.Store
 	client                    gitcode.Client
 	now                       func() time.Time
@@ -83,6 +85,7 @@ func NewWithClient(store cache.Store, client gitcode.Client) *Service {
 
 func NewWithClientConfig(store cache.Store, client gitcode.Client, cfg ServiceConfig) *Service {
 	svc := New(store)
+	svc.policy = cfg.CapabilityPolicy
 	svc.client = client
 	svc.providerMode = gitcode.ProviderMode("custom")
 	svc.writeCredentialPresent = true
@@ -103,6 +106,7 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 	switch mode {
 	case gitcode.ProviderModeFixture:
 		return &Service{
+			policy:                    cfg.CapabilityPolicy,
 			store:                     store,
 			client:                    sanitizedFixtureClient{},
 			now:                       func() time.Time { return time.Now().UTC() },
@@ -146,6 +150,7 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			return nil, err
 		}
 		return &Service{
+			policy:                    cfg.CapabilityPolicy,
 			store:                     store,
 			client:                    gitcode.Client(client),
 			now:                       func() time.Time { return time.Now().UTC() },
@@ -361,6 +366,9 @@ func fixtureNow() time.Time {
 }
 
 func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (RepositoryBinding, error) {
+	if policyErr := s.authorizePolicy("AddRepository"); policyErr != nil {
+		return zeroPolicyValue[RepositoryBinding](), policyErr
+	}
 	repo, err := normalizeRepositoryRequest(req, s.now())
 	if err != nil {
 		return RepositoryBinding{}, err
@@ -379,6 +387,9 @@ func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (
 }
 
 func (s *Service) UpdateRepository(ctx context.Context, req AddRepositoryRequest) (RepositoryBinding, error) {
+	if policyErr := s.authorizePolicy("UpdateRepository"); policyErr != nil {
+		return zeroPolicyValue[RepositoryBinding](), policyErr
+	}
 	repo, err := normalizeRepositoryRequest(req, s.now())
 	if err != nil {
 		return RepositoryBinding{}, err
@@ -415,6 +426,9 @@ func ValidateRepositoryBinding(req AddRepositoryRequest, now time.Time) (Reposit
 // Unlike binding replacement, it cannot overwrite concurrent metadata changes.
 // It neither contacts the provider nor changes configuration or cached content.
 func (s *Service) SetRepositoryScopes(ctx context.Context, repoID string, raw []string) (RepositoryBinding, error) {
+	if policyErr := s.authorizePolicy("SetRepositoryScopes"); policyErr != nil {
+		return zeroPolicyValue[RepositoryBinding](), policyErr
+	}
 	repoID = strings.TrimSpace(repoID)
 	if repoID == "" {
 		return RepositoryBinding{}, ErrInvalidQuery{Field: "repo", Message: "an existing exact repo id is required"}
@@ -459,6 +473,9 @@ func (s *Service) SetRepositoryScopes(ctx context.Context, repoID string, raw []
 }
 
 func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest) (ResetLiveCacheResult, error) {
+	if policyErr := s.authorizePolicy("ResetLiveCache"); policyErr != nil {
+		return zeroPolicyValue[ResetLiveCacheResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "cache reset live")
 	if err != nil {
 		return ResetLiveCacheResult{}, err
@@ -475,6 +492,9 @@ func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest)
 }
 
 func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (CacheStatusResult, error) {
+	if policyErr := s.authorizePolicy("CacheStatus"); policyErr != nil {
+		return zeroPolicyValue[CacheStatusResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "cache-status")
 	if err != nil {
 		return CacheStatusResult{}, err
@@ -499,6 +519,9 @@ func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (Cach
 }
 
 func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequest) (RepositoryStatus, error) {
+	if policyErr := s.authorizePolicy("RepositoryStatus"); policyErr != nil {
+		return zeroPolicyValue[RepositoryStatus](), policyErr
+	}
 	repoID := strings.TrimSpace(req.RepoID)
 	if repoID == "" {
 		return RepositoryStatus{}, ErrInvalidQuery{Field: "repo", Message: "repo is required"}
@@ -701,6 +724,9 @@ func sanitizeAPIBaseURL(raw string) string {
 }
 
 func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (SearchSourcesResult, error) {
+	if policyErr := s.authorizePolicy("SearchSources"); policyErr != nil {
+		return zeroPolicyValue[SearchSourcesResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "search")
 	if err != nil {
 		return SearchSourcesResult{}, err
@@ -1139,6 +1165,9 @@ func ragStateForFallback(result rag.SearchResult) string {
 }
 
 func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRecord, error) {
+	if policyErr := s.authorizePolicy("GetSource"); policyErr != nil {
+		return zeroPolicyValue[SourceRecord](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "get")
 	if err != nil {
 		return SourceRecord{}, err
@@ -1163,6 +1192,9 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 }
 
 func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (ListSourcesResult, error) {
+	if policyErr := s.authorizePolicy("ListSources"); policyErr != nil {
+		return zeroPolicyValue[ListSourcesResult](), policyErr
+	}
 	if _, err := metadataFilters(req.Status, req.TitleContains, req.Labels, req.LabelsMatch); err != nil {
 		return ListSourcesResult{}, err
 	}
@@ -1207,6 +1239,9 @@ func (s *Service) listSources(ctx context.Context, req ListSourcesRequest) (List
 }
 
 func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) (BacklinksResult, error) {
+	if policyErr := s.authorizePolicy("GetBacklinks"); policyErr != nil {
+		return zeroPolicyValue[BacklinksResult](), policyErr
+	}
 	limit, err := SourceQueryPage(req.Limit, req.Offset)
 	if err != nil {
 		return BacklinksResult{}, err
@@ -1245,6 +1280,9 @@ func (s *Service) getBacklinks(ctx context.Context, req GetBacklinksRequest) (Ba
 }
 
 func (s *Service) ResolveID(ctx context.Context, req ResolveIDRequest) (ResolvedID, error) {
+	if policyErr := s.authorizePolicy("ResolveID"); policyErr != nil {
+		return zeroPolicyValue[ResolvedID](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "resolve")
 	if err != nil {
 		return ResolvedID{}, err
@@ -1262,6 +1300,9 @@ func (s *Service) ResolveID(ctx context.Context, req ResolveIDRequest) (Resolved
 }
 
 func (s *Service) GetSnippet(ctx context.Context, req SnippetRequest) (SnippetResult, error) {
+	if policyErr := s.authorizePolicy("GetSnippet"); policyErr != nil {
+		return zeroPolicyValue[SnippetResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "snippet")
 	if err != nil {
 		return SnippetResult{}, err
@@ -1280,6 +1321,9 @@ func (s *Service) GetSnippet(ctx context.Context, req SnippetRequest) (SnippetRe
 }
 
 func (s *Service) ListChunks(ctx context.Context, req ChunkQuery) (ChunkQueryResult, error) {
+	if policyErr := s.authorizePolicy("ListChunks"); policyErr != nil {
+		return zeroPolicyValue[ChunkQueryResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "list-chunks")
 	if err != nil {
 		return ChunkQueryResult{}, err
@@ -1297,6 +1341,9 @@ func (s *Service) ListChunks(ctx context.Context, req ChunkQuery) (ChunkQueryRes
 }
 
 func (s *Service) SearchChunks(ctx context.Context, req ChunkSearchQuery) (ChunkQueryResult, error) {
+	if policyErr := s.authorizePolicy("SearchChunks"); policyErr != nil {
+		return zeroPolicyValue[ChunkQueryResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "search-chunks")
 	if err != nil {
 		return ChunkQueryResult{}, err
@@ -1314,6 +1361,9 @@ func (s *Service) SearchChunks(ctx context.Context, req ChunkSearchQuery) (Chunk
 }
 
 func (s *Service) GetChunkSnippet(ctx context.Context, req SnippetQuery) (ChunkQueryResult, error) {
+	if policyErr := s.authorizePolicy("GetChunkSnippet"); policyErr != nil {
+		return zeroPolicyValue[ChunkQueryResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "get-snippet")
 	if err != nil {
 		return ChunkQueryResult{}, err
@@ -1332,6 +1382,9 @@ func (s *Service) GetChunkSnippet(ctx context.Context, req SnippetQuery) (ChunkQ
 }
 
 func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (SyncStatusResult, error) {
+	if policyErr := s.authorizePolicy("GetSyncStatus"); policyErr != nil {
+		return zeroPolicyValue[SyncStatusResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "sync-status")
 	if err != nil {
 		return SyncStatusResult{}, err
@@ -1363,6 +1416,9 @@ func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (Syn
 }
 
 func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncStatusSummaryResult, error) {
+	if policyErr := s.authorizePolicy("SyncStatus"); policyErr != nil {
+		return zeroPolicyValue[SyncStatusSummaryResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "sync-status")
 	if err != nil {
 		return SyncStatusSummaryResult{}, err
@@ -1427,6 +1483,9 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 }
 
 func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (RecentChangesResult, error) {
+	if policyErr := s.authorizePolicy("RecentChanges"); policyErr != nil {
+		return zeroPolicyValue[RecentChangesResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "recent")
 	if err != nil {
 		return RecentChangesResult{}, err
@@ -1454,6 +1513,9 @@ func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (
 }
 
 func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkCheckResult, error) {
+	if policyErr := s.authorizePolicy("LinkCheck"); policyErr != nil {
+		return zeroPolicyValue[LinkCheckResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "link-check")
 	if err != nil {
 		return LinkCheckResult{}, err
@@ -1480,6 +1542,9 @@ func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkChec
 }
 
 func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleIndexResult, error) {
+	if policyErr := s.authorizePolicy("StaleIndex"); policyErr != nil {
+		return zeroPolicyValue[StaleIndexResult](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "stale-index")
 	if err != nil {
 		return StaleIndexResult{}, err
@@ -1511,6 +1576,9 @@ func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleI
 }
 
 func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest) (ExportSnapshotResult, error) {
+	if policyErr := s.authorizePolicy("ExportSnapshot"); policyErr != nil {
+		return zeroPolicyValue[ExportSnapshotResult](), policyErr
+	}
 	format := normalizeSnapshotFormat(req.Format)
 	snapshot, err := s.storedSnapshot(ctx, req)
 	if err != nil {
@@ -1541,6 +1609,9 @@ func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest)
 }
 
 func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (DiffSnapshotResult, error) {
+	if policyErr := s.authorizePolicy("DiffSnapshot"); policyErr != nil {
+		return zeroPolicyValue[DiffSnapshotResult](), policyErr
+	}
 	format := normalizeSnapshotFormat(req.Format)
 	if req.BaseSnapshotID == "" || req.HeadSnapshotID == "" {
 		if req.Base.Kind != "" || req.Head.Kind != "" || req.BaseContent != "" || req.BaseSnapshotContent != "" {
@@ -1618,6 +1689,9 @@ func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (Di
 }
 
 func (s *Service) Ingest(ctx context.Context, req OperationRequest) (OperationResult, error) {
+	if policyErr := s.authorizePolicy("Ingest"); policyErr != nil {
+		return zeroPolicyValue[OperationResult](), policyErr
+	}
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
 	}
@@ -1638,6 +1712,9 @@ func (s *Service) Ingest(ctx context.Context, req OperationRequest) (OperationRe
 }
 
 func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationResult, error) {
+	if policyErr := s.authorizePolicy("Index"); policyErr != nil {
+		return zeroPolicyValue[OperationResult](), policyErr
+	}
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
 	}
@@ -1670,6 +1747,9 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 }
 
 func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (_ SyncResult, retErr error) {
+	if policyErr := s.authorizePolicy("SyncToCache"); policyErr != nil {
+		return zeroPolicyValue[SyncResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -1785,6 +1865,9 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (_ SyncResul
 // successful SyncToCache calls; Failures contains entries from failed calls.
 // Callers should check PartialSyncError before using the result.
 func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("SyncResources"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	result := &SyncResourcesResult{
@@ -1830,6 +1913,9 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (_ *Syn
 }
 
 func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncIssues"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -2141,6 +2227,9 @@ func (s *Service) prepareIssueCommentSync(ctx context.Context, graph cache.Sourc
 }
 
 func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncIssueComments"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -2814,6 +2903,9 @@ func syncResultsDeferredCount(results []SyncResult) int {
 }
 
 func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncPullRequests"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -3144,6 +3236,9 @@ func (s *Service) recordSyncFrontierBestEffort(ctx context.Context, repoID, remo
 }
 
 func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncPRComments"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	remoteAlias := strings.TrimSpace(req.RemoteAlias)
@@ -3334,6 +3429,9 @@ func targetedPRCommentNumber(alias string) (int, error) {
 }
 
 func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest) (PRDiscussionsResult, error) {
+	if policyErr := s.authorizePolicy("ListPRDiscussions"); policyErr != nil {
+		return zeroPolicyValue[PRDiscussionsResult](), policyErr
+	}
 	if strings.TrimSpace(req.RepoID) == "" {
 		return PRDiscussionsResult{}, ErrInvalidQuery{Field: "repo_id", Message: "repo_id is required"}
 	}
@@ -3523,6 +3621,9 @@ func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, p
 }
 
 func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncWiki"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -3816,6 +3917,9 @@ func (s *Service) skipWikiListItemByRevision(ctx context.Context, req SyncReques
 }
 
 func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (_ *SyncResourcesResult, retErr error) {
+	if policyErr := s.authorizePolicy("BulkSyncAll"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	ctx, retainAttempt := beginSyncHTTPAttempt(ctx)
 	defer func() { retErr = retainAttempt(retErr) }()
 	if err := ctx.Err(); err != nil {
@@ -3928,6 +4032,9 @@ func scopedBulkSyncKey(base, scope, id string) string {
 }
 
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("CreateIssue"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
 	}
@@ -3938,6 +4045,9 @@ func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("UpdateIssue"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or issue_id is required"}
 	}
@@ -3953,6 +4063,9 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("CreatePage"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(req.Body) == "" || strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.Title)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path and body are required"}
 	}
@@ -3960,6 +4073,9 @@ func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("UpdatePage"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
 	}
@@ -3967,6 +4083,9 @@ func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) DeletePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("DeletePage"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
 	}
@@ -3974,6 +4093,9 @@ func (s *Service) DeletePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("AddComment"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if (req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "") || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "issue and body are required"}
 	}
@@ -3981,6 +4103,9 @@ func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) UpdateComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("UpdateComment"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(firstNonEmptyString(req.CommentID, req.ID)) == "" || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "comment id and body are required"}
 	}
@@ -3988,6 +4113,9 @@ func (s *Service) UpdateComment(ctx context.Context, req WriteCommandRequest) (W
 }
 
 func (s *Service) CreatePR(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("CreatePR"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Head) == "" || strings.TrimSpace(req.Base) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pull_request", Message: "title, head, and base are required"}
 	}
@@ -3995,6 +4123,9 @@ func (s *Service) CreatePR(ctx context.Context, req WriteCommandRequest) (WriteC
 }
 
 func (s *Service) UpdatePR(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("UpdatePR"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pull_request", Message: "number is required"}
 	}
@@ -4002,6 +4133,9 @@ func (s *Service) UpdatePR(ctx context.Context, req WriteCommandRequest) (WriteC
 }
 
 func (s *Service) MergePR(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("MergePR"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pull_request", Message: "number is required"}
 	}
@@ -4019,6 +4153,9 @@ func (s *Service) MergePR(ctx context.Context, req WriteCommandRequest) (WriteCo
 }
 
 func (s *Service) ListMilestones(ctx context.Context, req MilestoneListRequest) (MilestoneListResult, error) {
+	if policyErr := s.authorizePolicy("ListMilestones"); policyErr != nil {
+		return zeroPolicyValue[MilestoneListResult](), policyErr
+	}
 	repoID := firstNonEmptyString(req.RepoID, req.Repo)
 	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
 	if err != nil {
@@ -4045,6 +4182,9 @@ func (s *Service) ListMilestones(ctx context.Context, req MilestoneListRequest) 
 }
 
 func (s *Service) ListPushRemoteMirrors(ctx context.Context, req PushMirrorListRequest) (PushMirrorListResult, error) {
+	if policyErr := s.authorizePolicy("ListPushRemoteMirrors"); policyErr != nil {
+		return zeroPolicyValue[PushMirrorListResult](), policyErr
+	}
 	repoID := firstNonEmptyString(req.RepoID, req.Repo)
 	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
 	if err != nil {
@@ -4078,6 +4218,9 @@ func (s *Service) ListPushRemoteMirrors(ctx context.Context, req PushMirrorListR
 }
 
 func (s *Service) TriggerPushRemoteMirror(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("TriggerPushRemoteMirror"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Mode == WriteModeLive && strings.TrimSpace(req.IdempotencyKey) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "idempotency_key", Message: "is required for live push mirror triggers"}
 	}
@@ -4102,6 +4245,9 @@ func (s *Service) TriggerPushRemoteMirror(ctx context.Context, req WriteCommandR
 }
 
 func (s *Service) WaitPushRemoteMirror(ctx context.Context, req PushMirrorWaitRequest) (PushMirrorWaitResult, error) {
+	if policyErr := s.authorizePolicy("WaitPushRemoteMirror"); policyErr != nil {
+		return zeroPolicyValue[PushMirrorWaitResult](), policyErr
+	}
 	timeoutSeconds := req.TimeoutSeconds
 	if timeoutSeconds == 0 {
 		timeoutSeconds = 120
@@ -4214,6 +4360,9 @@ func pushMirrorWaitResult(repoID string, mirror PushMirrorRecord, after, now tim
 }
 
 func (s *Service) CreateMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("CreateMilestone"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if err := validateMilestoneCommandFields(req, true); err != nil {
 		return WriteCommandResult{}, err
 	}
@@ -4221,6 +4370,9 @@ func (s *Service) CreateMilestone(ctx context.Context, req WriteCommandRequest) 
 }
 
 func (s *Service) UpdateMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("UpdateMilestone"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if strings.TrimSpace(firstNonEmptyString(req.Milestone, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id or title is required"}
 	}
@@ -4240,6 +4392,9 @@ func validateMilestoneCommandFields(req WriteCommandRequest, create bool) error 
 }
 
 func (s *Service) SetIssueMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("SetIssueMilestone"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 && strings.TrimSpace(req.IssueID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number or issue_id is required"}
 	}
@@ -4250,6 +4405,9 @@ func (s *Service) SetIssueMilestone(ctx context.Context, req WriteCommandRequest
 }
 
 func (s *Service) ClearIssueMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("ClearIssueMilestone"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number or issue_id is required"}
 	}
@@ -4257,6 +4415,9 @@ func (s *Service) ClearIssueMilestone(ctx context.Context, req WriteCommandReque
 }
 
 func (s *Service) AddPRComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("AddPRComment"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_comment", Message: "pull request number and body are required"}
 	}
@@ -4264,6 +4425,9 @@ func (s *Service) AddPRComment(ctx context.Context, req WriteCommandRequest) (Wr
 }
 
 func (s *Service) AddPRReviewComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("AddPRReviewComment"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 || strings.TrimSpace(req.Body) == "" || strings.TrimSpace(req.Path) == "" || (req.Line == 0 && req.Position == 0) {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_review_comment", Message: "pull request number, body, path, and line or position are required"}
 	}
@@ -4284,6 +4448,9 @@ func (s *Service) AddPRReviewComment(ctx context.Context, req WriteCommandReques
 }
 
 func (s *Service) ReplyPRReviewComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("ReplyPRReviewComment"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 || strings.TrimSpace(req.Body) == "" || strings.TrimSpace(req.DiscussionID) == "" || strings.TrimSpace(req.ParentID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_review_reply", Message: "pull request number, discussion id, parent comment id, and body are required"}
 	}
@@ -4291,6 +4458,9 @@ func (s *Service) ReplyPRReviewComment(ctx context.Context, req WriteCommandRequ
 }
 
 func (s *Service) LinkPRIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("LinkPRIssue"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if req.Number == 0 || (req.IssueNumber == 0 && strings.TrimSpace(req.IssueID) == "") {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "link", Message: "pull request number and issue number or issue_id are required"}
 	}
@@ -4298,6 +4468,9 @@ func (s *Service) LinkPRIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if policyErr := s.authorizePolicy("AddLabel"); policyErr != nil {
+		return zeroPolicyValue[WriteCommandResult](), policyErr
+	}
 	if (req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "") || strings.TrimSpace(req.Label) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
 	}
@@ -4305,6 +4478,9 @@ func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteC
 }
 
 func (s *Service) PublishRelease(ctx context.Context, req PublishReleaseRequest) (PublishReleaseResult, error) {
+	if policyErr := s.authorizePolicy("PublishRelease"); policyErr != nil {
+		return zeroPolicyValue[PublishReleaseResult](), policyErr
+	}
 	if strings.TrimSpace(req.Tag) == "" {
 		return PublishReleaseResult{}, ErrInvalidQuery{Field: "tag", Message: "release tag is required"}
 	}
@@ -5069,6 +5245,9 @@ func normalizeWikiCachePath(remoteID string) string {
 }
 
 func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requestedScope RepositoryScope) (RepositoryRoute, error) {
+	if policyErr := s.authorizePolicy("BuildAdapterRoute"); policyErr != nil {
+		return zeroPolicyValue[RepositoryRoute](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, repoID, "route")
 	if err != nil {
 		return RepositoryRoute{}, err
@@ -5085,6 +5264,9 @@ func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requeste
 }
 
 func (s *Service) ResolveLiveRepositoryBinding(ctx context.Context, req LiveRepositoryBindingRequest) (LiveRepositoryBinding, error) {
+	if policyErr := s.authorizePolicy("ResolveLiveRepositoryBinding"); policyErr != nil {
+		return zeroPolicyValue[LiveRepositoryBinding](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "live repository binding")
 	if err != nil {
 		return LiveRepositoryBinding{}, err
@@ -8340,6 +8522,9 @@ func parseRecordRef(ref string) (string, string, bool) {
 }
 
 func (s *Service) DiagnoseUnscopedAlias(ctx context.Context, aliasType, aliasID string) error {
+	if policyErr := s.authorizePolicy("DiagnoseUnscopedAlias"); policyErr != nil {
+		return policyErr
+	}
 	identities, err := s.store.DiagnoseAlias(ctx, cache.RemoteAlias{Type: aliasType, ID: aliasID})
 	if err != nil {
 		return normalizeError(err, "alias", aliasType+":"+aliasID)

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/capability"
+
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/feedback"
 )
@@ -24,21 +26,22 @@ const (
 )
 
 type Config struct {
-	CachePath       string                        `json:"cache_path"`
-	LockPath        string                        `json:"lock_path"`
-	CacheMode       string                        `json:"cache_mode"`
-	GitCodeBaseURL  string                        `json:"gitcode_base_url"`
-	DefaultTimeout  time.Duration                 `json:"default_timeout"`
-	MaxResponseSize int64                         `json:"max_response_size"`
-	MaxRetries      int                           `json:"max_retries"`
-	RateLimitRPS    float64                       `json:"rate_limit_rps"`
-	RateLimitBurst  int                           `json:"rate_limit_burst"`
-	Format          string                        `json:"format"`
-	MCPToolAccess   string                        `json:"mcp_tool_access"`
-	Service         ServiceConfig                 `json:"service"`
-	RAG             RAGConfig                     `json:"rag"`
-	Feedback        feedback.Config               `json:"feedback"`
-	LocalProjects   map[string]LocalProjectConfig `json:"local_projects,omitempty"`
+	CapabilityPolicy *capability.Policy            `json:"-" yaml:"-"`
+	CachePath        string                        `json:"cache_path"`
+	LockPath         string                        `json:"lock_path"`
+	CacheMode        string                        `json:"cache_mode"`
+	GitCodeBaseURL   string                        `json:"gitcode_base_url"`
+	DefaultTimeout   time.Duration                 `json:"default_timeout"`
+	MaxResponseSize  int64                         `json:"max_response_size"`
+	MaxRetries       int                           `json:"max_retries"`
+	RateLimitRPS     float64                       `json:"rate_limit_rps"`
+	RateLimitBurst   int                           `json:"rate_limit_burst"`
+	Format           string                        `json:"format"`
+	MCPToolAccess    string                        `json:"mcp_tool_access"`
+	Service          ServiceConfig                 `json:"service"`
+	RAG              RAGConfig                     `json:"rag"`
+	Feedback         feedback.Config               `json:"feedback"`
+	LocalProjects    map[string]LocalProjectConfig `json:"local_projects,omitempty"`
 }
 
 type Overrides struct {

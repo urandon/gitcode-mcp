@@ -88,6 +88,9 @@ func (s *Service) ConfigureFeedbackReadiness(credentialPresent, providerAvailabl
 }
 
 func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (feedback.PreparedReport, error) {
+	if policyErr := s.authorizePolicy("PrepareFeedback"); policyErr != nil {
+		return zeroPolicyValue[feedback.PreparedReport](), policyErr
+	}
 	if err := ctx.Err(); err != nil {
 		return feedback.PreparedReport{}, err
 	}
@@ -109,6 +112,9 @@ func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (fe
 }
 
 func (s *Service) FeedbackReadiness(ctx context.Context) (feedback.Readiness, error) {
+	if policyErr := s.authorizePolicy("FeedbackReadiness"); policyErr != nil {
+		return zeroPolicyValue[feedback.Readiness](), policyErr
+	}
 	if err := ctx.Err(); err != nil {
 		return feedback.Readiness{}, err
 	}
@@ -130,6 +136,9 @@ func (s *Service) FeedbackReadiness(ctx context.Context) (feedback.Readiness, er
 }
 
 func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest) (feedback.SubmissionResult, error) {
+	if policyErr := s.authorizePolicy("SubmitFeedback"); policyErr != nil {
+		return zeroPolicyValue[feedback.SubmissionResult](), policyErr
+	}
 	if req.Mode != WriteModeLive {
 		return feedback.SubmissionResult{}, ErrInvalidQuery{Field: "write_mode", Message: "submit_feedback requires write_mode=live"}
 	}

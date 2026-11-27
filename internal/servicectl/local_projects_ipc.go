@@ -51,6 +51,9 @@ func DecodeLocalProjectLinks(raw []byte) ([]localgit.Reference, error) {
 func localProjectMethod(method string) bool { return strings.HasPrefix(method, "LocalProjects.") }
 
 func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw []byte) (any, error) {
+	if err := s.Manager.requirePolicy("ipc", method); err != nil {
+		return nil, err
+	}
 	if s.LocalProjects == nil {
 		return nil, localHostError("unavailable")
 	}

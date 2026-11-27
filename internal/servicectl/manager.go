@@ -151,6 +151,7 @@ func effectiveJobConfig(manager Manager, cachePath string) (config.EffectiveConf
 		cfg := *manager.EffectiveConfig
 		cfg.CachePath = cachePath
 		cfg.LockPath = cachePath + ".lock"
+		cfg.CapabilityPolicy = manager.instancePolicy()
 		return config.EffectiveConfig{Config: cfg, CachePathSource: "daemon-registry-snapshot"}, nil
 	}
 	src := manager.Source
@@ -217,6 +218,14 @@ func (m Manager) ResolvePaths() (Paths, error) {
 }
 
 func (m Manager) Install(overwrite bool) (Status, error) {
+	var policyErr error
+	m.Source, _, policyErr = config.PrepareCapabilityPolicy(m.Source, "", "")
+	if policyErr != nil {
+		return Status{}, policyErr
+	}
+	if policyErr = m.requirePolicy("cli", "service install"); policyErr != nil {
+		return Status{}, policyErr
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -233,7 +242,10 @@ func (m Manager) Install(overwrite bool) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	content := installFileContent(paths.InstallKind, binary, paths)
+	content, err := m.policyInstallContent(paths.InstallKind, binary, paths)
+	if err != nil {
+		return Status{}, err
+	}
 	if fileExists(paths.InstallPath) && !m.observationUpgrade && !boundedDefinition(paths.InstallKind, paths.InstallPath) {
 		return Status{}, observationUpgradeError("migration_required")
 	}
@@ -244,6 +256,9 @@ func (m Manager) Install(overwrite bool) (Status, error) {
 }
 
 func (m Manager) Uninstall() (Status, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return Status{}, err
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -350,6 +365,14 @@ func (m Manager) Doctor() (Status, error) {
 }
 
 func (m Manager) Start(ctx context.Context) (Status, error) {
+	var policyErr error
+	m.Source, _, policyErr = config.PrepareCapabilityPolicy(m.Source, "", "")
+	if policyErr != nil {
+		return Status{}, policyErr
+	}
+	if policyErr = m.requirePolicy("cli", "service start"); policyErr != nil {
+		return Status{}, policyErr
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -362,6 +385,9 @@ func (m Manager) Start(ctx context.Context) (Status, error) {
 		status.Message = "service is not installed"
 		return status, nil
 	}
+	if err := m.validateInstalledPolicy(paths); err != nil {
+		return Status{}, err
+	}
 	if err := m.runStartCommand(ctx, paths); err != nil {
 		return Status{}, err
 	}
@@ -372,6 +398,9 @@ func (m Manager) Start(ctx context.Context) (Status, error) {
 // manager's loaded copy. Merely overwriting a plist is insufficient on macOS:
 // launchd keeps executing the definition it bootstrapped earlier.
 func (m Manager) Repair(ctx context.Context) (Status, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return Status{}, err
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -392,6 +421,9 @@ func (m Manager) Repair(ctx context.Context) (Status, error) {
 }
 
 func (m Manager) Stop(ctx context.Context) (Status, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return Status{}, err
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -420,6 +452,9 @@ func (m Manager) Stop(ctx context.Context) (Status, error) {
 // is not owned by the installed service is refused: the migrator cannot prove
 // that it controls that writer lifecycle.
 func (m Manager) QuiesceForCacheMigration(ctx context.Context) (Status, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return Status{}, err
+	}
 	status, err := m.Status()
 	if err != nil {
 		return Status{}, err
@@ -475,7 +510,18 @@ func (m Manager) waitForStopped(ctx context.Context, paths Paths) (Status, error
 }
 
 func (m Manager) Run(ctx context.Context) error {
+	var policyErr error
+	m.Source, _, policyErr = config.PrepareCapabilityPolicy(m.Source, "", "")
+	if policyErr != nil {
+		return policyErr
+	}
+	if policyErr = m.requirePolicy("cli", "service run"); policyErr != nil {
+		return policyErr
+	}
 	if m.EffectiveConfig != nil {
+		owned := *m.EffectiveConfig
+		owned.CapabilityPolicy = m.instancePolicy()
+		m.EffectiveConfig = &owned
 		if err := config.ValidateLocalProjects(m.EffectiveConfig.Service.Mode, m.EffectiveConfig.LocalProjects); err != nil {
 			return err
 		}
@@ -598,7 +644,8 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	observationReader := &observability.Reader{Collector: m.observation, Metrics: m.metrics, Health: maintenance.ExecutionHealthContext}
 	admin := adminhttp.New(adminhttp.Config{
-		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
+		Policy: m.instancePolicy(),
+		Bind:   m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
 		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics, Observation: m.observation, Observability: observationReader,
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
@@ -696,6 +743,11 @@ func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, r
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
+		if m.requirePolicy("job", SyncJobType) != nil {
+			// A failed durable policy-hold must not be turned into a terminal
+			// recovery failure: retain stages and their admission fences.
+			return
+		}
 		if err := jobs.failInterruptedSyncRecoveries("sync_recovery_failed"); err == nil {
 			releaseFences()
 		}
@@ -733,7 +785,7 @@ func (m Manager) Client() (*RPCClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RPCClient{Network: paths.Network, Address: paths.Address, SocketPath: paths.SocketPath}, nil
+	return &RPCClient{Network: paths.Network, Address: paths.Address, SocketPath: paths.SocketPath, Policy: m.instancePolicy()}, nil
 }
 
 func ensurePathDirs(paths Paths) error {

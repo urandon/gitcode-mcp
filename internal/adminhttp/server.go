@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/observability"
 )
 
@@ -52,6 +53,8 @@ type OpenRequest struct {
 }
 
 type Config struct {
+	Policy                             *capability.Policy
+	PolicySnapshotRequirements         []string // trusted host composition, never browser input
 	Bind                               string
 	AllowNonLoopback                   bool
 	SessionTTL                         time.Duration
@@ -245,6 +248,7 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/rag/repair/apply", c.applyRAGRepair)
 	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
+	mux.HandleFunc("GET /api/admin/v1/policy", c.getPolicy)
 	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)
 	mux.HandleFunc("GET /api/admin/v1/observability", c.getObservability)
 	mux.HandleFunc("GET /api/admin/v1/observability/metrics", c.getObservabilityMetrics)
@@ -261,6 +265,10 @@ func (c *Controller) handler() http.Handler {
 			return
 		}
 		observeAdminRoute(mux, r)
+		_, pattern := mux.Handler(r)
+		if !c.authorizePolicyRoute(w, r, pattern) {
+			return
+		}
 		mux.ServeHTTP(w, r)
 	}))
 }

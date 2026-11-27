@@ -29,6 +29,9 @@ type StartRAGIndexJobRequest struct {
 }
 
 func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest) (Job, error) {
+	if err := manager.requirePolicy("job", RAGIndexJobType); err != nil {
+		return Job{}, err
+	}
 	req.RepoID = strings.TrimSpace(req.RepoID)
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
@@ -62,6 +65,11 @@ func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
+	if err := manager.requirePolicy("job", RAGIndexJobType); err != nil {
+		m.blockPolicyJob(jobID, err)
+		m.markWorkerFinished(jobID)
+		return
+	}
 	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {

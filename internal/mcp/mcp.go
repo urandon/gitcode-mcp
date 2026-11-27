@@ -100,6 +100,7 @@ func (s *Server) feedbackReadiness(ctx context.Context) (feedback.Readiness, err
 }
 
 type RPCHandler struct {
+	policy               *capability.Policy
 	localOnly            bool
 	toolRelease          func()
 	bootstrapDiagnostic  func() StartupDiagnostic
@@ -121,6 +122,7 @@ type RPCHandler struct {
 }
 
 type Server struct {
+	policy               *capability.Policy
 	localOnly            bool
 	bootstrapDiagnostic  func() StartupDiagnostic
 	toolBootstrap        ToolBootstrap
@@ -257,7 +259,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, repositoryDocsPolicy: h.repositoryDocsPolicy, repositoryDocsStatus: h.repositoryDocsStatus, repositoryDocsSearch: h.repositoryDocsSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
+	server := &Server{policy: h.policy, writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, repositoryDocsPolicy: h.repositoryDocsPolicy, repositoryDocsStatus: h.repositoryDocsStatus, repositoryDocsSearch: h.repositoryDocsSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
 	server.serviceClient, server.toolBootstrap = h.serviceClient, h.toolBootstrap
 	server.localOnly = h.localOnly
 	if h.bootstrapDiagnostic != nil {
@@ -416,7 +418,7 @@ func (s *Server) activeToolAccess() ToolAccess {
 }
 
 func (s *Server) toolDisabledByPolicy(name string) bool {
-	return s.activeToolAccess() == ToolAccessRead && writeToolNames[name]
+	return s.policy.Require("mcp", name) != nil || s.activeToolAccess() == ToolAccessRead && writeToolNames[name]
 }
 
 func intPtr(v int) *int             { return &v }
@@ -935,6 +937,9 @@ func (s *Server) toolsList(ctx context.Context, req request) {
 	order := toolListOrder
 	if s.localOnly {
 		order = nil
+		if s.policy != nil {
+			order = append(order, "capability_policy_status")
+		}
 		for _, cap := range capability.LocalProjectCapabilities() {
 			if cap.MCP.Enabled {
 				order = append(order, cap.MCPName)
@@ -994,6 +999,14 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	}
 	if params.Name == "" {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
+		return
+	}
+	if s.policy != nil && s.toolDisabledByPolicy(params.Name) {
+		s.writeToolDisabledByPolicy(req.ID, params.Name)
+		return
+	}
+	if params.Name == "capability_policy_status" {
+		s.callCapabilityPolicy(ctx, req.ID, params.Arguments)
 		return
 	}
 	if s.localOnly {
@@ -1095,6 +1108,7 @@ var toolListOrder = buildToolListOrder()
 
 func buildToolListOrder() []string {
 	names := append([]string(nil), preWriteToolListOrder...)
+	names = append(names, "capability_policy_status")
 	for _, cap := range capability.MCPRAGCapabilities() {
 		names = append(names, cap.MCPName)
 	}
@@ -1106,6 +1120,9 @@ func buildToolListOrder() []string {
 }
 
 func toolDefinitionByName(name string) toolDefinition {
+	if name == "capability_policy_status" {
+		return toolDefinition{Name: name, Description: "Read content-free immutable instance grants and fingerprint. Cannot change policy; no cache, credentials, provider or daemon bootstrap.", InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}, Annotations: map[string]bool{"readOnlyHint": true, "openWorldHint": false}}
+	}
 	if def, ok := localProjectToolDefinition(name); ok {
 		return def
 	}
@@ -1154,6 +1171,9 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 
 func (s *Server) toolRegistry() toolRegistry {
 	registry := toolRegistry{}
+	if s.policy != nil || !s.localOnly && !s.minimal {
+		registerTool(registry, "capability_policy_status", s.callCapabilityPolicy)
+	}
 	if s.localOnly {
 		for _, cap := range capability.LocalProjectCapabilities() {
 			if cap.MCP.Enabled {
@@ -2562,6 +2582,14 @@ func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 }
 
 func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
+	if s.policy != nil && len(capability.Requirements("mcp", name)) == 0 {
+		s.writeError(id, -32601, "Capability not mapped", &errorData{Code: "capability_policy_unmapped", Message: "The trusted instance policy has no mapping for this operation."})
+		return
+	}
+	if s.policy != nil {
+		s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: "capability denied by the trusted instance policy", Remediation: "ask the operator to review the trusted instance policy; client requests cannot change grants"})
+		return
+	}
 	access := string(s.activeToolAccess())
 	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "remove the explicit read-only override, or set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write"})
 }

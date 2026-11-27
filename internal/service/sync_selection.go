@@ -46,6 +46,9 @@ func SelectSyncCollections(scopes []RepositoryScope, requested SyncSelection) (S
 }
 
 func (s *Service) ResolveSyncSelection(ctx context.Context, repoID string, requested SyncSelection) (SyncSelection, error) {
+	if policyErr := s.authorizePolicy("ResolveSyncSelection"); policyErr != nil {
+		return zeroPolicyValue[SyncSelection](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, repoID, "sync selection")
 	if err != nil {
 		return SyncSelection{}, err

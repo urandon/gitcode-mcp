@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
@@ -53,19 +54,20 @@ type Request struct {
 }
 
 type Report struct {
-	Version       string                `json:"version"`
-	Config        ConfigSection         `json:"config"`
-	Cache         CacheSection          `json:"cache"`
-	Repo          RepoSection           `json:"repo"`
-	Credential    CredentialSection     `json:"credential"`
-	Sync          SyncSection           `json:"sync"`
-	Index         IndexSection          `json:"index"`
-	RAG           RAGSection            `json:"rag"`
-	MCP           MCPSection            `json:"mcp"`
-	LiveProvider  LiveProviderSection   `json:"live_provider"`
-	LiveReadiness LiveReadinessSnapshot `json:"live_readiness,omitempty"`
-	AuthProbe     AuthProbeSection      `json:"auth_probe"`
-	Diagnostics   []string              `json:"diagnostics,omitempty"`
+	Policy        *capability.PolicyView `json:"capability_policy,omitempty"`
+	Version       string                 `json:"version"`
+	Config        ConfigSection          `json:"config"`
+	Cache         CacheSection           `json:"cache"`
+	Repo          RepoSection            `json:"repo"`
+	Credential    CredentialSection      `json:"credential"`
+	Sync          SyncSection            `json:"sync"`
+	Index         IndexSection           `json:"index"`
+	RAG           RAGSection             `json:"rag"`
+	MCP           MCPSection             `json:"mcp"`
+	LiveProvider  LiveProviderSection    `json:"live_provider"`
+	LiveReadiness LiveReadinessSnapshot  `json:"live_readiness,omitempty"`
+	AuthProbe     AuthProbeSection       `json:"auth_probe"`
+	Diagnostics   []string               `json:"diagnostics,omitempty"`
 }
 
 type ConfigSection struct {
@@ -226,6 +228,10 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 
 	report := Report{Version: req.Version}
+	if p := eff.Config.CapabilityPolicy; p != nil {
+		v := p.View()
+		report.Policy = &v
+	}
 	report.Config = ConfigSection{Path: eff.Location.Path, Source: eff.Location.Source, Format: eff.Location.Format, Exists: eff.Location.Exists, CachePath: cachePath, CachePathSource: eff.CachePathSource, CacheMode: eff.Config.CacheMode, RepoRoot: eff.RepoRoot, RepoLocalConfigPath: eff.RepoLocalConfigPath}
 	report.Cache = CacheSection{Path: cachePath, Status: "not_available", SchemaVersion: "unknown"}
 	report.Repo = RepoSection{Status: "no_repo_bound", BindHint: "run 'gitcode-mcp repo add --repo <id> --owner <owner> --name <name> --api-base-url <url> --scopes issues,wiki'"}

@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"time"
 
+	"gitcode-mcp/internal/capability"
+
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
 
 type ServiceConfig struct {
+	CapabilityPolicy          *capability.Policy
 	BaseURL                   string
 	LockPath                  string
 	Timeout                   time.Duration

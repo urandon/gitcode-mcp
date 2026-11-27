@@ -134,6 +134,9 @@ func (MaintenanceServiceReadinessError) Error() string {
 func (MaintenanceServiceReadinessError) DiagnosticCode() string { return "service_not_ready" }
 
 func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest) (MaintenancePlan, error) {
+	if err := s.Manager.requirePolicy("ipc", "Maintenance.ResolveConfig"); err != nil {
+		return MaintenancePlan{}, err
+	}
 	req, err := normalizeMaintenanceSetupRequest(req)
 	if err != nil {
 		return MaintenancePlan{}, err
@@ -238,6 +241,19 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 }
 
 func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest) (MaintenanceApplyResult, error) {
+	if err := s.Manager.requirePolicy("ipc", "Maintenance.Enroll"); err != nil {
+		return MaintenanceApplyResult{}, err
+	}
+	if req.SyncMode != "off" {
+		if err := s.Manager.instancePolicy().Check("sync_live"); err != nil {
+			return MaintenanceApplyResult{}, err
+		}
+	}
+	if req.RAGMode != "off" {
+		if err := s.Manager.instancePolicy().Check("rag_index"); err != nil {
+			return MaintenanceApplyResult{}, err
+		}
+	}
 	if strings.TrimSpace(req.IdempotencyKey) == "" {
 		return MaintenanceApplyResult{}, MaintenanceSetupInputError{Field: "idempotency_key", Message: "is required"}
 	}
@@ -268,6 +284,17 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 		result.PendingActions = machineChangeActions(current.Actions)
 		result.NextAction = firstMaintenanceHandoff(result.PendingActions)
 		return result, nil
+	}
+	// Check all compound effects before the first installation/start/setup.
+	if actionRequired(current.Actions, "install-service") || actionRequired(current.Actions, "start-service") {
+		if err := s.Manager.instancePolicy().Check("service_lifecycle"); err != nil {
+			return MaintenanceApplyResult{}, err
+		}
+	}
+	if current.Policy.RAGEnabled {
+		if err := s.Manager.instancePolicy().Check("rag_setup"); err != nil {
+			return MaintenanceApplyResult{}, err
+		}
 	}
 	if actionRequired(current.Actions, "install-service") {
 		if _, err := s.Manager.Install(false); err != nil {
@@ -358,6 +385,9 @@ func (MaintenanceSetupInputError) DiagnosticCode() string { return "invalid_quer
 func (s MaintenanceSetup) providerPlan(ctx context.Context, req MaintenanceSetupRequest) (MaintenanceProviderPlan, []MaintenancePlanAction, []string, error) {
 	if req.RAGMode == "off" {
 		return MaintenanceProviderPlan{DataBoundary: "unknown", EmbeddingSmokeStatus: "skipped"}, nil, nil, nil
+	}
+	if err := s.Manager.instancePolicy().Check("rag_status"); err != nil {
+		return MaintenanceProviderPlan{}, nil, nil, err
 	}
 	setup, err := rag.Setup(ctx, rag.SetupRequest{Config: s.Config, Profile: req.Profile, DryRun: true, Runtime: s.RAGRuntime})
 	if err != nil {

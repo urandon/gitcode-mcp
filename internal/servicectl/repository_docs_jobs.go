@@ -74,6 +74,9 @@ func (RepositoryDocsAdmissionStaleError) DiagnosticCode() string {
 }
 
 func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (Job, error) {
+	if err := manager.requirePolicy("job", RepositoryDocsIndexJobType); err != nil {
+		return Job{}, err
+	}
 	prepared, err := prepareRepositoryDocsIndex(ctx, manager, req)
 	if err != nil {
 		return Job{}, err
@@ -89,6 +92,9 @@ type preparedRepositoryDocsIndex struct {
 }
 
 func prepareRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (preparedRepositoryDocsIndex, error) {
+	if err := manager.requirePolicy("job", RepositoryDocsIndexJobType); err != nil {
+		return preparedRepositoryDocsIndex{}, err
+	}
 	req.RepoID = strings.TrimSpace(req.RepoID)
 	req.RepositoryPath = strings.TrimSpace(req.RepositoryPath)
 	if err := validateRepositoryDocsSourceSelector(RepositoryDocsSourceSelector{
@@ -175,6 +181,9 @@ func prepareRepositoryDocsIndex(ctx context.Context, manager Manager, req StartR
 }
 
 func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manager Manager, prepared preparedRepositoryDocsIndex) (Job, error) {
+	if err := manager.requirePolicy("job", RepositoryDocsIndexJobType); err != nil {
+		return Job{}, err
+	}
 	req := prepared.request
 	if strings.TrimSpace(req.SourceRegistrationID) == "" || req.SourceRegistrationGeneration <= 0 {
 		return Job{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_not_registered"}
@@ -224,6 +233,11 @@ func repositoryDocsRevisionSetIdentity(req StartRepositoryDocsIndexJobRequest, r
 }
 
 func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Manager, jobID string, req StartRepositoryDocsIndexJobRequest) {
+	if err := manager.requirePolicy("job", RepositoryDocsIndexJobType); err != nil {
+		m.blockPolicyJob(jobID, err)
+		m.markWorkerFinished(jobID)
+		return
+	}
 	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	if !m.beginRepositoryDocsJob(jobID) {

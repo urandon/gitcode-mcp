@@ -69,6 +69,10 @@ while every normal read stays independent from current network health.
 
 ## Product Surfaces
 
+Optional [instance capability policies](docs/capability-policy.md) give trusted
+agent deployments immutable allow/deny grants across CLI, MCP, service and Admin.
+Denied tools are hidden and direct calls remain blocked; this is not an OS sandbox.
+
 | Surface | Best for | Contract |
 | --- | --- | --- |
 | **CLI** | Setup, sync, search, diagnostics, explicit writes, migrations, and release operations | Human-readable or JSON output over the shared service layer |

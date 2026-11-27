@@ -8,6 +8,8 @@
   import StatusChip from '$lib/StatusChip.svelte';
   import ServiceView from '$lib/ServiceView.svelte';
   import LocalProjectsView from '$lib/LocalProjectsView.svelte';
+  import CapabilityPolicyView from '$lib/CapabilityPolicyView.svelte';
+  import type { CapabilityPolicy } from '$lib/admin';
   import { emptyLocalQuery, readLocalQuery, writeLocalQuery, type LocalQuery } from '$lib/local-projects';
   import { isRef, readServiceQuery, refProjection, writeServiceQuery, type ObservationTarget, type ServiceQuery } from '$lib/observation';
 
@@ -55,6 +57,10 @@
   let error = '';
   let copied = '';
   let snapshot: ObservationSnapshot = structuredClone(emptySnapshot);
+  let instancePolicy: CapabilityPolicy | undefined;
+  function policyAllows(...ids: string[]): boolean {
+    return !instancePolicy?.managed || ids.every((id) => instancePolicy?.decisions.some((d) => d.id === id && d.allowed));
+  }
   let eventStream: EventSource | undefined;
   let eventConnection: 'connecting' | 'connected' | 'disconnected' = 'connecting';
   let freshnessNow = Date.now();
@@ -262,6 +268,17 @@
       canonicalizeRegistrationDeepLink();
     } catch (value) { error = value instanceof Error ? value.message : 'Observation is unavailable.'; }
     finally { loading = false; }
+  }
+
+  async function readInstancePolicy(): Promise<void> {
+    // Independent of broad snapshots: the Service cohort stays lazy and a
+    // restricted role can still explain its own content-free decisions.
+    try {
+      const response = await fetch('/api/admin/v1/policy');
+      if (!response.ok) return;
+      const value = await response.json();
+      if (value.schema === 1 && typeof value.managed === 'boolean' && Array.isArray(value.decisions)) instancePolicy = value;
+    } catch { /* Older daemons have no policy endpoint; keep their contract. */ }
   }
 
   function connectEvents(): void {
@@ -796,7 +813,7 @@
   onMount(async () => {
     theme = normalizeTheme(localStorage.getItem(themeStorageKey)); applyTheme(theme); hydrateLocation(); window.addEventListener('popstate', onPopState);
     freshnessTimer = window.setInterval(() => { freshnessNow = Date.now(); }, 5_000);
-    try { await establishSession(); serviceReady = true; connectEvents(); if (active !== 'Service') void refresh(); else loading = false; }
+    try { await establishSession(); await readInstancePolicy(); serviceReady = true; if (policyAllows('admin_service_observation', 'service_events')) connectEvents(); if (active !== 'Service') void refresh(); else loading = false; }
     catch (value) { error = value instanceof Error ? value.message : 'Admin session is unavailable.'; loading = false; }
   });
   onDestroy(() => { eventStream?.close(); if (freshnessTimer !== undefined) window.clearInterval(freshnessTimer); window.removeEventListener('popstate', onPopState); });
@@ -816,12 +833,15 @@
   <main>
     <header class="topbar"><div class="crumb"><span>Admin</span><ChevronRight size={14} /><strong>{active}</strong></div><div class="version">v{snapshot.service.version || 'dev'}</div></header>
     <section class="content" aria-busy={active !== 'Service' && loading}>
+      {#if instancePolicy?.managed}<CapabilityPolicyView policy={instancePolicy} />{/if}
       <!-- Keep only bounded ephemeral editor/retry state across shell sections.
            The component does no cold reads until its cohort is selected. -->
-      <div hidden={active !== 'Local projects' || snapshot.api_version !== adminApiVersion}>
-        <LocalProjectsView active={active === 'Local projects'} ready={serviceReady && !loading && snapshot.api_version === adminApiVersion} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
+      <div hidden={active !== 'Local projects' || snapshot.api_version !== adminApiVersion || snapshot.policy_restricted}>
+        <LocalProjectsView active={active === 'Local projects' && !snapshot.policy_restricted} ready={serviceReady && !loading && snapshot.api_version === adminApiVersion && !snapshot.policy_restricted} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
       </div>
-      {#if active === 'Service'}
+      {#if active !== 'Service' && snapshot.policy_restricted || active === 'Service' && !policyAllows('admin_service_observation', 'service_observability')}
+        <section class="state-panel" role="status" aria-label="Policy restricted observation"><ShieldCheck size={22} /><div><strong>Observation withheld by instance policy</strong><p>This is not an empty cache or job list. The selected role does not grant this operator view. Ask the operator to review the trusted instance policy.</p></div></section>
+      {:else if active === 'Service'}
         <ServiceView bind:boundary={serviceBoundary} ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
       {:else if snapshot.api_version !== adminApiVersion}
         <section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>UI/API version mismatch</strong><p>This UI expects API v{adminApiVersion}, but the daemon returned v{snapshot.api_version || 'unknown'}. Update browser assets and daemon together.</p></div></section>

@@ -129,6 +129,9 @@ func projectSnapshot(ctx context.Context, b localProjectBinding) (*localgit.Snap
 	return snap, nil
 }
 func (s *LocalProjects) Status(ctx context.Context) (LocalProjectsStatus, error) {
+	if policyErr := s.authorizePolicy("Status"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectsStatus](), policyErr
+	}
 	result := LocalProjectsStatus{Projects: []LocalProjectStatus{}}
 	names := make([]string, 0, len(s.bindings))
 	for name := range s.bindings {
@@ -164,6 +167,9 @@ func (s *LocalProjects) Status(ctx context.Context) (LocalProjectsStatus, error)
 	return result, nil
 }
 func (s *LocalProjects) Get(ctx context.Context, q LocalProjectQuery) (localgit.Entity, error) {
+	if policyErr := s.authorizePolicy("Get"); policyErr != nil {
+		return zeroPolicyValue[localgit.Entity](), policyErr
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return localgit.Entity{}, err
@@ -175,6 +181,9 @@ func (s *LocalProjects) Get(ctx context.Context, q LocalProjectQuery) (localgit.
 	return snap.Get(ctx, q.Kind, q.ID)
 }
 func (s *LocalProjects) List(ctx context.Context, q LocalProjectQuery) ([]localgit.Entity, error) {
+	if policyErr := s.authorizePolicy("List"); policyErr != nil {
+		return zeroPolicyValue[[]localgit.Entity](), policyErr
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return nil, err
@@ -186,6 +195,9 @@ func (s *LocalProjects) List(ctx context.Context, q LocalProjectQuery) ([]localg
 	return snap.List(ctx, q.Kind, q.Offset, q.Limit)
 }
 func (s *LocalProjects) History(ctx context.Context, q LocalProjectQuery) ([]localgit.Citation, error) {
+	if policyErr := s.authorizePolicy("History"); policyErr != nil {
+		return zeroPolicyValue[[]localgit.Citation](), policyErr
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return nil, err
@@ -197,6 +209,9 @@ func (s *LocalProjects) History(ctx context.Context, q LocalProjectQuery) ([]loc
 	return snap.History(ctx, q.Kind, q.ID, q.MaxCommits)
 }
 func (s *LocalProjects) Mutate(ctx context.Context, q LocalProjectMutation) (localgit.MutationResult, error) {
+	if policyErr := s.authorizePolicy("Mutate"); policyErr != nil {
+		return zeroPolicyValue[localgit.MutationResult](), policyErr
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return localgit.MutationResult{}, err

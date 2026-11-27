@@ -84,6 +84,9 @@ func (s *Server) SetServiceClient(provider func() (*servicectl.RPCClient, error)
 }
 
 func toolNeedsBootstrap(name string) bool {
+	if name == "capability_policy_status" {
+		return false
+	}
 	switch name {
 	case "service_observability", "service_metrics", "service_events", "service_status", "maintenance_status", "maintenance_plan", "enable_cache_maintenance", "service_jobs", "service_job_status", "service_job_attach", "service_job_cancel", "repository_docs_sources", "repository_docs_plan", "repository_docs_index", "auth_status":
 		return false

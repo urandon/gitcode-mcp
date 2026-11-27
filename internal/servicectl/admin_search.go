@@ -55,6 +55,9 @@ type AdminRAGRepairPlan struct {
 }
 
 func (m *AdminControlManager) CompareSearch(ctx context.Context, req adminhttp.SearchCompareRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "CompareSearch"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	path, err := m.resolveManagedCachePath(ctx, strings.TrimSpace(req.CacheRef))
 	if err != nil {
 		return nil, err
@@ -80,6 +83,9 @@ func (m *AdminControlManager) CompareSearch(ctx context.Context, req adminhttp.S
 	}
 	defer store.Close()
 	svc := service.New(store)
+	if err := svc.BindCapabilityPolicy(m.manager.instancePolicy()); err != nil {
+		return nil, adminControlError(err)
+	}
 	svc.ConfigureRAGSearch(effective.Config)
 	base := service.SearchSourcesRequest{RepoID: strings.TrimSpace(req.RepoID), Query: query, Kind: strings.TrimSpace(req.Kind), Provenance: strings.TrimSpace(req.Provenance), Status: req.Status, Labels: req.Labels, LabelsMatch: req.LabelsMatch, TitleContains: req.TitleContains, Limit: limit, Offset: req.Offset}
 	fullRequest := base
@@ -98,6 +104,9 @@ func (m *AdminControlManager) CompareSearch(ctx context.Context, req adminhttp.S
 }
 
 func (m *AdminControlManager) SmokeProvider(ctx context.Context, req adminhttp.ProviderSmokeRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "SmokeProvider"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	path, err := m.resolveManagedCachePath(ctx, strings.TrimSpace(req.CacheRef))
 	if err != nil {
 		return nil, err
@@ -118,6 +127,9 @@ func (m *AdminControlManager) SmokeProvider(ctx context.Context, req adminhttp.P
 }
 
 func (m *AdminControlManager) PlanRAGRepair(ctx context.Context, req adminhttp.RAGRepairRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanRAGRepair"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	plan, _, err := m.ragRepairPlan(ctx, req)
 	if err != nil {
 		return nil, err
@@ -126,6 +138,9 @@ func (m *AdminControlManager) PlanRAGRepair(ctx context.Context, req adminhttp.R
 }
 
 func (m *AdminControlManager) ApplyRAGRepair(ctx context.Context, req adminhttp.RAGRepairRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ApplyRAGRepair"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if strings.TrimSpace(req.PlanID) == "" {
 		return nil, controlError(http.StatusBadRequest, "invalid_request", "plan_id is required.", "Render and review a current bounded repair plan.")
 	}
