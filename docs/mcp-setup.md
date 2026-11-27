@@ -9,6 +9,11 @@ gitcode-mcp provides two MCP transport modes:
 
 Both modes serve the same MCP tools over the same JSON-RPC 2.0 protocol.
 
+For restricted agent instances, see [instance capability policy](capability-policy.md):
+trusted YAML allow/deny profiles hide tools and enforce the same ceiling at
+CLI/service/IPC/worker/Admin boundaries. Policy status is content-free; profiles
+cannot be selected by an MCP caller.
+
 The isolated LocalGit epic also has an explicit `service.mode: local` profile.
 It discovers only its local project tools, not the remote/cache catalog below;
 see [Local project setup and tool contracts](local-git-project-format.md#climcp-first-usable-checkpoint-g4).

@@ -161,6 +161,9 @@ func observationPlistDict(node observationPlistNode) (map[string]observationPlis
 // owner was quiesced. A known legacy definition retains its old output routing;
 // cache migration is not consent to delete logs or change output ownership.
 func (m Manager) InstallForCacheMigration() (Status, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return Status{}, err
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
@@ -174,6 +177,10 @@ func (m Manager) InstallForCacheMigration() (Status, error) {
 	}
 	if boundedDefinition(paths.InstallKind, paths.InstallPath) {
 		return m.Install(true)
+	}
+	// Never rewrite a managed definition through the legacy renderer.
+	if m.instancePolicy() != nil {
+		return Status{}, observationUpgradeError("migration_required")
 	}
 	old, err := observability.ReadDefinition(paths.InstallPath)
 	if err != nil {
@@ -216,6 +223,9 @@ func legacyInstallFileContent(kind, binary string, paths Paths) string {
 // PlanObservationUpgrade is a local read-only effect ledger. No platform,
 // output cleanup, definition replacement, or provider action happens here.
 func (m Manager) PlanObservationUpgrade() (ObservationUpgradePlan, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return ObservationUpgradePlan{}, err
+	}
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return ObservationUpgradePlan{}, observationUpgradeError("paths_unavailable")
@@ -235,7 +245,10 @@ func (m Manager) PlanObservationUpgrade() (ObservationUpgradePlan, error) {
 	if err != nil {
 		return ObservationUpgradePlan{}, observationUpgradeError("legacy_unsafe")
 	}
-	proposed := installFileContent(paths.InstallKind, binary, paths)
+	proposed, err := m.policyInstallContent(paths.InstallKind, binary, paths)
+	if err != nil {
+		return ObservationUpgradePlan{}, err
+	}
 	f, err := os.Open(binary)
 	if err != nil {
 		return ObservationUpgradePlan{}, observationUpgradeError("executable_unavailable")
@@ -264,6 +277,9 @@ func (m Manager) PlanObservationUpgrade() (ObservationUpgradePlan, error) {
 		Recovery: "If interrupted, render a new plan for remaining local effects; readiness stays migration_required until cleanup and replacement finish."}, nil
 }
 func (m Manager) ApplyObservationUpgrade(ctx context.Context, planID string) (ObservationUpgradePlan, error) {
+	if err := m.prepareLifecyclePolicy(); err != nil {
+		return ObservationUpgradePlan{}, err
+	}
 	plan, err := m.PlanObservationUpgrade()
 	if err != nil {
 		return plan, err
@@ -291,7 +307,11 @@ func (m Manager) ApplyObservationUpgrade(ctx context.Context, planID string) (Ob
 	if err != nil {
 		return plan, observationUpgradeError("executable_unavailable")
 	}
-	if err := observability.WriteDefinition(paths.InstallPath, []byte(installFileContent(paths.InstallKind, binary, paths))); err != nil {
+	content, err := m.policyInstallContent(paths.InstallKind, binary, paths)
+	if err != nil {
+		return plan, err
+	}
+	if err := observability.WriteDefinition(paths.InstallPath, []byte(content)); err != nil {
 		return plan, observationUpgradeError("replacement_incomplete")
 	}
 	if _, err := m.Start(ctx); err != nil {

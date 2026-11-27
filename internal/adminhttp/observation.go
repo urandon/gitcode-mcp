@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/observability"
 )
@@ -25,18 +26,20 @@ const observationAPIVersion = "1"
 type SnapshotProvider func(context.Context) (ObservationSnapshot, error)
 
 type ObservationSnapshot struct {
-	APIVersion   string                   `json:"api_version"`
-	Revision     string                   `json:"revision"`
-	GeneratedAt  time.Time                `json:"generated_at"`
-	Service      ServiceObservation       `json:"service"`
-	Attention    []AttentionItem          `json:"attention"`
-	Caches       []CacheObservation       `json:"caches"`
-	Jobs         []JobObservation         `json:"jobs"`
-	JobRetention JobRetentionObservation  `json:"job_retention"`
-	Maintenance  []MaintenanceObservation `json:"maintenance"`
-	Diagnostics  []DiagnosticObservation  `json:"diagnostics"`
-	Capabilities []CapabilityObservation  `json:"capabilities"`
-	Feedback     FeedbackObservation      `json:"feedback"`
+	Policy           *capability.PolicyView   `json:"policy,omitempty"`
+	PolicyRestricted bool                     `json:"policy_restricted,omitempty"`
+	APIVersion       string                   `json:"api_version"`
+	Revision         string                   `json:"revision"`
+	GeneratedAt      time.Time                `json:"generated_at"`
+	Service          ServiceObservation       `json:"service"`
+	Attention        []AttentionItem          `json:"attention"`
+	Caches           []CacheObservation       `json:"caches"`
+	Jobs             []JobObservation         `json:"jobs"`
+	JobRetention     JobRetentionObservation  `json:"job_retention"`
+	Maintenance      []MaintenanceObservation `json:"maintenance"`
+	Diagnostics      []DiagnosticObservation  `json:"diagnostics"`
+	Capabilities     []CapabilityObservation  `json:"capabilities"`
+	Feedback         FeedbackObservation      `json:"feedback"`
 }
 
 type FeedbackObservation struct {
@@ -647,12 +650,38 @@ func decodeEventCursor(value string) (uint64, error) {
 }
 
 func (c *Controller) snapshot(ctx context.Context) (ObservationSnapshot, error) {
+	if c.cfg.Policy != nil && !c.policySnapshotAllowed() {
+		return PolicyOnlySnapshot(c.cfg.Policy, ServiceObservation{Protocol: "admin.v1", Running: true, AdminSecure: true}), nil
+	}
 	if c.cfg.Snapshot == nil {
 		return ObservationSnapshot{}, errors.New("admin observation is unavailable")
 	}
 	snapshot, err := c.cfg.Snapshot(ctx)
 	if err != nil {
 		return ObservationSnapshot{}, err
+	}
+	if c.cfg.Policy != nil {
+		v := c.cfg.Policy.View()
+		snapshot.Policy = &v
+		for i := range snapshot.Capabilities {
+			item := &snapshot.Capabilities[i]
+			if c.cfg.Policy.Check(item.ID) != nil {
+				item.CLIEnabled = false
+				item.MCPEnabled = false
+			}
+			if c.cfg.Policy.Check(capability.UIRequirements(item.ID)...) != nil {
+				item.UIEnabled = false
+				item.UIReason = "Denied by the trusted instance policy."
+			}
+		}
+		for i := range snapshot.Jobs {
+			job := &snapshot.Jobs[i]
+			job.Cancellable = job.Cancellable && c.cfg.Policy.Check("service_job_cancel") == nil
+			job.Retryable = job.Retryable && c.cfg.Policy.Check("enable_cache_maintenance") == nil && c.cfg.Policy.Require("job", job.Type) == nil
+			for j := range job.SyncCollections {
+				job.SyncCollections[j].Retryable = job.SyncCollections[j].Retryable && job.Retryable
+			}
+		}
 	}
 	if snapshot.APIVersion == "" || snapshot.Revision == "" {
 		snapshot = FinalizeSnapshot(snapshot, time.Now())

@@ -68,6 +68,9 @@ func (s *LocalProjects) WithSearchConfig(cfg config.Config) *LocalProjects {
 }
 
 func (s *LocalProjects) Search(ctx context.Context, q LocalProjectSearchRequest) (LocalProjectSearchResult, error) {
+	if policyErr := s.authorizePolicy("Search"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectSearchResult](), policyErr
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var zero LocalProjectSearchResult
@@ -198,6 +201,9 @@ func localProjectIndexPath(cfg config.Config) string {
 }
 
 func (s *LocalProjects) Index(ctx context.Context, q LocalProjectIndexRequest) (LocalProjectIndexResult, error) {
+	if policyErr := s.authorizePolicy("Index"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectIndexResult](), policyErr
+	}
 	return s.indexAt(ctx, q, "")
 }
 

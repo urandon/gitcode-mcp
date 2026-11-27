@@ -600,6 +600,15 @@ func (m *MaintenanceManager) loadLocked() error {
 		}
 		m.admissions[key] = admission
 	}
+	// A restricted host may inspect durable registry metadata, but must not
+	// probe caches or migrate registrations without maintenance authority.
+	if m.manager.instancePolicy().Check("enable_cache_maintenance") != nil {
+		for _, entry := range m.entries {
+			entry.State, entry.LastErrorClass = "degraded", "capability_policy_denied"
+			entry.LastError = publicMaintenanceJobError(SyncJobType, "capability_policy_denied")
+		}
+		return nil
+	}
 	migrated := m.canonicalizeLoadedEntriesLocked(context.Background())
 	if disk.SchemaVersion == legacyMaintenanceRegistrySchema || migrated {
 		m.generation++
@@ -1551,6 +1560,12 @@ func (m *MaintenanceManager) Run(ctx context.Context) {
 }
 
 func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRequest) (MaintenanceEntry, error) {
+	if err := m.manager.requirePolicy("ipc", "Maintenance.Enroll"); err != nil {
+		return MaintenanceEntry{}, err
+	}
+	if err := m.manager.requireMaintenanceChildren(req.Policy); err != nil {
+		return MaintenanceEntry{}, err
+	}
 	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
 	defer flushObservation()
 	if strings.TrimSpace(req.CachePath) == "" || strings.TrimSpace(req.RepoID) == "" || strings.TrimSpace(req.IdempotencyKey) == "" {
@@ -1715,6 +1730,9 @@ func maintenanceSyncPolicyChanged(before, after MaintenancePolicy) bool {
 }
 
 func (m *MaintenanceManager) List(ctx context.Context) (MaintenanceListResult, error) {
+	if err := m.manager.requirePolicy("ipc", "Maintenance.List"); err != nil {
+		return MaintenanceListResult{}, err
+	}
 	_ = ctx
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1727,6 +1745,9 @@ func (m *MaintenanceManager) List(ctx context.Context) (MaintenanceListResult, e
 }
 
 func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string) (MaintenanceEntry, error) {
+	if err := m.manager.requirePolicy("ipc", "Maintenance.Disable"); err != nil {
+		return MaintenanceEntry{}, err
+	}
 	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
 	defer flushObservation()
 	m.mu.Lock()
@@ -1749,6 +1770,9 @@ func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string)
 }
 
 func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcileResult, error) {
+	if err := m.manager.instancePolicy().Check("enable_cache_maintenance"); err != nil {
+		return MaintenanceReconcileResult{}, err
+	}
 	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
 	defer flushObservation()
 	m.reconcileMu.Lock()
@@ -1803,6 +1827,9 @@ func maintenanceReconcileOrder(entries []MaintenanceEntry, jobs []Job) []Mainten
 }
 
 func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registrationID string) (MaintenanceReconcileResult, error) {
+	if err := m.manager.requirePolicy("ipc", "Maintenance.ReconcileRegistration"); err != nil {
+		return MaintenanceReconcileResult{}, err
+	}
 	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
 	defer flushObservation()
 	m.reconcileMu.Lock()
@@ -1832,6 +1859,9 @@ func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registra
 // RetrySyncCollection starts one explicit collection/frontier without
 // advancing or replaying unrelated successful collections.
 func (m *MaintenanceManager) RetrySyncCollection(ctx context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+	if err := m.manager.instancePolicy().Check("enable_cache_maintenance", "sync_live"); err != nil {
+		return MaintenanceReconcileResult{}, err
+	}
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
 	registrationID, collection = strings.TrimSpace(registrationID), strings.TrimSpace(collection)
@@ -1918,6 +1948,9 @@ func maintenanceCollectionRetrySelection(policy MaintenancePolicy, collection st
 }
 
 func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) (MaintenanceResolveConfigResult, error) {
+	if err := m.manager.requirePolicy("ipc", "Maintenance.ResolveConfig"); err != nil {
+		return MaintenanceResolveConfigResult{}, err
+	}
 	if strings.TrimSpace(req.CachePath) == "" {
 		return MaintenanceResolveConfigResult{}, errors.New("maintenance: cache_path is required")
 	}
@@ -1950,6 +1983,9 @@ func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) 
 // cache/repository maintenance registration. The path stays only in the 0600
 // daemon registry; public state carries opaque Git identities.
 func (m *MaintenanceManager) RegisterRepositoryDocsSource(ctx context.Context, cacheUUID, repoID, repositoryPath, profile string) (MaintenanceEntry, bool, error) {
+	if err := m.manager.requirePolicy("ipc", "RepositoryDocs.RegisterSource"); err != nil {
+		return MaintenanceEntry{}, false, err
+	}
 	ctx, flush := beginMaintenanceObservation(ctx, m.jobs)
 	defer flush()
 	resolved, err := resolveRepositoryDocsSource(ctx, repoID, repositoryPath, profile, repositorydocs.PolicyRequest{RepoID: repoID})
@@ -2297,6 +2333,9 @@ func (m *MaintenanceManager) repositoryDocsAdmissionForCurrentAuthorityLocked(re
 // authority. Ordinary registration never calls this path: callers must present
 // the current source generation, so concurrent or stale rebinds fail closed.
 func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req RepositoryDocsSourceRebindRequest) (MaintenanceEntry, error) {
+	if err := m.manager.requirePolicy("ipc", "RepositoryDocs.RebindSource"); err != nil {
+		return MaintenanceEntry{}, err
+	}
 	ctx, flush := beginMaintenanceObservation(ctx, m.jobs)
 	defer flush()
 	registrationID := strings.TrimSpace(req.RegistrationID)
@@ -2519,6 +2558,16 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	snapshot := *entry
 	path := entry.cachePath
 	snapshot.configSnapshot = entry.configSnapshot
+	if err := m.manager.requireMaintenanceChildren(snapshot.Policy); err != nil {
+		m.mu.Unlock()
+		return m.updateEntryFailure(ctx, registrationID, "capability_policy_denied", err), nil
+	}
+	if len(m.sources[registrationID]) > 0 {
+		if err := m.manager.instancePolicy().Check("repository_docs_index"); err != nil {
+			m.mu.Unlock()
+			return m.updateEntryFailure(ctx, registrationID, "capability_policy_denied", err), nil
+		}
+	}
 	if entry.RepositoryDocs != nil {
 		if source := m.sources[registrationID][entry.RepositoryDocs.SourceRegistrationID]; source != nil {
 			source.State.Stage = entry.RepositoryDocs.Stage
@@ -2541,6 +2590,9 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	if m.jobs != nil && m.jobs.CacheRecoveryPending(snapshot.CacheUUID) {
 		recordJobActionIntentError(ctx, CacheRecoveryFenceError{})
 		return cloneMaintenanceEntry(&snapshot), nil
+	}
+	if err := m.manager.requireMaintenanceChildren(snapshot.Policy); err != nil {
+		return m.updateEntryFailure(ctx, registrationID, "capability_policy_denied", err), nil
 	}
 	now := m.now()
 	activeSync, activeRAG, activeRepositoryDocs := m.activeJobsForSnapshot(snapshot)
@@ -3292,6 +3344,9 @@ func sanitizeMaintenanceProgress(jobType string, event service.ProgressEvent) se
 }
 
 func publicMaintenanceJobError(jobType, class string) string {
+	if class == "capability_policy_denied" {
+		return "maintenance is blocked by the trusted instance policy; ask the operator to review its grants"
+	}
 	if class == "cancelled" {
 		return "maintenance job was cancelled"
 	}

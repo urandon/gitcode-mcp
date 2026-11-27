@@ -572,7 +572,19 @@ export type FeedbackSetupReceipt = {
   feedback: FeedbackObservation;
 };
 
+export type CapabilityPolicy = {
+  schema: number;
+  managed: boolean;
+  profile?: string;
+  profile_ref?: string;
+  fingerprint: string;
+  sources: string[];
+  decisions: Array<{ id: string; allowed: boolean; reason: string }>;
+};
+
 export type ObservationSnapshot = {
+  policy?: CapabilityPolicy;
+  policy_restricted?: boolean;
   api_version: string;
   revision: string;
   generated_at: string;

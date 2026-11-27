@@ -47,6 +47,13 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	snapshot := adminhttp.ObservationSnapshot{Service: adminhttp.ServiceObservation{
 		Version: m.Version, Commit: m.Commit, SchemaMin: schemaMin, SchemaMax: schemaMax, Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
 	}}
+	if p := m.instancePolicy(); p != nil {
+		v := p.View()
+		snapshot.Policy = &v
+		if !adminhttp.CanObservePolicySnapshot(p) {
+			return adminhttp.PolicyOnlySnapshot(p, snapshot.Service), nil
+		}
+	}
 	snapshot.Feedback = m.adminFeedbackObservation(ctx)
 	if status, err := m.Status(); err == nil {
 		snapshot.Service.Installed = status.Installed
@@ -87,6 +94,10 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 		snapshot.Diagnostics = append(snapshot.Diagnostics, adminStageDiagnostics(item.entry)...)
 	}
 	for _, cap := range capability.Capabilities() {
+		if err := m.instancePolicy().Check(capability.UIRequirements(cap.ID)...); err != nil {
+			cap.UI.Enabled = false
+			cap.UI.DisabledReason = "Denied by the trusted instance policy."
+		}
 		// This snapshot belongs to the ordinary GitCode/cache host, which has
 		// no LocalProjects HTTP provider. Explicit local Admin owns its separate
 		// minimal snapshot and enables the same cohort there, not globally here.

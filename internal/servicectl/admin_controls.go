@@ -10,6 +10,7 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/rag"
@@ -48,6 +49,14 @@ func NewAdminControlManager(manager Manager, maintenance *MaintenanceManager, jo
 }
 
 func (m *AdminControlManager) PlanMaintenance(ctx context.Context, req adminhttp.MaintenanceControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanMaintenance"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
+	if req.RAGMode != "off" {
+		if err := m.manager.instancePolicy().Check("rag_status"); err != nil {
+			return nil, adminControlError(err)
+		}
+	}
 	setup, mapped, err := m.maintenanceSetup(ctx, req)
 	if err != nil {
 		return nil, err
@@ -60,6 +69,19 @@ func (m *AdminControlManager) PlanMaintenance(ctx context.Context, req adminhttp
 }
 
 func (m *AdminControlManager) ApplyMaintenance(ctx context.Context, req adminhttp.MaintenanceControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ApplyMaintenance"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
+	if req.SyncMode != "off" {
+		if err := m.manager.instancePolicy().Check("sync_live"); err != nil {
+			return nil, adminControlError(err)
+		}
+	}
+	if req.RAGMode != "off" {
+		if err := m.manager.instancePolicy().Check("rag_index", "rag_setup", "rag_status"); err != nil {
+			return nil, adminControlError(err)
+		}
+	}
 	if strings.TrimSpace(req.PlanID) == "" {
 		return nil, controlError(http.StatusBadRequest, "invalid_request", "plan_id is required.", "Render and review a current plan before apply.")
 	}
@@ -81,6 +103,9 @@ func (m *AdminControlManager) ApplyMaintenance(ctx context.Context, req adminhtt
 }
 
 func (m *AdminControlManager) PlanFeedbackSetup(ctx context.Context, req adminhttp.FeedbackSetupRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanFeedbackSetup"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	repoID := strings.TrimSpace(req.RepoID)
 	if !feedback.ValidRepositoryID(repoID) {
 		return nil, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "repo_id", Message: "repo_id must be an exact owner/repository identity.", Remediation: "Select a repository already bound in the effective cache."}
@@ -96,6 +121,9 @@ func (m *AdminControlManager) PlanFeedbackSetup(ctx context.Context, req adminht
 }
 
 func (m *AdminControlManager) ApplyFeedbackSetup(ctx context.Context, req adminhttp.FeedbackSetupRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ApplyFeedbackSetup"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	repoID := strings.TrimSpace(req.RepoID)
 	if strings.TrimSpace(req.PlanID) == "" {
 		return nil, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "plan_id", Message: "plan_id is required.", Remediation: "Render and review a current feedback setup plan."}
@@ -150,6 +178,9 @@ func (m *AdminControlManager) feedbackSetupEffective(ctx context.Context, repoID
 }
 
 func (m *AdminControlManager) DisableMaintenance(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "DisableMaintenance"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance controls are unavailable.", "Use the CLI maintenance surface.")
 	}
@@ -167,6 +198,9 @@ func (m *AdminControlManager) DisableMaintenance(ctx context.Context, req adminh
 }
 
 func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ReconcileMaintenance"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance controls are unavailable.", "Use the CLI maintenance surface.")
 	}
@@ -184,6 +218,9 @@ func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req admi
 }
 
 func (m *AdminControlManager) PlanMaintenanceConflictResolution(ctx context.Context, req adminhttp.MaintenanceConflictResolutionRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanMaintenanceConflictResolution"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance conflict resolution is unavailable.", "Use a daemon that exposes the canonical identity resolution capability.")
 	}
@@ -199,6 +236,9 @@ func (m *AdminControlManager) PlanMaintenanceConflictResolution(ctx context.Cont
 }
 
 func (m *AdminControlManager) ApplyMaintenanceConflictResolution(ctx context.Context, req adminhttp.MaintenanceConflictResolutionRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ApplyMaintenanceConflictResolution"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance conflict resolution is unavailable.", "Use a daemon that exposes the canonical identity resolution capability.")
 	}
@@ -214,6 +254,9 @@ func (m *AdminControlManager) ApplyMaintenanceConflictResolution(ctx context.Con
 }
 
 func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req adminhttp.RepositoryDocsSearchRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "SearchRepositoryDocs"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation search is unavailable.", "Use the CLI repository documentation surface.")
 	}
@@ -266,6 +309,9 @@ func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req admi
 }
 
 func (m *AdminControlManager) PlanRepositoryDocs(ctx context.Context, req adminhttp.RepositoryDocsPlanRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanRepositoryDocs"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation planning is unavailable.", "Use the CLI repository documentation surface.")
 	}
@@ -288,6 +334,9 @@ func (m *AdminControlManager) PlanRepositoryDocs(ctx context.Context, req adminh
 }
 
 func (m *AdminControlManager) IndexRepositoryDocs(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "IndexRepositoryDocs"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if m.maintenance == nil || m.jobs == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation indexing is unavailable.", "Use the CLI repository documentation surface.")
 	}
@@ -318,6 +367,9 @@ func (m *AdminControlManager) IndexRepositoryDocs(ctx context.Context, req admin
 }
 
 func (m *AdminControlManager) PlanBinding(ctx context.Context, req adminhttp.BindingControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "PlanBinding"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	plan, _, err := m.bindingPlan(ctx, req)
 	if err != nil {
 		return nil, err
@@ -326,6 +378,9 @@ func (m *AdminControlManager) PlanBinding(ctx context.Context, req adminhttp.Bin
 }
 
 func (m *AdminControlManager) ApplyBinding(ctx context.Context, req adminhttp.BindingControlRequest) (any, error) {
+	if policyErr := m.manager.requirePolicy("admin", "ApplyBinding"); policyErr != nil {
+		return nil, adminControlError(policyErr)
+	}
 	if strings.TrimSpace(req.PlanID) == "" {
 		return nil, controlError(http.StatusBadRequest, "invalid_request", "plan_id is required.", "Render and review a current binding plan.")
 	}
@@ -379,6 +434,9 @@ func (m *AdminControlManager) ApplyBinding(ctx context.Context, req adminhttp.Bi
 		}
 		defer store.Close()
 		svc := service.New(store)
+		if err := svc.BindCapabilityPolicy(m.manager.instancePolicy()); err != nil {
+			return nil, adminControlError(err)
+		}
 		request := service.AddRepositoryRequest{RepoID: plan.Binding.RepoID, Owner: plan.Binding.Owner, Name: plan.Binding.Name, APIBaseURL: plan.Binding.APIBaseURL, DisplayName: plan.Binding.DisplayName, Aliases: plan.Binding.Aliases}
 		for _, scope := range plan.Binding.Scopes {
 			request.Scopes = append(request.Scopes, string(scope))
@@ -645,6 +703,10 @@ func maintenanceReconcileOutcome(result MaintenanceReconcileResult) string {
 }
 
 func adminControlError(err error) error {
+	var denied capability.PolicyError
+	if errors.As(err, &denied) {
+		return controlError(http.StatusForbidden, denied.Code, denied.Error(), "Ask the operator to review the trusted instance policy.")
+	}
 	var stale StaleMaintenancePlanError
 	if errors.As(err, &stale) {
 		return controlError(http.StatusConflict, "stale_plan", "The reviewed plan no longer matches current state.", "Render and confirm a new plan.")

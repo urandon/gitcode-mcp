@@ -60,6 +60,9 @@ func observationParams(method string, raw []byte) (any, error) {
 }
 
 func (s RPCServer) dispatchObservation(ctx context.Context, method string, raw []byte) (any, error) {
+	if err := s.Manager.requirePolicy("ipc", method); err != nil {
+		return nil, err
+	}
 	params, err := observationParams(method, raw)
 	if err != nil {
 		return nil, err

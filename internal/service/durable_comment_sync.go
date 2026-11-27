@@ -47,6 +47,9 @@ func (b DurableIssueCommentSyncBatch) RecordCount() int {
 }
 
 func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRequest) (DurableIssueCommentSyncBatch, error) {
+	if policyErr := s.authorizePolicy("FetchIssueCommentSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[DurableIssueCommentSyncBatch](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-issue-comments-fetch")
 	if err != nil {
 		return DurableIssueCommentSyncBatch{}, err
@@ -136,6 +139,9 @@ func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRe
 }
 
 func (s *Service) CommitIssueCommentSyncBatch(ctx context.Context, batch DurableIssueCommentSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	if policyErr := s.authorizePolicy("CommitIssueCommentSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	observation := newConfirmedSyncObservation(ctx, "issue_comments")
 	defer observation.finish()
 	if err := validateDurableIssueCommentBatch(batch); err != nil {
@@ -272,6 +278,9 @@ type DurablePRCommentItem struct {
 func (b DurablePRCommentSyncBatch) RecordCount() int { return len(b.Items) }
 
 func (s *Service) FetchPRCommentSyncBatch(ctx context.Context, req BulkSyncRequest) (DurablePRCommentSyncBatch, error) {
+	if policyErr := s.authorizePolicy("FetchPRCommentSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[DurablePRCommentSyncBatch](), policyErr
+	}
 	target := 0
 	if strings.TrimSpace(req.RemoteAlias) != "" {
 		if req.Page != 0 || req.PerPage != 0 || (req.Bounds != nil && (req.Bounds.MaxPages != 0 || req.Bounds.MaxRecords != 0)) {
@@ -374,6 +383,9 @@ func (s *Service) FetchPRCommentSyncBatch(ctx context.Context, req BulkSyncReque
 }
 
 func (s *Service) CommitPRCommentSyncBatch(ctx context.Context, batch DurablePRCommentSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	if policyErr := s.authorizePolicy("CommitPRCommentSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	observation := newConfirmedSyncObservation(ctx, "pr_comments")
 	defer observation.finish()
 	if err := validateDurablePRCommentBatch(batch); err != nil {

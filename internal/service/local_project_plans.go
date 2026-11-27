@@ -47,6 +47,9 @@ func localProjectPlanID(b localProjectBinding, intent any) string {
 }
 
 func (s *LocalProjects) PlanMutation(ctx context.Context, q LocalProjectMutationPlanRequest) (LocalProjectPlan, error) {
+	if policyErr := s.authorizePolicy("PlanMutation"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectPlan](), policyErr
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var zero LocalProjectPlan
@@ -65,6 +68,9 @@ func (s *LocalProjects) PlanMutation(ctx context.Context, q LocalProjectMutation
 }
 
 func (s *LocalProjects) ApplyMutationPlan(ctx context.Context, q LocalProjectMutationPlanRequest) (localgit.MutationResult, error) {
+	if policyErr := s.authorizePolicy("ApplyMutationPlan"); policyErr != nil {
+		return zeroPolicyValue[localgit.MutationResult](), policyErr
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return localgit.MutationResult{}, err
@@ -79,6 +85,9 @@ func (s *LocalProjects) ApplyMutationPlan(ctx context.Context, q LocalProjectMut
 }
 
 func (s *LocalProjects) PlanIndex(ctx context.Context, q LocalProjectIndexPlanRequest) (LocalProjectPlan, error) {
+	if policyErr := s.authorizePolicy("PlanIndex"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectPlan](), policyErr
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var zero LocalProjectPlan
@@ -118,6 +127,9 @@ func (s *LocalProjects) PlanIndex(ctx context.Context, q LocalProjectIndexPlanRe
 }
 
 func (s *LocalProjects) ApplyIndexPlan(ctx context.Context, q LocalProjectIndexPlanRequest) (LocalProjectIndexResult, error) {
+	if policyErr := s.authorizePolicy("ApplyIndexPlan"); policyErr != nil {
+		return zeroPolicyValue[LocalProjectIndexResult](), policyErr
+	}
 	plan, err := s.PlanIndex(ctx, q)
 	if err != nil {
 		return LocalProjectIndexResult{}, err

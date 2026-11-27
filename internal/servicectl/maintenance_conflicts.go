@@ -99,6 +99,9 @@ func (e MaintenanceConflictResolutionError) Error() string {
 func (e MaintenanceConflictResolutionError) DiagnosticCode() string { return e.code }
 
 func (m *MaintenanceManager) PlanConflictResolution(ctx context.Context, req MaintenanceConflictResolutionRequest) (MaintenanceConflictResolutionPlan, error) {
+	if err := m.manager.instancePolicy().Check("enable_cache_maintenance"); err != nil {
+		return MaintenanceConflictResolutionPlan{}, err
+	}
 	if err := validateMaintenanceConflictResolutionRequest(req, false); err != nil {
 		return MaintenanceConflictResolutionPlan{}, err
 	}
@@ -284,6 +287,9 @@ func (m *MaintenanceManager) conflictHasActiveJobs(cacheUUID string) bool {
 }
 
 func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req MaintenanceConflictResolutionRequest) (MaintenanceConflictResolutionResult, error) {
+	if err := m.manager.instancePolicy().Check("enable_cache_maintenance"); err != nil {
+		return MaintenanceConflictResolutionResult{}, err
+	}
 	if err := validateMaintenanceConflictResolutionRequest(req, true); err != nil {
 		return MaintenanceConflictResolutionResult{}, err
 	}

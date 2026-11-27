@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
@@ -93,6 +94,7 @@ type RPCServer struct {
 }
 
 type RPCClient struct {
+	Policy     *capability.Policy
 	Network    string
 	Address    string
 	SocketPath string
@@ -181,6 +183,18 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var resp RPCResponse
+		if err := s.Manager.requirePolicy("ipc", req.Method); err != nil {
+			var coded interface{ DiagnosticCode() string }
+			resp = RPCResponse{JSONRPC: jsonrpcVersion, Error: &RPCError{Code: -32000, Message: err.Error()}}
+			if errors.As(err, &coded) {
+				resp.Error.DiagnosticCode = coded.DiagnosticCode()
+			}
+			_ = conn.SetWriteDeadline(readDeadline)
+			if enc.Encode(resp) != nil {
+				return
+			}
+			continue
+		}
 		if localProjectMethod(req.Method) || s.LocalOnly {
 			s.handleLocalProjectConn(ctx, conn, raw)
 			return // Local project calls own one connection, including EOF cancellation.
@@ -238,6 +252,15 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 }
 
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	if err := s.Manager.requirePolicy("ipc", method); err != nil {
+		return nil, err
+	}
+	if method == "Policy.Status" {
+		return s.Manager.instancePolicy().View(), nil
+	}
+	if method == "Policy.Handshake" {
+		return policyHandshake{Schema: 1, Fingerprint: s.Manager.instancePolicy().Fingerprint()}, nil
+	}
 	if s.LocalOnly || localProjectMethod(method) {
 		return s.dispatchLocalProject(ctx, method, params)
 	}
@@ -533,6 +556,14 @@ func decodeJobID(params json.RawMessage) (string, error) {
 }
 
 func (c *RPCClient) Call(ctx context.Context, method string, params any, result any) error {
+	if c.Policy != nil {
+		if err := c.Policy.Require("ipc", method); err != nil {
+			return err
+		}
+		if err := c.checkPolicyPeer(ctx); err != nil {
+			return err
+		}
+	}
 	if localProjectMethod(method) {
 		return c.callLocalProject(ctx, method, params, result)
 	}

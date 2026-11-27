@@ -30,6 +30,7 @@ func newMCPBootstrap(deps StartupDeps) *mcpBootstrap { return &mcpBootstrap{deps
 func newMCPHTTPHandler(deps StartupDeps) (*mcp.RPCHandler, *mcpBootstrap) {
 	b := newMCPBootstrap(deps)
 	h := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(nil, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	h.SetCapabilityPolicy(deps.Config.CapabilityPolicy)
 	if deps.Config.Service.Mode == config.ServiceModeLocal {
 		h.SetLocalProjects(b.ServiceClient)
 		return h, b
@@ -140,6 +141,7 @@ func (b *mcpBootstrap) ForTool(ctx context.Context, name string, _ json.RawMessa
 		return nil, b.fail(err)
 	}
 	h := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	h.SetCapabilityPolicy(deps.Config.CapabilityPolicy)
 	h.SetRAGStatusProvider(newMCPRAGStatusProvider(b.store, deps))
 	h.SetRAGSearchProvider(newMCPRAGSearchProvider(b.store, deps))
 	setMCPRepositoryDocsProviders(h.SetRepositoryDocsProviders, b.store, deps)

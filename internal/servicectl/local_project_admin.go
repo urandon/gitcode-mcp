@@ -41,13 +41,23 @@ func (m Manager) newLocalProjectAdmin(host *service.LocalProjects, paths Paths, 
 		return nil, localHostError("unavailable")
 	}
 	return adminhttp.New(adminhttp.Config{
-		Bind: bind, Assets: assets, SessionTTL: m.AdminSessionTTL,
+		Policy:                     m.instancePolicy(),
+		PolicySnapshotRequirements: []string{"local_project_status"},
+		Bind:                       bind, Assets: assets, SessionTTL: m.AdminSessionTTL,
 		Readiness: func(context.Context) adminhttp.Readiness {
 			return adminhttp.Readiness{APIVersion: "1", Version: m.Version, DaemonRunning: true, SessionSecure: true, CheckedAt: time.Now().UTC()}
 		},
 		Snapshot: func(context.Context) (adminhttp.ObservationSnapshot, error) {
 			v := adminhttp.ObservationSnapshot{Service: adminhttp.ServiceObservation{Version: m.Version, Commit: m.Commit, Protocol: "admin.v1", Running: true, StartedAt: &started, AdminSecure: true}}
+			if p := m.instancePolicy(); p != nil {
+				view := p.View()
+				v.Policy = &view
+			}
 			for _, cap := range capability.LocalProjectCapabilities() {
+				if err := m.instancePolicy().Check(capability.UIRequirements(cap.ID)...); err != nil {
+					cap.UI.Enabled = false
+					cap.UI.DisabledReason = "Denied by the trusted instance policy."
+				}
 				v.Capabilities = append(v.Capabilities, adminCapabilityObservation(cap))
 			}
 			return adminhttp.FinalizeSnapshot(v, time.Now().UTC()), nil

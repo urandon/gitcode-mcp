@@ -7,6 +7,8 @@ func CoreCapabilities() []Capability {
 		return Capability{ID: id, Category: "read", Safety: SafetyReadOnly, CLIName: cli, CLIAliases: aliases, MCPName: id, ServiceCommand: usecase, Description: description, CLI: enabled(), MCP: enabled(), UI: disabled("No standalone Admin action; composed browser workbenches have their own declared capability and bounds.")}
 	}
 	out := []Capability{
+		{ID: "service_host", Category: "local", Safety: SafetyBackgroundJob, CLIName: "service", ServiceCommand: "Service.Run", Description: "Host one trusted policy instance; every background effect still requires its own grants.", CLI: enabled(), MCP: disabled("Trusted host launch only."), UI: disabled("No browser host launcher.")},
+		read("capability_policy_status", "capabilities", "Policy.Status", "Inspect content-free effective instance grants and policy identity; fixed control-plane exception, never grants operator writes."),
 		read("search_sources", "search", "SearchSources", "Cached hybrid/full-text source search with status, exact-label and literal-title predicates; metadata-only queries need no text or RAG.", "search_sources"),
 		read("list_sources", "list", "ListSources", "Cached source list; default 20, explicit 1..100, nonnegative offset and kind/provenance/status/label/title filters."),
 		read("get_source", "get", "GetSource", "Get a cached source by stable identity or alias."),

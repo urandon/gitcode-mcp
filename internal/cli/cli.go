@@ -26,6 +26,7 @@ import (
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/credential"
 	"gitcode-mcp/internal/diagnostics"
@@ -40,6 +41,7 @@ import (
 )
 
 var commands = []string{
+	"capabilities",
 	"ingest",
 	"index",
 	"search", "search_sources",
@@ -389,11 +391,35 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 }
 
 func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
-	if len(args) > 0 && args[0] == "project" {
-		return executeProjectCommand(ctx, args[1:], stdout, stderr, deps)
+	args, deployment, expected, launchErr := config.ExtractPolicyLaunchFlags(args)
+	if launchErr != nil {
+		return writeError(stderr, "json", launchErr)
 	}
 	if IsObservationCommand(args) {
-		return executeObservationCommand(ctx, args[1:], stdout, stderr, deps)
+		return executeObservationCommand(ctx, args[1:], stdout, stderr, deps, func() (config.Source, error) {
+			source, policy, err := config.PrepareCapabilityPolicy(deps.Source, deployment, expected)
+			if err != nil {
+				return nil, err
+			}
+			return source, policy.CheckCLI(args)
+		})
+	}
+	if !capability.CLIControl(args) {
+		source, policy, err := config.PrepareCapabilityPolicy(deps.Source, deployment, expected)
+		if err != nil {
+			return writeError(stderr, "json", err)
+		}
+		deps.Source = source
+		if err := policy.CheckCLI(args); err != nil {
+			return writeError(stderr, "json", err)
+		}
+		if len(args) > 0 && args[0] == "capabilities" {
+			_ = json.NewEncoder(stdout).Encode(policy.View())
+			return 0
+		}
+	}
+	if len(args) > 0 && args[0] == "project" {
+		return executeProjectCommand(ctx, args[1:], stdout, stderr, deps)
 	}
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
@@ -533,7 +559,8 @@ func repoStatusReadOnlyFallback(ctx context.Context, plan startupPlan, openErr e
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.New(store), store.Close, nil
+	svc := service.NewWithClientConfig(store, nil, service.ServiceConfig{CapabilityPolicy: plan.ServiceConfig.CapabilityPolicy})
+	return svc, store.Close, nil
 }
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
@@ -552,7 +579,7 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
 	plan.RAGConfig = eff.Config
 	plan.MCPToolAccess = eff.Config.MCPToolAccess
-	plan.ServiceConfig = service.ServiceConfig{LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
+	plan.ServiceConfig = service.ServiceConfig{CapabilityPolicy: eff.Config.CapabilityPolicy, LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
 	if command == "prepare-feedback" {
 		status := deps.CredentialReporter.Status(ctx, eff)
 		plan.CredentialStatus = status
@@ -575,13 +602,13 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 		return plan, config.MissingCredentialError{Status: resolution.Status()}
 	}
 	plan.Token = resolution.Token
-	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, plan.RepoID, liveRequestedScope(command, opts), eff.Config.GitCodeBaseURL)
+	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, plan.RepoID, liveRequestedScope(command, opts), eff.Config)
 	if err != nil {
 		return plan, err
 	}
 	plan.LiveRepositoryBinding = binding
 	plan.APIBaseURL = binding.APIBaseURL
-	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst, Feedback: eff.Config.Feedback}
+	plan.ServiceConfig = service.ServiceConfig{CapabilityPolicy: eff.Config.CapabilityPolicy, BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst, Feedback: eff.Config.Feedback}
 	return plan, nil
 }
 
@@ -617,14 +644,20 @@ func isLiveStartupCommand(command string) bool {
 	}
 }
 
-func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID string, requestedScope service.RepositoryScope, fallback string) (service.LiveRepositoryBinding, error) {
+func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID string, requestedScope service.RepositoryScope, cfg config.Config) (service.LiveRepositoryBinding, error) {
+	if err := cfg.CapabilityPolicy.Check("repo_status"); err != nil {
+		return service.LiveRepositoryBinding{}, err
+	}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
 	if err != nil {
 		return service.LiveRepositoryBinding{}, err
 	}
 	defer store.Close()
 	svc := service.New(store)
-	return svc.ResolveLiveRepositoryBinding(ctx, service.LiveRepositoryBindingRequest{RepoID: repoID, RequestedScope: requestedScope, CachePath: cachePath, AuditPath: cachePath, FallbackAPIBaseURL: fallback})
+	if err := svc.BindCapabilityPolicy(cfg.CapabilityPolicy); err != nil {
+		return service.LiveRepositoryBinding{}, err
+	}
+	return svc.ResolveLiveRepositoryBinding(ctx, service.LiveRepositoryBindingRequest{RepoID: repoID, RequestedScope: requestedScope, CachePath: cachePath, AuditPath: cachePath, FallbackAPIBaseURL: cfg.GitCodeBaseURL})
 }
 
 func liveRequestedScope(command string, opts options) service.RepositoryScope {
@@ -647,6 +680,16 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		}
 		svc, cleanup, err := factory(ctx, plan.CachePath)
 		if err == nil {
+			if bound, ok := svc.(interface {
+				BindCapabilityPolicy(*capability.Policy) error
+			}); ok {
+				if bindErr := bound.BindCapabilityPolicy(plan.ServiceConfig.CapabilityPolicy); bindErr != nil {
+					if cleanup != nil {
+						_ = cleanup()
+					}
+					return nil, nil, bindErr
+				}
+			}
 			if configurable, ok := svc.(interface{ ConfigureFeedback(feedback.Config) }); ok {
 				configurable.ConfigureFeedback(plan.ServiceConfig.Feedback)
 			}
@@ -5076,6 +5119,9 @@ func executeRepoInitLocalCommand(ctx context.Context, opts options, stdout io.Wr
 	}
 	defer store.Close()
 	svc := service.New(store)
+	if err := svc.BindCapabilityPolicy(config.PolicyFromSource(deps.Source)); err != nil {
+		return writeError(stderr, opts.format, err)
+	}
 	apiBaseURL := repositoryAPIBaseURL(opts.apiBaseURL, deps.Source)
 	scopes := strings.TrimSpace(opts.scopes)
 	if scopes == "" {

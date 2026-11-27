@@ -82,6 +82,9 @@ func (i DurableIssueItem) providerItem() gitcode.IssueSummary {
 func (b DurableIssueSyncBatch) RecordCount() int { return len(b.Items) }
 
 func (s *Service) FetchIssueSyncBatch(ctx context.Context, req BulkSyncRequest) (DurableIssueSyncBatch, error) {
+	if policyErr := s.authorizePolicy("FetchIssueSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[DurableIssueSyncBatch](), policyErr
+	}
 	if err := ctx.Err(); err != nil {
 		return DurableIssueSyncBatch{}, err
 	}
@@ -184,6 +187,9 @@ func (s *Service) FetchIssueSyncBatch(ctx context.Context, req BulkSyncRequest) 
 }
 
 func (s *Service) CommitIssueSyncBatch(ctx context.Context, batch DurableIssueSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	if policyErr := s.authorizePolicy("CommitIssueSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	observation := newConfirmedSyncObservation(ctx, "issues")
 	defer observation.finish()
 	if err := validateDurableIssueBatch(batch); err != nil {
@@ -338,6 +344,9 @@ func (i DurablePullItem) providerItem() gitcode.PullRequest {
 func (b DurablePullSyncBatch) RecordCount() int { return len(b.Items) }
 
 func (s *Service) FetchPullSyncBatch(ctx context.Context, req BulkSyncRequest) (DurablePullSyncBatch, error) {
+	if policyErr := s.authorizePolicy("FetchPullSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[DurablePullSyncBatch](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-pulls-fetch")
 	if err != nil {
 		return DurablePullSyncBatch{}, err
@@ -416,6 +425,9 @@ func (s *Service) FetchPullSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	if policyErr := s.authorizePolicy("CommitPullSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	observation := newConfirmedSyncObservation(ctx, "pulls")
 	defer observation.finish()
 	if err := validateDurablePullBatch(batch); err != nil {
@@ -506,6 +518,9 @@ type DurableWikiSyncBatch struct {
 func (b DurableWikiSyncBatch) RecordCount() int { return len(b.Items) }
 
 func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (DurableWikiSyncBatch, error) {
+	if policyErr := s.authorizePolicy("FetchWikiSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[DurableWikiSyncBatch](), policyErr
+	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-wiki-fetch")
 	if err != nil {
 		return DurableWikiSyncBatch{}, err
@@ -563,6 +578,9 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	if policyErr := s.authorizePolicy("CommitWikiSyncBatch"); policyErr != nil {
+		return zeroPolicyValue[*SyncResourcesResult](), policyErr
+	}
 	observation := newConfirmedSyncObservation(ctx, "wiki")
 	defer observation.finish()
 	if err := validateDurableWikiBatch(batch); err != nil {

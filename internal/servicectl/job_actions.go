@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/capability"
 )
 
 const (
@@ -89,6 +90,7 @@ func jobActionIntentErrorFromContext(ctx context.Context) error {
 }
 
 type JobActionManager struct {
+	policy    *capability.Policy
 	mu        sync.Mutex
 	path      string
 	jobs      *JobManager
@@ -101,6 +103,7 @@ type JobActionManager struct {
 func NewJobActionManager(path string, jobs *JobManager, maintenance *MaintenanceManager) *JobActionManager {
 	manager := &JobActionManager{path: path, jobs: jobs, receipts: map[string]jobActionReceiptDisk{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if maintenance != nil {
+		manager.policy = maintenance.manager.instancePolicy()
 		manager.reconcile = func(ctx context.Context, registrationID, collection, actionIntentRef string) (MaintenanceReconcileResult, error) {
 			ctx = withJobActionIntent(ctx, actionIntentRef)
 			var result MaintenanceReconcileResult
@@ -165,6 +168,9 @@ func (m *JobActionManager) Load() error {
 }
 
 func (m *JobActionManager) recoverPendingLocked(ctx context.Context) bool {
+	if m.policy.Check("enable_cache_maintenance") != nil {
+		return false
+	}
 	ordered := make([]jobActionReceiptDisk, 0, len(m.receipts))
 	for _, receipt := range m.receipts {
 		if receipt.Receipt.Action == "retry" && receipt.Receipt.Outcome == "pending" {
@@ -197,6 +203,9 @@ func (m *JobActionManager) recoverPendingLocked(ctx context.Context) bool {
 			if !found || m.reconcile == nil {
 				continue
 			}
+			if m.policy.Require("job", source.Type) != nil {
+				continue
+			}
 			result, err := m.reconcile(ctx, source.RegistrationID, stored.RetrySource.Collection, actionIntentRef)
 			if err != nil {
 				continue
@@ -211,10 +220,16 @@ func (m *JobActionManager) recoverPendingLocked(ctx context.Context) bool {
 }
 
 func (m *JobActionManager) Cancel(ctx context.Context, req adminhttp.JobActionRequest) (adminhttp.JobActionReceipt, error) {
+	if err := m.policy.Check("service_job_cancel"); err != nil {
+		return adminhttp.JobActionReceipt{}, adminControlError(err)
+	}
 	return m.apply(ctx, "cancel", req)
 }
 
 func (m *JobActionManager) Retry(ctx context.Context, req adminhttp.JobActionRequest) (adminhttp.JobActionReceipt, error) {
+	if err := m.policy.Check("service_jobs", "enable_cache_maintenance"); err != nil {
+		return adminhttp.JobActionReceipt{}, adminControlError(err)
+	}
 	return m.apply(ctx, "retry", req)
 }
 
@@ -275,6 +290,11 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	}
 	if !ok {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
+	}
+	if action == "retry" {
+		if err := m.policy.Require("job", job.Type); err != nil {
+			return adminhttp.JobActionReceipt{}, adminControlError(err)
+		}
 	}
 	if job.Type != SyncJobType && job.Type != RAGIndexJobType && !(action == "cancel" && job.Type == RepositoryDocsIndexJobType) {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")

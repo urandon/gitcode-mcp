@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,6 +84,11 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src config.Source) int {
+	args, deployment, expectedPolicy, policyLaunchErr := config.ExtractPolicyLaunchFlags(args)
+	if policyLaunchErr != nil {
+		fmt.Fprintln(stderr, policyLaunchErr)
+		return 2
+	}
 	opts, rest, err := parseStartupArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
@@ -111,6 +117,21 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	if len(rest) > 0 && rest[0] == "mcp" && len(rest) > 1 && (rest[1] == "-h" || rest[1] == "--help") {
 		printMCPHelp(stdout)
 		return 0
+	}
+	src, policy, err := config.PrepareCapabilityPolicy(src, deployment, expectedPolicy)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if !opts.mcp && !opts.mcpServe {
+		if err := policy.CheckCLI(rest); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if len(rest) > 0 && rest[0] == "capabilities" {
+			_ = json.NewEncoder(stdout).Encode(policy.View())
+			return 0
+		}
 	}
 	if cli.IsObservationCommand(rest) {
 		formats := 0
@@ -526,6 +547,9 @@ func resolveService(store cache.Store, deps StartupDeps) (*service.Service, erro
 		return nil, err
 	}
 	svc.ConfigureRAGSearch(deps.Config)
+	if err := svc.BindCapabilityPolicy(deps.Config.CapabilityPolicy); err != nil {
+		return nil, err
+	}
 	return svc, nil
 }
 
@@ -586,6 +610,7 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
 	bootstrap := newMCPBootstrap(deps)
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, nil, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	server.SetCapabilityPolicy(deps.Config.CapabilityPolicy)
 	if deps.Config.Service.Mode == config.ServiceModeLocal {
 		server.SetLocalProjects(bootstrap.ServiceClient)
 		return server, bootstrap.Close
@@ -705,6 +730,8 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --live                compatibility alias for live GitCode provider selection")
 	fmt.Fprintln(w, "  --offline, --fixture  use explicit offline/fixture provider")
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
+	fmt.Fprintln(w, "  --deployment-config F trusted instance policy (leading launch flag; intersects machine ceiling)")
+	fmt.Fprintln(w, "  capabilities          show content-free effective instance grants")
 	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")
 	fmt.Fprintln(w, "  --timeout DURATION    CLI operation and GitCode request timeout")
