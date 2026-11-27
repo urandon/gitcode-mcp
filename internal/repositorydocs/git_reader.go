@@ -510,7 +510,10 @@ func parseTreeRecord(record []byte) (TreeEntry, error) {
 		return TreeEntry{}, fmt.Errorf("%w: invalid object id", ErrMalformedGitTree)
 	}
 	size := int64(-1)
-	if fields[3] != "-" {
+	// A partial clone may contain the tree but not every blob. Git emits BAD
+	// for those sizes; keep them unknown so corpus policy can filter unrelated
+	// paths before a bounded read reports an unavailable included object.
+	if fields[3] != "-" && fields[3] != "BAD" {
 		parsed, err := strconv.ParseInt(fields[3], 10, 64)
 		if err != nil || parsed < 0 {
 			return TreeEntry{}, fmt.Errorf("%w: invalid object size", ErrMalformedGitTree)

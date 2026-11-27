@@ -327,7 +327,7 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.Type != "blob" || entry.Mode == "120000" || removed[entry.Path] || changed[entry.Path].Path != "" || entry.Size < 0 || entry.Size > processing.MaxFileBytes || !policy.Matches(entry.Path) {
+		if entry.Type != "blob" || entry.Mode == "120000" || removed[entry.Path] || changed[entry.Path].Path != "" || entry.Size > processing.MaxFileBytes || !policy.Matches(entry.Path) {
 			return nil
 		}
 		coverage.EligibleFiles++

@@ -302,7 +302,7 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		if entry.Type != "blob" {
 			return nil
 		}
-		if entry.Size < 0 || entry.Size > req.MaxFileBytes {
+		if entry.Size > req.MaxFileBytes {
 			if err := recordExclusion(entry.Path, "git", entry.OID, "document_too_large"); err != nil {
 				walkFailureClass = "metadata_write_failed"
 				return err
