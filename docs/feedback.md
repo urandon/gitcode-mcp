@@ -1,5 +1,11 @@
 # Structured Feedback
 
+Reporter preparation and submission are intake, not maintainer acceptance or a
+diagnosis. After submission, follow the [evidence-first issue triage protocol](issue-triage.md)
+before implementation: assess relevance, reproduction/current version, duplicate
+coverage and the actual signal, then record a verdict, next action and evidence
+limits in comments. A prepared or submitted report is not a release promise.
+
 `gitcode-mcp` can turn reproducible agent or human dogfood friction into a consistent, public-safe issue. The feature is opt-in and deliberately separates preparation from submission. Report preparation is always available; external submission has an explicit runtime readiness state.
 
 Use feedback for reusable product observations: an MCP action required a CLI, browser, or human fallback; an error was generic or misleading; setup was hidden; retries were required; useful evidence was missing; or a workflow exposed a feature gap. Do not use it for raw prompts, conversation transcripts, credentials, cookies, private repository content, environment dumps, or full API payloads.

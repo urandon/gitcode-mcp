@@ -68,8 +68,9 @@ systems should appear here only as generic concepts or sanitized fixtures.
 5. `docs/cache-and-sync-model.md`
 6. `docs/gitcode-api-discovery.md`
 7. `docs/mcp-setup.md`
-8. the linked GitCode issue and its design/progress comments
-9. the linked pull request and unresolved review threads, when one exists
+8. `docs/issue-triage.md` for incoming reports, feedback and backlog triage
+9. the linked GitCode issue and its design/progress comments
+10. the linked pull request and unresolved review threads, when one exists
 
 Read additional component documents only when the touched surface routes to
 them. Do not implement from an issue summary while ignoring its authoritative
@@ -87,6 +88,13 @@ body or later correction comments.
 
 ### 2. Frame The Issue
 
+- For an incoming report, follow [evidence-first triage](docs/issue-triage.md)
+  and record a verdict before taking it into implementation. Separate symptom,
+  confirmed signal, suspected cause and proposed fix; search open/closed
+  duplicates, inspect affected/current versions, and state evidence limits.
+- Submission, reporter urgency and a proposed fix are not an accepted diagnosis
+  or release commitment. Record blocker/unblock or revisit conditions rather
+  than auto-closing stale or not-reproduced reports.
 - Reproduce or inspect the current behavior before proposing a fix.
 - Record scope, acceptance criteria, non-goals, risks, dependencies, UX cohort
   impact, and a verification plan in an issue comment.
@@ -241,6 +249,8 @@ unobserved external action successful.
 ### Before Editing
 
 - [ ] Issue exists, duplicate search is complete, and scope is understood.
+- [ ] Incoming report has a recorded triage verdict, evidence/limits and next
+      action under `docs/issue-triage.md`; acceptance is not inferred from intake.
 - [ ] Required docs, issue comments, and PR threads are read.
 - [ ] Worktree ownership and intended base branch are known.
 - [ ] Design, UX-cohort impact, risks, and test plan are recorded.

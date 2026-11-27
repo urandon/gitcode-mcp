@@ -13,7 +13,11 @@ for contract in \
 	"README.md|## Reliability By Design" \
 	"AGENTS.md|## Autonomous Delivery Protocol" \
 	"AGENTS.md|## Stop Conditions" \
-	"AGENTS.md|## Delivery Checklists"
+	"AGENTS.md|## Delivery Checklists" \
+	"AGENTS.md|docs/issue-triage.md" \
+	"docs/feedback.md|issue-triage.md" \
+	"docs/issue-triage.md|## Verdicts and next actions" \
+	"docs/issue-triage.md|## First response and triage comment"
 do
 	file=${contract%%|*}
 	text=${contract#*|}
