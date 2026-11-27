@@ -957,6 +957,14 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 }
 
 func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
+	testDaemonRestartRecoversStagedBatch(t, false)
+}
+
+func TestCapabilityPolicyRestoredAuthorityResumesStagedBatch(t *testing.T) {
+	testDaemonRestartRecoversStagedBatch(t, true)
+}
+
+func testDaemonRestartRecoversStagedBatch(t *testing.T, deniedBoot bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	root := t.TempDir()
@@ -1005,6 +1013,25 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	before.nextID = 1
 	if err := before.saveLocked(); err != nil {
 		t.Fatal(err)
+	}
+	if deniedBoot {
+		denied := policyManager(t, "darwin", "{allow: [service_host]}")
+		denied.RuntimeDir = root
+		blocked := NewJobManager(jobsPath)
+		if err := blocked.LoadAndMarkInterrupted(); err != nil {
+			t.Fatal(err)
+		}
+		if err := blocked.RecoverSyncStages(ctx, denied); err != nil {
+			t.Fatal(err)
+		}
+		job, found := blocked.Get(stage.JobID)
+		if !found || job.Status != JobStatusInterrupted || job.ErrorClass != "capability_policy_denied" {
+			t.Fatal("policy hold terminalized durable fetched work")
+		}
+		stages, _, err := journal.ListForRecovery()
+		if err != nil || len(stages) != 1 || string(stages[0].Payload) != string(payload) {
+			t.Fatal("denied boot changed fetched stage")
+		}
 	}
 	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: lockPath})
 	if err != nil {

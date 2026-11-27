@@ -5,7 +5,8 @@ import "strings"
 // Explicit dependencies of existing effect/bootstrap paths; no namespace or
 // category grants implicit authority to a future operation.
 var capabilityDependencies = map[string][]string{
-	"get_repo_metadata": {"repo_status"}, "list_repo_labels": {"repo_status"}, "create_repo_label": {"repo_status"},
+	"service_job_attach": {"service_job_status"},
+	"get_repo_metadata":  {"repo_status"}, "list_repo_labels": {"repo_status"}, "create_repo_label": {"repo_status"},
 	"prepare_feedback": {"feedback_status"}, "submit_feedback": {"repo_status", "prepare_feedback", "feedback_status"}, "create_issue": {"repo_status"}, "update_issue": {"repo_status"}, "add_issue_comment": {"repo_status"}, "update_issue_comment": {"repo_status"},
 	"create_pr": {"repo_status"}, "update_pr": {"repo_status"}, "merge_pr": {"repo_status"}, "add_pr_comment": {"repo_status"}, "add_pr_review_comment": {"repo_status"}, "reply_pr_review_comment": {"repo_status"}, "link_pr_issue": {"repo_status"},
 	"list_milestones": {"repo_status"}, "create_milestone": {"repo_status"}, "update_milestone": {"repo_status"}, "set_issue_milestone": {"repo_status"}, "clear_issue_milestone": {"repo_status"},
@@ -77,9 +78,18 @@ func Requirements(surface, operation string) []string {
 		if strings.Contains(operation, " ") {
 			return nil
 		}
-		grouped := CLIGroupedForms()
+		// A namespace root is not an executable capability. However, grouped
+		// entries can also expose a concrete legacy spelling (rag-status),
+		// which must keep the same grant as its grouped form.
+		for _, forms := range CLIGroupedForms() {
+			for _, form := range forms {
+				if operation == strings.Fields(form)[0] {
+					return nil
+				}
+			}
+		}
 		for _, item := range Capabilities() {
-			if len(grouped[item.ID]) > 0 || !item.CLI.Enabled {
+			if !item.CLI.Enabled {
 				continue
 			}
 			if item.CLIName == operation {

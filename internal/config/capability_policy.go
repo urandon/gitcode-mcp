@@ -83,6 +83,22 @@ func PrepareCapabilityPolicy(src Source, deployment, expected string) (Source, *
 	if src == nil {
 		src = OSSource{}
 	}
+	if deployment != "" {
+		if !filepath.IsAbs(deployment) {
+			var cwd string
+			var err error
+			if working, ok := src.(WorkingDirSource); ok {
+				cwd, err = working.WorkingDir()
+			} else {
+				cwd, err = os.Getwd()
+			}
+			if err != nil || !filepath.IsAbs(cwd) {
+				return nil, nil, capability.InvalidPolicy()
+			}
+			deployment = filepath.Join(cwd, deployment)
+		}
+		deployment = filepath.Clean(deployment)
+	}
 	if pinned, ok := src.(*policySource); ok {
 		if deployment != "" && deployment != pinned.deployment {
 			return nil, nil, capability.InvalidPolicy()

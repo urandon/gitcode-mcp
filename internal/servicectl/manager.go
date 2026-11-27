@@ -743,6 +743,11 @@ func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, r
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
+		if m.requirePolicy("job", SyncJobType) != nil {
+			// A failed durable policy-hold must not be turned into a terminal
+			// recovery failure: retain stages and their admission fences.
+			return
+		}
 		if err := jobs.failInterruptedSyncRecoveries("sync_recovery_failed"); err == nil {
 			releaseFences()
 		}

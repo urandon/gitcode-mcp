@@ -71,3 +71,21 @@ func (m *JobManager) blockPolicyJob(id string, err error) {
 		job.Error = err.Error()
 	})
 }
+
+func (m *JobManager) holdInterruptedSyncRecoveriesByPolicy() error {
+	for _, job := range m.List() {
+		if job.Type != SyncJobType || job.Status != JobStatusInterrupted {
+			continue
+		}
+		if err := m.updateJobPersisted(job.ID, func(job *Job, now time.Time) {
+			// Interrupted remains recoverable. A terminal failure would make
+			// the next allowed boot garbage-collect its fetched stage/retry.
+			job.ErrorClass = "capability_policy_denied"
+			job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
+			job.UpdatedAt, job.FinishedAt = now, nil
+		}); err != nil {
+			return RPCDomainError{Code: "capability_policy_hold_persistence_failed", Message: "Policy-blocked sync status could not be retained; interrupted work and recovery fences are preserved."}
+		}
+	}
+	return nil
+}

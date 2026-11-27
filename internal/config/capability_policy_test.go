@@ -59,6 +59,40 @@ func TestCapabilityPolicyLaunchFlagsAreNotCommandData(t *testing.T) {
 	}
 }
 
+func TestCapabilityPolicyRelativeDeploymentPinsAbsoluteAuthority(t *testing.T) {
+	s := newMemorySource(t)
+	path := filepath.Join(s.cwd, "instance.yaml")
+	s.files[path] = []byte("capabilities: {schema: 1, ceiling: {allow: [get_source]}}")
+	pinned, p, err := PrepareCapabilityPolicy(s, "instance.yaml", "")
+	if err != nil || PolicyDeployment(pinned) != path || !filepath.IsAbs(PolicyDeployment(pinned)) {
+		t.Fatal("relative deployment not normalized before pinning")
+	}
+	s.cwd = filepath.Join(s.cwd, "different-native-cwd")
+	if _, q, err := PrepareCapabilityPolicy(s, PolicyDeployment(pinned), p.Fingerprint()); err != nil || q.Fingerprint() != p.Fingerprint() {
+		t.Fatal("native launch depended on original cwd")
+	}
+}
+
+func TestCapabilityPolicyLateRepositoryErrorsKeepTypedClass(t *testing.T) {
+	for _, tt := range []struct{ body, code string }{{"capabilities: {schema: 1}", "capability_policy_invalid"}, {"mcp: {tools: {access: read}}", "capability_policy_mismatch"}} {
+		s := newMemorySource(t)
+		s.files[filepath.Join(s.configDir, "gitcode-mcp", "config.yaml")] = []byte("capabilities: {schema: 1}")
+		s.cwd = filepath.Join(s.homeDir, "workspace", "repo")
+		s.dirs[filepath.Join(s.cwd, ".git")] = true
+		repoPath := filepath.Join(s.cwd, ".gitcode", "gitcode-mcp.yaml")
+		s.files[repoPath] = []byte(tt.body)
+		pinned, _, err := PrepareCapabilityPolicy(s, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = LoadEffective(pinned, Overrides{})
+		var policy capability.PolicyError
+		if !errors.As(err, &policy) || policy.Code != tt.code || strings.Contains(err.Error(), repoPath) {
+			t.Fatalf("late policy error lost its finite class: %v", err)
+		}
+	}
+}
+
 func TestCapabilityPolicyExpectedAndMissingSources(t *testing.T) {
 	s := newMemorySource(t)
 	if _, p, e := PrepareCapabilityPolicy(s, "", ""); e != nil || p != nil {

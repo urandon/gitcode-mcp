@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/capability"
@@ -32,6 +33,13 @@ func policyManager(t *testing.T, goos, rule string) Manager {
 	}
 	return m
 }
+
+type policyWorkingDirSource struct {
+	config.Source
+	cwd string
+}
+
+func (s policyWorkingDirSource) WorkingDir() (string, error) { return s.cwd, nil }
 
 func requirePolicyError(t *testing.T, err error, code string) {
 	t.Helper()
@@ -106,8 +114,8 @@ func TestCapabilityPolicyNativeDefinitionAndLostPolicy(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {
 			m := newTestManager(t, goos)
-			rawSource := m.Source
 			dir, _ := m.Source.UserConfigDir()
+			rawSource := policyWorkingDirSource{Source: m.Source, cwd: dir}
 			machine := filepath.Join(dir, "gitcode-mcp", "config.yaml")
 			if err := os.MkdirAll(filepath.Dir(machine), 0700); err != nil {
 				t.Fatal(err)
@@ -120,7 +128,7 @@ func TestCapabilityPolicyNativeDefinitionAndLostPolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			var err error
-			m.Source, _, err = config.PrepareCapabilityPolicy(rawSource, deployment, "")
+			m.Source, _, err = config.PrepareCapabilityPolicy(rawSource, filepath.Base(deployment), "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,6 +153,10 @@ func TestCapabilityPolicyNativeDefinitionAndLostPolicy(t *testing.T) {
 			_, gotPath, fp, err := config.ExtractPolicyLaunchFlags(args[1:])
 			if err != nil || gotPath != deployment || fp != m.instancePolicy().Fingerprint() {
 				t.Fatal("native policy identity lost")
+			}
+			rawSource.cwd = filepath.Join(dir, "different-native-cwd")
+			if _, _, err := config.PrepareCapabilityPolicy(rawSource, gotPath, fp); err != nil {
+				t.Fatal("native launch lost absolute deployment authority")
 			}
 			if err := os.Remove(deployment); err != nil {
 				t.Fatal(err)
@@ -187,7 +199,7 @@ func TestCapabilityPolicyRecoveryPreservesStagesAndPendingReceipts(t *testing.T)
 		t.Fatal(err)
 	}
 	job, ok := jobs.Get("job-interrupted")
-	if !ok || job.ErrorClass != "capability_policy_denied" || job.WorkKey != "retained-work" {
+	if !ok || job.Status != JobStatusInterrupted || job.ErrorClass != "capability_policy_denied" || job.WorkKey != "retained-work" {
 		t.Fatal("recovery lost policy evidence or work")
 	}
 	if b, err := os.ReadFile(stagePath); err != nil || string(b) != "durable-fetched-work" {
@@ -207,5 +219,29 @@ func TestCapabilityPolicyRecoveryPreservesStagesAndPendingReceipts(t *testing.T)
 	entry, _ := maintenance.reconcileEntry(context.Background(), "registration")
 	if entry.State != "degraded" || entry.LastErrorClass != "capability_policy_denied" {
 		t.Fatalf("policy-blocked registration: %+v", entry)
+	}
+}
+
+func TestCapabilityPolicyHoldPersistenceFailureKeepsInterruptedWork(t *testing.T) {
+	m := policyManager(t, "linux", "{allow: [service_host]}")
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs["job-held"] = &Job{ID: "job-held", Type: SyncJobType, Status: JobStatusInterrupted, CreatedAt: now, UpdatedAt: now, WorkKey: "retained-work"}
+	jobs.writeFile = func(string, []byte, os.FileMode) error { return errors.New("private persistence diagnostic") }
+	err := jobs.RecoverSyncStages(context.Background(), m)
+	requirePolicyError(t, err, "capability_policy_hold_persistence_failed")
+	if strings.Contains(err.Error(), "private persistence diagnostic") {
+		t.Fatal("raw persistence error exposed")
+	}
+	released := false
+	done := m.startSyncStageRecovery(context.Background(), jobs, func() { released = true })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("policy hold did not finish")
+	}
+	job, _ := jobs.Get("job-held")
+	if released || job.Status != JobStatusInterrupted || job.WorkKey != "retained-work" {
+		t.Fatal("failed hold discarded recovery or released its fence")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"gitcode-mcp/internal/capability"
 	"gopkg.in/yaml.v3"
 )
 
@@ -320,6 +321,10 @@ func loadEffective(src Source, overrides Overrides, explicitLocal bool) (Effecti
 		src = OSSource{}
 	}
 	diagnostic := func(err error) error {
+		var policy capability.PolicyError
+		if errors.As(err, &policy) {
+			return policy
+		} // already finite and path-free
 		if explicitLocal {
 			return LocalProjectConfigError{}
 		}

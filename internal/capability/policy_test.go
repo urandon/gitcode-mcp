@@ -136,11 +136,6 @@ func TestPolicyRequirementCatalogIsClosed(t *testing.T) {
 			t.Errorf("unmapped admin route %s", route)
 		}
 	}
-	for _, c := range Capabilities() {
-		if c.CLI.Enabled && len(CLIGroupedForms()[c.ID]) == 0 && len(Requirements("cli", c.CLIName)) == 0 {
-			t.Errorf("unmapped command %s", c.CLIName)
-		}
-	}
 }
 
 func TestPolicyParserBoundsAndDependencyClosure(t *testing.T) {
@@ -157,6 +152,53 @@ func TestPolicyParserBoundsAndDependencyClosure(t *testing.T) {
 		}
 		if p.Check("submit_feedback") == nil || p.Check("prepare_feedback") == nil {
 			t.Fatal("transitive child denial ignored")
+		}
+	}
+}
+
+func TestPolicyConcreteGroupedAliasesKeepSameGrant(t *testing.T) {
+	for _, tt := range []struct{ id, flat, group string }{{"rag_status", "rag-status", "rag status"}, {"rag_search", "rag-search", "rag search"}} {
+		p, err := CompilePolicy(false, PolicyLayer{Source: "machine", Specification: &Specification{Ceiling: Rule{Allow: []string{tt.id}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Require("cli", tt.flat) != nil || p.Require("cli", tt.group) != nil {
+			t.Fatalf("standalone/grouped mapping diverged: %s", tt.id)
+		}
+		if p.Require("cli", "rag") == nil {
+			t.Fatal("bare namespace became a grant")
+		}
+	}
+	for _, cap := range Capabilities() {
+		if !cap.CLI.Enabled {
+			continue
+		}
+		for _, name := range append([]string{cap.CLIName}, cap.CLIAliases...) {
+			if strings.Contains(name, " ") {
+				continue
+			}
+			root := false
+			for _, forms := range CLIGroupedForms() {
+				for _, form := range forms {
+					root = root || strings.Fields(form)[0] == name
+				}
+			}
+			if !root && len(Requirements("cli", name)) == 0 {
+				t.Errorf("concrete CLI spelling unmapped: %s", name)
+			}
+		}
+	}
+}
+
+func TestPolicyAttachIncludesStatusDependency(t *testing.T) {
+	for _, allow := range [][]string{{"service_job_attach"}, {"service_job_attach", "service_job_status"}} {
+		p, err := CompilePolicy(false, PolicyLayer{Source: "machine", Specification: &Specification{Ceiling: Rule{Allow: allow}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := len(allow) == 2
+		if (p.Require("cli", "service attach") == nil) != want || (p.Require("mcp", "service_job_attach") == nil) != want || (p.Require("ipc", "Jobs.Get") == nil) != want {
+			t.Fatal("attach discovery/transport dependencies diverged")
 		}
 	}
 }

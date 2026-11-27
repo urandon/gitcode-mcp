@@ -1309,7 +1309,10 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 	if err := manager.requirePolicy("job", SyncJobType); err != nil {
 		// Leave the durable stage journal untouched: an operator can restore
 		// authority and resume fetched work without another provider fetch.
-		return m.failInterruptedSyncRecoveries("capability_policy_denied")
+		if holdErr := m.holdInterruptedSyncRecoveriesByPolicy(); holdErr != nil {
+			return holdErr
+		}
+		return nil
 	}
 	runtimeDir := strings.TrimSpace(manager.RuntimeDir)
 	if runtimeDir == "" {

@@ -23,7 +23,12 @@ gitcode-mcp --deployment-config /operator/instance.yaml capabilities
 ```
 
 Both files are independently validated and intersected; a deployment layer
-cannot remove the machine ceiling. `GITCODE_MCP_CONFIG`, `GITCODE_CONFIG`,
+cannot remove the machine ceiling.
+Relative deployment paths are resolved to absolute authority at the initial
+trusted launch, before pinning; native startup does not depend on the shell's
+working directory.
+
+`GITCODE_MCP_CONFIG`, `GITCODE_CONFIG`,
 repository config, request arguments, and retained jobs cannot select or
 replace policy. A `capabilities` section in lower-trust runtime/repository config
 is rejected, not merged. There is no environment/header/RPC profile selector or

@@ -839,7 +839,7 @@
       <div hidden={active !== 'Local projects' || snapshot.api_version !== adminApiVersion || snapshot.policy_restricted}>
         <LocalProjectsView active={active === 'Local projects' && !snapshot.policy_restricted} ready={serviceReady && !loading && snapshot.api_version === adminApiVersion && !snapshot.policy_restricted} csrf={csrfToken} capabilities={snapshot.capabilities} query={localQuery} onquery={changeLocalQuery} />
       </div>
-      {#if snapshot.policy_restricted || active === 'Service' && !policyAllows('admin_service_observation', 'service_observability')}
+      {#if active !== 'Service' && snapshot.policy_restricted || active === 'Service' && !policyAllows('admin_service_observation', 'service_observability')}
         <section class="state-panel" role="status" aria-label="Policy restricted observation"><ShieldCheck size={22} /><div><strong>Observation withheld by instance policy</strong><p>This is not an empty cache or job list. The selected role does not grant this operator view. Ask the operator to review the trusted instance policy.</p></div></section>
       {:else if active === 'Service'}
         <ServiceView bind:boundary={serviceBoundary} ready={serviceReady} bootstrapFailed={!serviceReady && Boolean(error)} {snapshot} query={serviceQuery} invalidQuery={serviceQueryInvalid} invalidation={observationInvalidation} connection={eventConnection} now={freshnessNow} onquery={changeServiceQuery} onnavigate={openObservationTarget} />
