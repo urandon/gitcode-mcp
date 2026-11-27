@@ -234,8 +234,11 @@ func (s *SQLiteStore) GetSourceScoped(ctx context.Context, repoID, id string) (S
 }
 
 func (s *SQLiteStore) ListSources(ctx context.Context, filter SourceFilter) ([]Source, error) {
-	query := `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR status = ?) AND (? = '' OR provenance = ?) ORDER BY repo_id, id`
+	query := `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR status = ?) AND (? = '' OR provenance = ?)`
 	args := []any{filter.RepoID, filter.RepoID, filter.Kind, filter.Kind, filter.Status, filter.Status, filter.Provenance, filter.Provenance}
+	predicates, metadataArgs := sourcePredicates("", "", filter.TitleContains, filter.Labels, filter.LabelsMatch)
+	query += predicates + ` ORDER BY repo_id, id`
+	args = append(args, metadataArgs...)
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -358,7 +361,9 @@ func (s *SQLiteStore) SearchSources(ctx context.Context, query SearchQuery) ([]S
 
 func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
 	needle := normalizeSearchQuery(query.Query)
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, path, title, body, provenance FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR provenance = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY repo_id, id, path`, query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, "%"+needle+"%", "%"+needle+"%")
+	predicates, args := sourcePredicates("", query.Status, query.TitleContains, query.Labels, query.LabelsMatch)
+	base := []any{query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, "%" + needle + "%", "%" + needle + "%"}
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, path, title, body, provenance FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR provenance = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?)`+predicates+` ORDER BY repo_id, id, path`, append(base, args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -372,11 +377,13 @@ func (s *SQLiteStore) searchSourcesFTS(ctx context.Context, query SearchQuery) (
 	}
 	needle := normalizeSearchQuery(query.Query)
 	match := ftsMatchQuery(needle)
+	predicates, args := sourcePredicates("s.", query.Status, query.TitleContains, query.Labels, query.LabelsMatch)
+	base := []any{query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, match}
 	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.path, s.title, s.body, s.provenance
 FROM fts_index f
 JOIN sources s ON s.repo_id = f.repo_id AND s.id = f.source_id
 WHERE (? = '' OR s.repo_id = ?) AND (? = '' OR s.kind = ?) AND (? = '' OR s.provenance = ?) AND fts_index MATCH ?
-ORDER BY s.repo_id, s.id, s.path`, query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, match)
+`+predicates+` ORDER BY s.repo_id, s.id, s.path`, append(base, args...)...)
 	if err != nil {
 		return nil, err
 	}

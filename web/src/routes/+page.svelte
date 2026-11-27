@@ -102,6 +102,15 @@
   let requestedRegistrationID = '';
   let registrationRedirectNotice = '';
   let searchQuery = '';
+  let searchStatus = '';
+  let searchLabels = '';
+  let searchLabelsMatch = 'all';
+  let searchTitle = '';
+  let searchOffset = 0;
+  let observedSearchIntent = '';
+  let searchGeneration = 0;
+  $: searchIntentKey = JSON.stringify([active, selectedCacheRef, selectedRepoID, repoTab, searchOffset, searchQuery, searchKind, searchProvenance, searchStatus, searchLabels, searchLabelsMatch, searchTitle, searchLimit]);
+  $: invalidateSearchIntent(searchIntentKey);
   let searchKind = '';
   let searchProvenance = '';
   let searchLimit = 8;
@@ -272,6 +281,8 @@
     const requestedTab = params.get('tab');
     if (repositoryTabs.some((item) => item.value === requestedTab)) repoTab = requestedTab as RepositoryTab;
     searchQuery = (params.get('q') || '').slice(0, 512); searchKind = params.get('kind') || ''; searchProvenance = params.get('provenance') || '';
+	searchStatus = params.get('status') || ''; searchLabels = params.getAll('label').join('\n'); searchLabelsMatch = params.get('labels_match') || 'all'; searchTitle = (params.get('title_contains') || '').slice(0, 512);
+	const offset = Number(params.get('offset')); searchOffset = Number.isSafeInteger(offset) && offset >= 0 && offset <= 10000 ? offset : 0;
     const requestedLimit = Number(params.get('limit')); if (Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 20) searchLimit = requestedLimit;
     const requestedFilter = params.get('diagnostics');
     if (requestedFilter === 'current' || requestedFilter === 'recovered' || requestedFilter === 'all') diagnosticsFilter = requestedFilter;
@@ -303,6 +314,11 @@
       if (searchQuery) params.set('q', searchQuery);
       if (searchKind) params.set('kind', searchKind);
       if (searchProvenance) params.set('provenance', searchProvenance);
+	  if (searchStatus) params.set('status', searchStatus);
+	  for (const label of searchLabels.split('\n').filter((value) => value !== '')) params.append('label', label);
+	  if (searchLabelsMatch !== 'all') params.set('labels_match', searchLabelsMatch);
+	  if (searchTitle) params.set('title_contains', searchTitle);
+	  if (searchOffset) params.set('offset', String(searchOffset));
       if (searchLimit !== 8) params.set('limit', String(searchLimit));
     }
     if (active === 'Diagnostics' && diagnosticsFilter !== 'current') params.set('diagnostics', diagnosticsFilter);
@@ -643,15 +659,31 @@
     } catch { feedbackHandoffCopied = false; }
   }
 
-  async function runSearchComparison(): Promise<void> {
-    if (!csrfToken || !searchCompareEnabled || !selectedCache || !selectedRepo || !searchQuery.trim()) return;
+  function invalidateSearchIntent(key: string): void {
+    if (observedSearchIntent === key) return;
+    observedSearchIntent = key;
+    searchGeneration++;
+    searchComparison = undefined; searchError = ''; searchRunning = false;
+  }
+
+  async function runSearchComparison(offset = 0): Promise<void> {
+    if (!csrfToken || !searchCompareEnabled || !selectedCache || !selectedRepo || (!searchQuery.trim() && !searchStatus && !searchLabels && !searchTitle)) return;
+    searchOffset = offset;
+    // Settle page/intent invalidation before admitting this request generation.
+    await tick();
+    if (active !== 'Caches' || repoTab !== 'search' || !selectedCache || !selectedRepo) return;
+    const generation = ++searchGeneration, intent = searchIntentKey;
+    const current = () => generation === searchGeneration && intent === searchIntentKey;
     searchRunning = true; searchError = ''; searchComparison = undefined; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined;
     updateLocation(true);
     try {
-      searchComparison = await controlPost<SearchComparison>('/api/admin/v1/search/compare', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, query: searchQuery.trim(), kind: searchKind, provenance: searchProvenance, limit: searchLimit });
+      const comparison = await controlPost<SearchComparison>('/api/admin/v1/search/compare', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, query: searchQuery.trim(), kind: searchKind, provenance: searchProvenance, status:searchStatus, labels:searchLabels.split('\n').filter((value) => value !== ''), labels_match:searchLabelsMatch, title_contains:searchTitle, limit: searchLimit, offset:searchOffset });
+      await tick();
+      if (!current()) return;
+      searchComparison = comparison;
       repairProfile = snapshot.maintenance.find((item) => item.cache_ref === selectedCache?.cache_ref && item.repo_id === selectedRepo?.repo_id)?.policy.profile || '';
-    } catch (value) { searchError = value instanceof Error ? value.message : 'Search comparison failed.'; }
-    finally { searchRunning = false; }
+    } catch (value) { await tick(); if (current()) searchError = value instanceof Error ? value.message : 'Search comparison failed.'; }
+    finally { if (current()) searchRunning = false; }
   }
 
   async function smokeSearchProvider(): Promise<void> {
@@ -902,16 +934,23 @@
               <section class="repository-section search-lab" aria-labelledby="search-title">
                 <div class="section-heading"><div><p class="section-kicker">OBSERVATION-ONLY EXPERIMENT</p><h2 id="search-title">Search Lab</h2><p>Compare deterministic full-text with requested hybrid retrieval. A query never syncs GitCode, starts provider setup, or repairs an index.</p></div><StatusChip value={selectedRepo.coverage.rag.state} label={`RAG ${humanize(selectedRepo.coverage.rag.state)}`} /></div>
                 <form class="search-query-form" onsubmit={(event) => { event.preventDefault(); void runSearchComparison(); }}>
-                  <label class="search-query"><span>Experiment query</span><input required maxlength="512" bind:value={searchQuery} placeholder="How does daemon maintenance avoid duplicate work?" /></label>
+                  <label class="search-query"><span>Experiment query</span><input maxlength="512" bind:value={searchQuery} placeholder="Optional with metadata filters" /></label>
+				  <label><span>Issue status</span><select bind:value={searchStatus}><option value="">All statuses</option><option value="open">Open</option><option value="closed">Closed</option></select></label>
+				  <label><span>Labels (one exact name per line)</span><textarea maxlength="4200" bind:value={searchLabels} placeholder="bug"></textarea></label>
+				  <label><span>Label match</span><select bind:value={searchLabelsMatch}><option value="all">All labels</option><option value="any">Any label</option></select></label>
+				  <label><span>Title contains (case-sensitive)</span><input maxlength="512" bind:value={searchTitle} /></label>
                   <label><span>Kind</span><select bind:value={searchKind}><option value="">All kinds</option>{#each ['issue', 'issue_comment', 'pull_request', 'pr_comment', 'wiki'] as kind}<option value={kind}>{humanize(kind)}</option>{/each}</select></label>
                   <label><span>Provenance</span><select bind:value={searchProvenance}><option value="">All provenance</option>{#each ['live', 'fixture', 'projection', 'bridge'] as provenance}<option value={provenance}>{humanize(provenance)}</option>{/each}</select></label>
                   <label><span>Limit</span><input type="number" min="1" max="20" bind:value={searchLimit} /></label>
                   <button class="primary-action" type="submit" disabled={!csrfToken || !searchCompareEnabled || searchRunning}><Search size={16} />{searchRunning ? 'Comparing…' : 'Compare modes'}</button>
                 </form>
                 <p class="privacy search-boundary"><ShieldCheck size={15} />Only the query is sent to the configured embedding provider for hybrid mode; cached source text and GitCode are not contacted by search.</p>
+				<p>Metadata-only queries do not call embeddings. Results cover cached sources only; unknown legacy labels cannot prove membership, and an empty page does not prove remote absence.</p>
                 {#if searchError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Search Lab action failed</strong><span>{searchError}</span></div></div>{/if}
 
                 {#if searchComparison}
+				  <p role="status">Applied metadata: {JSON.stringify(searchComparison.full_text.filters || {})} · Offset {searchComparison.full_text.offset ?? 0}</p>
+				  <div class="action-row"><button disabled={searchRunning || !(searchComparison.full_text.offset ?? 0)} onclick={() => void runSearchComparison(Math.max(0, (searchComparison?.full_text.offset ?? 0) - (searchComparison?.full_text.limit ?? searchLimit)))}>Previous results</button><button disabled={searchRunning || (searchComparison.full_text.results.length < (searchComparison.full_text.limit ?? searchLimit) && searchComparison.hybrid.results.length < (searchComparison.hybrid.limit ?? searchLimit))} onclick={() => void runSearchComparison((searchComparison?.full_text.offset ?? 0) + (searchComparison?.full_text.limit ?? searchLimit))}>Next results</button></div>
                   <div class="experiment-summary">
                     <div><span>Requested → effective</span><strong>{humanize(searchComparison.hybrid.requested_mode)} → {humanize(searchComparison.hybrid.effective_mode)}</strong></div>
                     <div><span>RAG state</span><strong>{humanize(searchComparison.hybrid.rag_state)}</strong><small>{searchComparison.hybrid.fallback_reason ? humanize(searchComparison.hybrid.fallback_reason) : 'No fallback'}</small></div>

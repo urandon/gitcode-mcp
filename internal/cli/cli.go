@@ -271,6 +271,9 @@ type options struct {
 	label                        string
 	color                        string
 	labels                       string
+	filterLabels                 multiFlag
+	labelsMatch                  string
+	titleContains                string
 	tag                          string
 	ref                          string
 	profile                      string
@@ -803,6 +806,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.color, "color", "", "standalone repository label #RRGGBB color")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
+	flags.Var(&opts.filterLabels, "filter-label", "exact cached label name; repeatable, no comma splitting")
+	flags.StringVar(&opts.labelsMatch, "labels-match", "", "label matching: all (default) or any")
+	flags.StringVar(&opts.titleContains, "title-contains", "", "literal case-sensitive cached title substring")
 	flags.StringVar(&opts.tag, "tag", "", "release tag")
 	flags.StringVar(&opts.ref, "ref", "", "release ref")
 	flags.StringVar(&opts.profile, "profile", "", "RAG profile")
@@ -893,6 +899,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 			opts.bodyFileSet = true
 		}
 	})
+	if (len(opts.filterLabels) > 0 || opts.labelsMatch != "" || opts.titleContains != "") && command != "list" && command != "search" && command != "search_sources" {
+		return opts, nil, service.ErrInvalidQuery{Field: "filters", Message: "metadata query filters are supported only by list/search"}
+	}
 	if command == "list" || command == "search" || command == "search_sources" || command == "backlinks" {
 		if opts.limitSet && opts.limit == 0 {
 			return opts, nil, service.ErrInvalidQuery{Field: "limit", Message: "limit must be between 1 and 100"}
@@ -2528,16 +2537,16 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return render(stdout, opts.format, result, renderOperationText)
 	case "search", "search_sources":
-		if len(args) == 0 {
+		if len(args) == 0 && opts.status == "" && opts.titleContains == "" && len(opts.filterLabels) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
-		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Mode: opts.searchMode, Kind: opts.kind, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Mode: opts.searchMode, Kind: opts.kind, Provenance: opts.provenance, Status: opts.status, Labels: opts.filterLabels, LabelsMatch: opts.labelsMatch, TitleContains: opts.titleContains, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderSearchText)
 	case "list":
-		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Provenance: opts.provenance, Labels: opts.filterLabels, LabelsMatch: opts.labelsMatch, TitleContains: opts.titleContains, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -5607,6 +5616,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "search", "search_sources":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--mode hybrid|full_text] [--kind KIND] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "QUERY may be omitted with --status, --filter-label or --title-contains (no embedding call).")
+		fmt.Fprintln(w, "  --status STATUS --filter-label NAME (repeatable) --labels-match all|any --title-contains TEXT")
+		fmt.Fprintln(w, "Labels and title substrings are literal/case-sensitive; cached positive membership only, not remote completeness.")
 		fmt.Fprintln(w, "Search cached sources with hybrid lexical plus semantic retrieval by default.")
 		fmt.Fprintln(w, "Use --mode full_text for deterministic exact/token matching without an embedding-provider call.")
 		fmt.Fprintln(w, "Flags:")
@@ -5620,6 +5632,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "list":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--kind KIND] [--status STATUS] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "  --filter-label NAME  exact label name; repeat without comma splitting")
+		fmt.Fprintln(w, "  --labels-match all|any --title-contains TEXT (literal case-sensitive substring)")
+		fmt.Fprintln(w, "Example: list --repo example/repo --kind issue --status open --filter-label bug")
 		fmt.Fprintln(w, "List cached sources with optional filters.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")

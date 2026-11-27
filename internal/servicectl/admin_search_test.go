@@ -501,6 +501,50 @@ func seedAdminSearchCache(t *testing.T, ctx context.Context) (string, string) {
 	return path, publicCacheRef(identity.UUID, path)
 }
 
+func TestAdminMetadataOnlyComparisonUsesSharedFilters(t *testing.T) {
+	ctx := context.Background()
+	path, ref := seedAdminSearchCache(t, ctx)
+	store, err := cache.NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Labels = []string{"bug", "area, 中文"}
+	if err := store.UpsertSource(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	manager := newTestManager(t, "darwin")
+	manager.AdminCachePath = path
+	cfg := adminFakeRAGConfig()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager("")
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, jobs, ""), jobs, NewAdminControlReceiptManager(""))
+	req := adminhttp.SearchCompareRequest{CacheRef: ref, RepoID: "owner/repo", Status: "open", Labels: []string{"bug", "area, 中文"}, TitleContains: "Semantic", Limit: 1}
+	got, err := controls.CompareSearch(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := got.(AdminSearchComparison)
+	if len(result.FullText.Results) != 1 || len(result.Hybrid.Results) != 1 || result.Hybrid.RAGState != "not_requested" || result.FullText.Filters.Status != "open" || len(jobs.List()) != 0 {
+		t.Fatalf("metadata comparison: %#v", result)
+	}
+	req.Offset = 1
+	got, err = controls.CompareSearch(ctx, req)
+	if err != nil || len(got.(AdminSearchComparison).FullText.Results) != 0 {
+		t.Fatalf("pagination: %v %#v", err, got)
+	}
+	req.Labels = []string{"missing"}
+	req.Query = "semantic"
+	got, err = controls.CompareSearch(ctx, req)
+	if err != nil || len(got.(AdminSearchComparison).Hybrid.Results) != 0 || got.(AdminSearchComparison).Hybrid.RAGState != "not_requested" {
+		t.Fatalf("unknown metadata: %v %#v", err, got)
+	}
+}
+
 func adminFakeRAGConfig() config.Config {
 	cfg := config.Default()
 	cfg.RAG.DefaultProfile = "fake"
