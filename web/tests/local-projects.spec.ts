@@ -106,6 +106,7 @@ test('issue metadata filters precede pagination and support text-free Git search
   await page.getByRole('combobox',{name:'Local issue status'}).selectOption('open');
   await page.getByRole('textbox',{name:'Local issue labels'}).fill('bug\nreview, exact');
   await page.getByRole('textbox',{name:'Local issue title contains'}).fill('API [核心]');
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
   await page.getByRole('button',{name:'Apply issue filters'}).click();
   await expect(page.getByRole('region',{name:'Local entity list'}).locator('.local-entity-list li')).toHaveCount(20);
   await page.getByRole('button',{name:'Next page',exact:true}).click();
@@ -147,8 +148,10 @@ test('editing issue predicates invalidates a still-loading collection page',asyn
   await page.goto('/?view=Local+projects&project=lab');
   await expect.poll(()=>fixture.calls.some(c=>c.operation==='list')).toBe(true);
   await page.getByRole('textbox',{name:'Local issue title contains'}).fill('Changed collection');
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
   release();
   await expect(page.getByRole('region',{name:'Local entity list'}).locator('.local-entity-list li')).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
   await page.getByRole('button',{name:'Apply issue filters'}).click();
   await expect(page.getByRole('region',{name:'Local entity list'})).toContainText('No entities in this bounded page');
   expect(fixture.calls.filter(c=>c.operation==='list').at(-1)!.body.title_contains).toBe('Changed collection');

@@ -252,7 +252,7 @@
           <p>Exact Git issue metadata, not body text. Filters apply before collection pagination and search candidates. Search remains active-only. Filters stay in memory, not URLs or browser storage.</p>
           {#if filtersDirty}<p role="status">Issue filters changed; apply them before paging or searching.</p>{/if}
         {/if}
-        {#if !entities.length && !busy}<p>No entities in this bounded page.</p>{/if}
+        {#if !entities.length && !busy && !filtersDirty}<p>No entities in this bounded page.</p>{/if}
         <ul class="local-entity-list">{#each entities as item}<li><button disabled={locked} aria-current={current.id === item.metadata.id ? 'true' : undefined} onclick={() => navigate({ ...current, id: item.metadata.id })}><FileText size={16} /><span><strong>{item.metadata.id} · {item.metadata.title}</strong><small>{item.metadata.state}</small></span></button></li>{/each}</ul>
         <div class="local-actions"><button class="text-action" disabled={locked || filtersDirty || current.offset === 0} onclick={() => navigate({ ...current, id: '', offset: Math.max(0, current.offset - 20) })}>Previous page</button><span>Offset {current.offset} · up to 20 entities</span><button class="text-action" disabled={locked || filtersDirty || entities.length < 20 || current.offset >= 100000} onclick={() => navigate({ ...current, id: '', offset: current.offset + 20 })}>Next page</button></div>
       </section>
