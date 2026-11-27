@@ -3,7 +3,7 @@
   import { AlertTriangle, FileText, GitFork, RefreshCw, Search, ShieldCheck } from '@lucide/svelte';
   import { humanize, type Capability } from './admin';
   import StatusChip from './StatusChip.svelte';
-  import { localEntityID, localMutation, localRequest, localSelector, LocalProjectError, type LocalCitation, type LocalEntity, type LocalIndexIntent, type LocalKind, type LocalMutationIntent, type LocalPlan, type LocalQuery, type LocalSearch, type LocalStatus } from './local-projects';
+  import { localEntityID, localIssueFilters, localMutation, localRequest, localSelector, LocalProjectError, type LocalIssueFilters, type LocalCitation, type LocalEntity, type LocalIndexIntent, type LocalKind, type LocalMutationIntent, type LocalPlan, type LocalQuery, type LocalSearch, type LocalStatus } from './local-projects';
 
   export let ready = false;
   export let active = false;
@@ -19,6 +19,11 @@
   let result: LocalSearch | undefined;
   let searchText = '';
   let searchMode: 'fulltext' | 'hybrid' = 'hybrid';
+  let searchRunning = false;
+  let filterStatus = '', filterLabels = '', filterTitle = '';
+  let filterMatch: 'all' | 'any' = 'all';
+  let appliedFilters: LocalIssueFilters = {};
+  let filtersDirty = false;
   let maxChunks = 64;
   let draft: { title: string; body: string; state: string; parent: string } | undefined;
   let original: LocalEntity | undefined;
@@ -63,6 +68,7 @@
 
   function begin(): { token: number; signal: AbortSignal } {
     controller?.abort(); controller = new AbortController(); busy = true; error = '';
+    searchRunning = false;
     return { token: ++epoch, signal: controller.signal };
   }
   const retain = (token: number) => !disposed && token === epoch;
@@ -84,12 +90,15 @@
   }
   async function loadSelection(next: LocalQuery): Promise<void> {
     const { token, signal } = begin();
+    if (next.project !== current.project || next.kind !== current.kind) {
+      filterStatus = ''; filterLabels = ''; filterTitle = ''; filterMatch = 'all'; appliedFilters = {}; filtersDirty = false;
+    }
     current = { ...next }; seenQuery = JSON.stringify(next);
     entities = []; entity = undefined; history = undefined; result = undefined; plan = undefined; pending = undefined;
     const selected = projects.find(p => p.project === next.project);
     if (!selected?.readable) { busy = false; error = selected ? 'The configured project is unavailable. Use the CLI handoff.' : 'Select a configured local project; arbitrary identities are never sent.'; return; }
     try {
-      const list = await localRequest<LocalEntity[]>('list', { project: next.project, kind: next.kind, limit: 20, offset: next.offset }, csrf, signal);
+      const list = await localRequest<LocalEntity[]>('list', { project: next.project, kind: next.kind, limit: 20, offset: next.offset, ...(next.kind === 'issue' ? appliedFilters : {}) }, csrf, signal);
       if (!retain(token)) return;
       if (!Array.isArray(list) || list.length > 20) throw new LocalProjectError();
       entities = list;
@@ -101,6 +110,25 @@
     finally { if (retain(token)) busy = false; }
   }
   function navigate(next: LocalQuery): void { if (!locked) { onquery(next); } }
+  function metadataChanged(): void {
+    if (draft || pending?.attempted) return;
+    epoch++; controller?.abort(); busy = false; searchRunning = false; filtersDirty = true;
+    entities = []; entity = undefined; history = undefined; result = undefined; plan = undefined; pending = undefined; error = '';
+  }
+  async function applyFilters(): Promise<void> {
+    if (locked || current.kind !== 'issue') return;
+    try { appliedFilters = localIssueFilters(filterStatus, filterLabels, filterMatch, filterTitle); }
+    catch (e) { error = message(e); return; }
+    filtersDirty = false;
+    const next = { ...current, id: '', offset: 0 };
+    seenQuery = JSON.stringify(next); onquery(next);
+    await loadSelection(next);
+  }
+  function searchChanged(): void {
+    if (pending?.attempted) return;
+    result = undefined;
+    if (searchRunning) { epoch++; controller?.abort(); searchRunning = false; busy = false; }
+  }
   function edit(value?: LocalEntity): void {
     original = value ? structuredClone(value) : undefined;
     draft = { title: value?.metadata.title || '', body: value?.body || '', state: value?.metadata.state || (current.kind === 'issue' ? 'open' : 'active'), parent: value?.metadata.parent_id || '' };
@@ -175,12 +203,14 @@
     error = 'Inspected revision adopted explicitly. The draft text is unchanged; render and review a new plan.';
   }
   async function search(): Promise<void> {
+    if (pending?.attempted || busy || filtersDirty || !searchText.trim() && !Object.keys(appliedFilters).length) return;
     const { token, signal } = begin(); result = undefined;
+    searchRunning = true;
     try {
-      const value = await localRequest<LocalSearch>('search', { project: current.project, query: searchText, mode: searchMode, limit: 8 }, csrf, signal);
+      const value = await localRequest<LocalSearch>('search', { project: current.project, query: searchText, mode: searchMode, limit: 8, ...appliedFilters }, csrf, signal);
       if (retain(token)) result = value;
     } catch (e) { if (retain(token)) error = message(e); }
-    finally { if (retain(token)) busy = false; }
+    finally { if (retain(token)) { busy = false; searchRunning = false; } }
   }
   onDestroy(() => { disposed = true; epoch++; controller?.abort(); });
 </script>
@@ -208,9 +238,23 @@
     {#if project?.readable}
       <section class="control-workbench" aria-label="Local entity list">
         <div class="section-heading"><h2>{humanize(current.kind)} collection</h2><button class="primary-action" disabled={locked || project.read_only || !canWrite} onclick={() => edit()}>New {current.kind}</button></div>
-        {#if !entities.length && !busy}<p>No entities in this bounded page.</p>{/if}
+        {#if current.kind === 'issue'}
+          <form onsubmit={e => { e.preventDefault(); void applyFilters(); }}>
+            <fieldset class="control-form" style="min-width: 0" disabled={Boolean(draft || pending?.attempted)} aria-label="Local issue metadata filters">
+              <legend>Issue metadata filters</legend>
+              <label><span>Status</span><select aria-label="Local issue status" bind:value={filterStatus} onchange={metadataChanged}><option value="">All states</option><option value="open">Open</option><option value="closed">Closed</option><option value="deleted">Deleted (list only)</option></select></label>
+              <label><span>Exact labels, one per line</span><textarea aria-label="Local issue labels" bind:value={filterLabels} oninput={metadataChanged} rows="2" maxlength="16384"></textarea></label>
+              <label><span>Labels match</span><select aria-label="Local labels match" bind:value={filterMatch} onchange={metadataChanged}><option value="all">All labels</option><option value="any">Any label</option></select></label>
+              <label><span>Title contains (literal)</span><input aria-label="Local issue title contains" bind:value={filterTitle} oninput={metadataChanged} maxlength="1024" /></label>
+              <button class="text-action" disabled={busy} type="submit">Apply issue filters</button>
+            </fieldset>
+          </form>
+          <p>Exact Git issue metadata, not body text. Filters apply before collection pagination and search candidates. Search remains active-only. Filters stay in memory, not URLs or browser storage.</p>
+          {#if filtersDirty}<p role="status">Issue filters changed; apply them before paging or searching.</p>{/if}
+        {/if}
+        {#if !entities.length && !busy && !filtersDirty}<p>No entities in this bounded page.</p>{/if}
         <ul class="local-entity-list">{#each entities as item}<li><button disabled={locked} aria-current={current.id === item.metadata.id ? 'true' : undefined} onclick={() => navigate({ ...current, id: item.metadata.id })}><FileText size={16} /><span><strong>{item.metadata.id} · {item.metadata.title}</strong><small>{item.metadata.state}</small></span></button></li>{/each}</ul>
-        <div class="local-actions"><button class="text-action" disabled={locked || current.offset === 0} onclick={() => navigate({ ...current, id: '', offset: Math.max(0, current.offset - 20) })}>Previous page</button><span>Offset {current.offset} · up to 20 entities</span><button class="text-action" disabled={locked || entities.length < 20 || current.offset >= 100000} onclick={() => navigate({ ...current, id: '', offset: current.offset + 20 })}>Next page</button></div>
+        <div class="local-actions"><button class="text-action" disabled={locked || filtersDirty || current.offset === 0} onclick={() => navigate({ ...current, id: '', offset: Math.max(0, current.offset - 20) })}>Previous page</button><span>Offset {current.offset} · up to 20 entities</span><button class="text-action" disabled={locked || filtersDirty || entities.length < 20 || current.offset >= 100000} onclick={() => navigate({ ...current, id: '', offset: current.offset + 20 })}>Next page</button></div>
       </section>
       {#if entity}
         <section class="control-workbench" aria-label="Local entity detail"><div class="section-heading"><h2>{entity.metadata.id} · {entity.metadata.title}</h2><StatusChip value={entity.metadata.state} /></div><pre class="local-body">{entity.body}</pre><p class="local-citation">Git citation · {entity.citation.project_id} · {entity.citation.path} · commit {entity.citation.commit} · blob {entity.citation.blob}</p><div class="local-actions"><button class="text-action" disabled={locked || project.read_only || !canWrite || entity.metadata.state === 'deleted'} onclick={() => edit(entity)}>Edit entity</button><button class="text-action" disabled={busy || Boolean(pending?.attempted)} onclick={loadHistory}>Read bounded history</button></div>
@@ -230,8 +274,8 @@
         </section>
       {/if}
       <section class="control-workbench" aria-label="Local project search"><div class="control-heading"><div><Search size={22} /><div><h2>Search Git content</h2><p>Lexical reads need no index. Hybrid sends only the query to the configured provider and visibly falls back when coverage is missing or stale.</p></div></div></div>
-        <form class="control-form" onsubmit={e => { e.preventDefault(); void search(); }}><label><span>Query</span><input aria-label="Local search query" bind:value={searchText} maxlength="4096" /></label><label><span>Mode</span><select aria-label="Local search mode" bind:value={searchMode}><option value="hybrid">Hybrid requested</option><option value="fulltext">Explicit full-text</option></select></label><button class="primary-action" disabled={busy || !searchText.trim() || Boolean(pending?.attempted)}>Search local project</button></form>
-        {#if result}<div role="status"><p>{humanize(result.requested_mode)} → {humanize(result.effective_mode)} · RAG {humanize(result.index_state)} · {humanize(result.fallback || 'no fallback')}</p><code class="local-citation">Commit {result.commit}</code></div>{#if !result.hits.length}<p>No current Git match. This is a valid empty result.</p>{/if}<ul class="local-results">{#each result.hits as hit}<li><button class="text-action" disabled={locked} onclick={() => navigate({ ...current, kind: hit.citation.kind, id: hit.citation.id, offset: 0 })}>{hit.citation.id}</button><pre class="local-body">{hit.snippet}</pre><p class="local-citation">{hit.citation.project_id} · {hit.citation.path} · lines {hit.line_start}–{hit.line_end} · commit {hit.citation.commit} · blob {hit.citation.blob}</p></li>{/each}</ul>{/if}
+        <form class="control-form" onsubmit={e => { e.preventDefault(); void search(); }}><label><span>Query (optional with applied issue filters)</span><input aria-label="Local search query" bind:value={searchText} oninput={searchChanged} maxlength="4096" disabled={Boolean(pending?.attempted)} /></label><label><span>Mode</span><select aria-label="Local search mode" bind:value={searchMode} onchange={searchChanged} disabled={Boolean(pending?.attempted)}><option value="hybrid">Hybrid requested</option><option value="fulltext">Explicit full-text</option></select></label><button class="primary-action" disabled={busy || filtersDirty || !searchText.trim() && !Object.keys(appliedFilters).length || Boolean(pending?.attempted)}>Search local project</button></form>
+        {#if result}<div role="status"><p>{humanize(result.requested_mode)} → {humanize(result.effective_mode)} · RAG {humanize(result.index_state)} · {humanize(result.fallback || 'no fallback')}</p>{#if result.metadata_only}<p>Metadata-only Git matches · no index or embedding request. Snippets are exact source prefixes, ordered by Git-tree path.</p>{/if}<code class="local-citation">Commit {result.commit}</code></div>{#if !result.hits.length}<p>No current Git match. This is a valid empty result.</p>{/if}<ul class="local-results">{#each result.hits as hit}<li><button class="text-action" disabled={locked} onclick={() => navigate({ ...current, kind: hit.citation.kind, id: hit.citation.id, offset: 0 })}>{hit.citation.id}</button><pre class="local-body">{hit.snippet}</pre><p class="local-citation">{hit.citation.project_id} · {hit.citation.path} · lines {hit.line_start}–{hit.line_end} · commit {hit.citation.commit} · blob {hit.citation.blob}</p></li>{/each}</ul>{/if}
         <div class="control-form"><label><span>Maximum new chunks</span><input aria-label="Maximum new chunks" type="number" min="1" max="128" bind:value={maxChunks} disabled={busy || Boolean(pending?.attempted)} oninput={invalidate} /></label><div class="form-actions"><button class="text-action" disabled={locked || project.read_only || !canIndex || !Number.isInteger(maxChunks) || maxChunks < 1 || maxChunks > 128} onclick={prepareIndex}>Render bounded index plan</button></div></div><p>No model install, download, provider start or automatic repair. Partial indexing is resumable through another explicitly confirmed bounded call.</p>
       </section>
       {#if plan && pending}<section class="control-workbench" aria-label="Reviewed local intent"><h2>Reviewed local intent</h2><p>{humanize(plan.operation)} · {plan.project_id} · {plan.target_id || 'configured project'}</p><p class="local-citation">Plan {plan.plan_id}<br />Commit {plan.commit}<br />Boundary {plan.data_boundary}{#if plan.max_chunks} · at most {plan.max_chunks} new chunks{/if}</p><p class="local-citation">Retry key: {pending.kind === 'mutation' ? (pending.intent as LocalMutationIntent).mutation.idempotency_key : (pending.intent as LocalIndexIntent).idempotency_key}</p><ul>{#each plan.effects as effect}<li>{humanize(effect)}</li>{/each}</ul>{#if pending.attempted}<p role="status">Uncertain action: editing and target changes are locked. Retry reuses the exact confirmed intent and key.</p>{/if}<button class="primary-action" disabled={busy} onclick={confirm}>{pending.attempted ? 'Retry exact confirmed action' : 'Confirm local action'}</button></section>{/if}

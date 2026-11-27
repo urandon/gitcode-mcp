@@ -5,7 +5,7 @@ import type { LocalCitation, LocalEntity, LocalKind, LocalMutationIntent } from 
 function citation(kind: LocalKind, id: string, digit = '1'): LocalCitation {
   return { project_id: 'lab', kind, id, commit: digit.repeat(40), blob: digit.repeat(40), path: kind === 'wiki' ? `wiki/${id}.md` : kind === 'comment' ? `issues/ISSUE-1/comments/${id}.md` : `issues/${id}/issue.md` };
 }
-async function localFixture(page: Page, options: { enabled?: boolean; readonly?: boolean; lostReply?: boolean; conflict?: boolean; delayedList?: Promise<void> } = {}) {
+async function localFixture(page: Page, options: { enabled?: boolean; readonly?: boolean; lostReply?: boolean; conflict?: boolean; delayedList?: Promise<void>; delayedSearch?: Promise<void>; failSearchOnce?: boolean } = {}) {
   const calls: Array<{ operation: string; body: any }> = [];
   const applies: LocalMutationIntent[] = [];
   const records: Record<string, LocalEntity> = {
@@ -15,6 +15,7 @@ async function localFixture(page: Page, options: { enabled?: boolean; readonly?:
   };
   let head = '1'.repeat(40), lost = Boolean(options.lostReply), conflict = Boolean(options.conflict), indexState = 'missing';
   const receipts = new Map<string, any>();
+  let failSearch = options.failSearchOnce;
   const view = structuredClone(emptySnapshot); view.revision = 'local-fixture'; view.generated_at = new Date().toISOString();
   view.service = { ...view.service, version: 'fixture', running: true, admin_secure: true };
   view.capabilities = options.enabled === false ? [] : ['status', 'get', 'list', 'history', 'mutate', 'search', 'index'].map(name => ({ id: `local_project_${name}`, category: 'local_project', safety_class: 'read_only', description: 'Local fixture capability', cli_enabled: true, mcp_enabled: true, ui_enabled: true }));
@@ -29,10 +30,18 @@ async function localFixture(page: Page, options: { enabled?: boolean; readonly?:
     const failure = (code: string) => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code, message: 'must-not-render-provider-body' } }) });
     if (operation !== 'local-projects' && request.headers()['x-csrf-token'] !== 'fixture-csrf') return failure('csrf_validation_failed');
     if (operation === 'local-projects') return reply({ projects: [{ project: 'lab', project_id: 'lab', readable: true, read_only: Boolean(options.readonly), state: options.readonly ? 'read_only' : 'ready', commit: head }, { project: 'other', project_id: 'other', readable: false, read_only: true, state: 'unavailable' }] });
-    if (operation === 'list') { if (options.delayedList) await options.delayedList; return reply(Object.values(records).filter(e => e.metadata.kind === body.kind)); }
+    const metadataMatch = (e: LocalEntity) => (!body?.status || e.metadata.state === body.status) && (!body?.title_contains || e.metadata.title.includes(body.title_contains)) && (!body?.labels?.length || (body.labels_match === 'any' ? body.labels.some((label: string) => e.metadata.labels?.includes(label)) : body.labels.every((label: string) => e.metadata.labels?.includes(label))));
+    if (operation === 'list') { if (options.delayedList) await options.delayedList; return reply(Object.values(records).filter(e => e.metadata.kind === body.kind && metadataMatch(e)).slice(body.offset || 0, (body.offset || 0) + (body.limit || 20))); }
     if (operation === 'get') return reply(records[body.id]);
     if (operation === 'history') return reply([records[body.id].citation]);
-    if (operation === 'search') return reply({ project: 'lab', commit: head, requested_mode: body.mode, effective_mode: body.mode === 'fulltext' ? 'fulltext' : indexState === 'ready' ? 'hybrid' : 'fulltext', index_state: body.mode === 'fulltext' ? 'not_requested' : indexState, fallback: body.mode === 'fulltext' ? '' : `index_${indexState}`, hits: [{ citation: records['ISSUE-1'].citation, snippet: records['ISSUE-1'].body, line_start: 1, line_end: 1 }] });
+    if (operation === 'search') {
+      if(options.delayedSearch) await options.delayedSearch;
+      if(failSearch) { failSearch=false; return failure('local_git_unavailable'); }
+      const metadataOnly = !body.query?.trim();
+      const filtered = body.status || body.labels?.length || body.title_contains;
+      const matches = filtered ? Object.values(records).filter(e => e.metadata.kind === 'issue' && e.metadata.state !== 'deleted' && metadataMatch(e)) : [records['ISSUE-1']];
+      return reply({ project:'lab', commit:head, metadata_only:metadataOnly, requested_mode:body.mode, effective_mode:metadataOnly || body.mode === 'fulltext' ? 'fulltext' : indexState === 'ready' ? 'hybrid' : 'fulltext', index_state:metadataOnly || body.mode === 'fulltext' ? 'not_requested' : indexState, fallback:metadataOnly ? body.mode === 'hybrid' ? 'metadata_only' : '' : body.mode === 'fulltext' ? '' : `index_${indexState}`, hits:matches.slice(0,body.limit||8).map(e=>({citation:e.citation,snippet:e.body,line_start:1,line_end:1})) });
+    }
     if (operation.endsWith('-plan')) return reply({ plan_id: `local-project-plan-${'a'.repeat(64)}`, project: 'lab', project_id: 'lab', operation: body.mutation?.operation || 'index', commit: head, data_boundary: body.mutation ? 'local_git' : 'local_process', max_chunks: body.max_chunks, effects: [body.mutation ? 'publish_entity_counters_and_receipt_in_one_git_commit' : 'embed_at_most_confirmed_new_chunks'] });
     if (operation === 'mutation-apply') {
       applies.push(body);
@@ -87,6 +96,65 @@ test('local edits confirm/cancel, invalidate plans and replay lost replies with 
   expect(page.url()).not.toContain('Retained'); expect(page.url()).not.toContain('idempotency');
   const browserStorage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }));
   expect(browserStorage).not.toContain('Retained local draft'); expect(browserStorage).not.toContain(fixture.applies[0].mutation.idempotency_key);
+});
+
+test('issue metadata filters precede pagination and support text-free Git search without persisting selectors', async ({ page }) => {
+  const fixture = await localFixture(page);
+  for(let i=2;i<=26;i++) fixture.records[`ISSUE-${i}`]={metadata:{schema:1,id:`ISSUE-${i}`,kind:'issue',title:`API [核心] ${i}`,state:i===26?'closed':'open',labels:['bug','review, exact']},body:`Metadata fixture ${i}`,citation:citation('issue',`ISSUE-${i}`)};
+  await page.goto('/?view=Local+projects&project=lab');
+  await expect(page.getByRole('button',{name:'Next page',exact:true})).toBeEnabled();
+  await page.getByRole('combobox',{name:'Local issue status'}).selectOption('open');
+  await page.getByRole('textbox',{name:'Local issue labels'}).fill('bug\nreview, exact');
+  await page.getByRole('textbox',{name:'Local issue title contains'}).fill('API [核心]');
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'Apply issue filters'}).click();
+  await expect(page.getByRole('region',{name:'Local entity list'}).locator('.local-entity-list li')).toHaveCount(20);
+  await page.getByRole('button',{name:'Next page',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Local entity list'}).locator('.local-entity-list li')).toHaveCount(4);
+  const list=fixture.calls.filter(c=>c.operation==='list').at(-1)!.body;
+  expect(list).toMatchObject({offset:20,status:'open',labels:['bug','review, exact'],labels_match:'all',title_contains:'API [核心]'});
+  await page.getByRole('button',{name:'Search local project'}).click();
+  await expect(page.getByRole('region',{name:'Local project search'})).toContainText('Metadata-only Git matches');
+  const search=fixture.calls.filter(c=>c.operation==='search').at(-1)!.body;
+  expect(search).toMatchObject({query:'',status:'open',labels:['bug','review, exact'],title_contains:'API [核心]'});
+  expect(fixture.calls.some(c=>c.operation.includes('index')||c.operation.includes('apply'))).toBe(false);
+  expect(page.url()).not.toMatch(/review|title_contains|labels_match|%E6%A0/);
+  const storage=await page.evaluate(()=>JSON.stringify({local:{...localStorage},session:{...sessionStorage}}));expect(storage).not.toContain('review, exact');
+  await page.getByRole('combobox',{name:'Entity kind'}).selectOption('wiki');
+  await expect(page.getByRole('group',{name:'Local issue metadata filters'})).toHaveCount(0);
+  expect(fixture.calls.filter(c=>c.operation==='list').at(-1)!.body).not.toHaveProperty('labels');
+});
+
+for(const failed of [false,true]) test(`editing issue predicates invalidates an in-flight search before its ${failed?'failure':'success'} can publish`, async ({ page }) => {
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+  const fixture=await localFixture(page,{delayedSearch:gate,failSearchOnce:failed});
+  await page.goto('/?view=Local+projects&project=lab');
+  await page.getByRole('textbox',{name:'Local search query'}).fill('evidence');
+  await page.getByRole('button',{name:'Search local project'}).click();
+  await expect.poll(()=>fixture.calls.some(c=>c.operation==='search')).toBe(true);
+  await page.getByRole('textbox',{name:'Local issue title contains'}).fill('Changed literal');
+  release();
+  await expect(page.getByRole('region',{name:'Local project search'}).locator('.local-results')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Search local project'})).toBeDisabled();
+  await page.getByRole('button',{name:'Apply issue filters'}).click();
+  await page.getByRole('button',{name:'Search local project'}).click();
+  await expect(page.getByRole('region',{name:'Local project search'})).toContainText('No current Git match');
+  expect(fixture.calls.filter(c=>c.operation==='search').at(-1)!.body.title_contains).toBe('Changed literal');
+});
+
+test('editing issue predicates invalidates a still-loading collection page',async({page})=>{
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+  const fixture=await localFixture(page,{delayedList:gate});
+  await page.goto('/?view=Local+projects&project=lab');
+  await expect.poll(()=>fixture.calls.some(c=>c.operation==='list')).toBe(true);
+  await page.getByRole('textbox',{name:'Local issue title contains'}).fill('Changed collection');
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
+  release();
+  await expect(page.getByRole('region',{name:'Local entity list'}).locator('.local-entity-list li')).toHaveCount(0);
+  await expect(page.getByRole('region',{name:'Local entity list'}).getByText('No entities in this bounded page.',{exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'Apply issue filters'}).click();
+  await expect(page.getByRole('region',{name:'Local entity list'})).toContainText('No entities in this bounded page');
+  expect(fixture.calls.filter(c=>c.operation==='list').at(-1)!.body.title_contains).toBe('Changed collection');
 });
 
 test('conflict preserves a draft and requires explicit inspection and revision adoption', async ({ page }) => {

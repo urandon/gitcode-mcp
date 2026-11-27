@@ -313,7 +313,7 @@ Local MCP discovery is side-effect-free and advertises only:
 |---|---|---|
 | `local_project_status` | `project status` | Empty object; bounded registrations/status, no content or paths |
 | `local_project_get` | `project get` | `project`, `kind`, stable `id` |
-| `local_project_list` | `project list` | `project`, `kind`, optional `offset`/`limit` (default 20, max 128) |
+| `local_project_list` | `project list` | `project`, `kind`, optional issue metadata predicates and `offset`/`limit` (default 20, max 128) |
 | `local_project_history` | `project history` | `project`, `kind`, `id`, optional `max_commits` (default 64, max 256) |
 | `local_project_mutate` | `project mutate` | `project` and closed typed `mutation` with local intent, expected revision/head and caller key |
 
@@ -375,7 +375,7 @@ gitcode-mcp project search --project lab --query 'research evidence' --mode hybr
 gitcode-mcp project index --project lab --write-mode local --max-chunks 64
 ```
 
-MCP exposes `local_project_search` (`project`, `query`, optional `mode`, `limit`)
+MCP exposes `local_project_search` (`project`, optional `query`, issue metadata predicates, `mode`, `limit`)
 and `local_project_index` (`project`, `write_mode: local`, optional `max_chunks`).
 Search defaults to `fulltext`, maximum query 4096 UTF-8 bytes, default 10 hits,
 maximum 32. It requires neither cache nor provider. A hybrid query must be
@@ -383,6 +383,74 @@ explicit and the registration must name an already provisioned embedding
 profile. Queries never install/download/start/probe setup, repair, initialize
 an index or contact GitCode. The query alone is embedded; document transfer
 happens only in the explicit index action.
+
+### Issue metadata predicates
+
+LocalGit queries are a separate authority contract from cached GitCode
+`list_sources`/`search_sources`. They reuse the same pure matching/validation,
+not the remote cache or its completeness assumptions. `status` matches the
+Git issue's `state`; `labels` are exact names with `labels_match: all` (default)
+or `any`; `title_contains` is a literal case-sensitive substring. All supplied
+predicate groups combine with AND. Body-only text is not metadata membership.
+Whitespace and punctuation in a nonblank label are meaningful; there is no
+case folding, regex, comma splitting, hierarchy or implicit label expansion.
+
+```sh
+gitcode-mcp project list --project lab --kind issue --status open \
+  --filter-label bug --filter-label 'review, API' --labels-match all \
+  --title-contains '[核心]' --limit 20 --offset 0
+gitcode-mcp project search --project lab --status open --filter-label bug
+gitcode-mcp project search --project lab --query 'research evidence' \
+  --status open --filter-label bug --mode hybrid
+```
+
+MCP list example (use `local_project_list`):
+
+```json
+{"project":"lab","kind":"issue","status":"open","labels":["bug","review, API"],"labels_match":"all","title_contains":"[核心]","limit":20,"offset":0}
+```
+
+For `local_project_search`, omit `kind`/`offset` and optionally add `query`/`mode`.
+Labels are at most 32 distinct nonblank UTF-8 names, each at most 128 characters,
+without NUL/newlines. Title substring is at most 512 characters without NUL;
+status is at most 128 characters without NUL. Unknown exact status/label/title
+values give a valid empty result. Invalid metadata selectors fail before Git traversal.
+Get/history/mutations do not accept query filters. Mutation `--labels` remains
+a separate comma-separated replacement field; query `--filter-label` repeats
+one exact name per flag.
+
+List requires `kind=issue` when actual metadata predicates are supplied. It
+filters before numeric stable-ID pagination; existing limit/offset bounds and
+tombstone visibility remain. Search with predicates selects **issues only**;
+unfiltered textual search still includes active issues/comments/wiki. Search
+always excludes tombstones, even with `status=deleted`. Metadata predicates
+are query selectors, not content-access permissions.
+
+Empty/whitespace `query` is valid only with at least one actual predicate
+(status, label or nonempty title substring); `labels_match` alone or empty
+selectors do not count. Such a search returns `metadata_only=true`,
+`effective_mode=fulltext`, `index_state=not_requested`, and, when hybrid was
+requested, `fallback=metadata_only`. No index is opened and no provider or
+credential is constructed/resolved. Hits are deterministic Git-tree-path
+ordered exact source prefixes (at most 800 UTF-8 bytes), with the real prefix's
+line range/digest and exact project/stable-ID/commit/blob/path citation. They
+are metadata matches, **not** claims that a text query occurred in that prefix.
+Use list for paginated metadata browsing; search retains its existing hit limit.
+Coverage counts eligible metadata files, not chunks/embeddings, in this mode.
+
+For textual queries, Git metadata eligibility applies before lexical candidates
+and semantic ranking/fusion. The eligible pinned path/blob map is trusted
+request-local state, never a client-supplied path selector. A ready whole-project
+derived set remains reusable without creating a namespace per predicate.
+Semantic coverage describes that published whole-project set, not a filtered
+match count. Missing/stale/partial/corrupt/unavailable index fallback uses the
+same filtered current Git corpus and preserves exact citations.
+
+Filtered list/search scans retain the 8 MiB source-byte and ten-second budget;
+exhaustion fails explicitly, never returns an incomplete page as complete.
+Reducing a filtered page size does not remove the need to validate the bounded
+eligible scan. No Git write, sync, SQLite authority copy or implicit repair is
+introduced by metadata predicates.
 
 Strict local mode ignores repository-owned configuration from the process's
 working directory. Only trusted global settings/environment configure providers
@@ -464,6 +532,16 @@ reads until selected. Ordinary late reads are canceled when leaving the cohort,
 while an explicitly confirmed write retains its exact retry intent. Full-page
 departure with a draft or uncertain write requests the browser's discard
 confirmation instead of silently losing that in-memory state.
+
+The issue collection exposes status, exact labels (one per line, including
+literal commas/spaces), all/any and literal title filters. **Apply issue filters**
+resets the page and applies the same predicates to collection/search. With
+applied predicates, search text may be empty; the result explicitly identifies
+metadata-only Git-prefix matches and no embedding request. Editing predicates
+immediately cancels/invalidates old reads/results; apply them again before
+paging/searching. Changing project/kind resets filters. Query data stays in
+memory, never URLs/browser storage, and cannot discard a draft or uncertain
+write intent. Comment/wiki workflows remain unfiltered by issue metadata.
 
 The authenticated `/api/admin/v1/local-projects` GET returns status. Fixed POST
 suffixes `list`, `get`, `history`, `search`, `mutation-plan`, `mutation-apply`,

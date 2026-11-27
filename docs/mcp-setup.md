@@ -31,6 +31,15 @@ profile and the existing disposable repository-document index; they never set
 up models or contact GitCode. See the linked G5 contract for bounds, exact
 entity citations and requested/effective-mode fallback.
 
+`local_project_list` / `local_project_search` also accept issue metadata
+`status`, exact `labels`, `labels_match: all|any`, and literal case-sensitive
+`title_contains`. They evaluate the exact Git snapshot, not the cached-source
+queries below. List applies predicates before pagination (`kind=issue` is
+required); search applies them before lexical/semantic candidates. Omit search
+text with actual predicates for `metadata_only` results without an index or
+provider request. Get/history do not accept these query fields. See
+[LocalGit metadata bounds, CLI examples and citation semantics](local-git-project-format.md#issue-metadata-predicates).
+
 ## Cached source query contract
 
 CLI `list` / `search` (`search_sources` alias) and MCP `list_sources` /

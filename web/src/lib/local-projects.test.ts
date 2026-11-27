@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { localEntityID, localMutation, localRequest, LocalProjectError, readLocalQuery, writeLocalQuery, type LocalEntity, type LocalStatus } from './local-projects';
+import { localEntityID, localIssueFilters, localMutation, localRequest, LocalProjectError, readLocalQuery, writeLocalQuery, type LocalEntity, type LocalStatus } from './local-projects';
 
 afterEach(() => vi.unstubAllGlobals());
 describe('Local project protected browser contract', () => {
+  it('keeps exact metadata labels and literal Unicode titles outside URL state', () => {
+    expect(localIssueFilters('open', 'bug\nreview, API\n edge \n', 'any', '[核心]. Ω')).toEqual({ status:'open', labels:['bug','review, API',' edge '], labels_match:'any', title_contains:'[核心]. Ω' });
+    expect(localIssueFilters('', '', 'all', '')).toEqual({});
+    for(const labels of ['bug\nbug', 'x'.repeat(129), Array.from({length:33},(_,i)=>`l${i}`).join('\n'), 'bad\0label']) expect(()=>localIssueFilters('',labels,'all','')).toThrow(LocalProjectError);
+    expect(()=>localIssueFilters('open','','all','Ω'.repeat(513))).toThrow(LocalProjectError);
+    const out=new URLSearchParams();writeLocalQuery(out,{project:'lab',kind:'issue',id:'',offset:0});expect([...out.keys()]).toEqual(['project']);
+  });
   it('round trips only bounded selectors and never a draft, path, query, endpoint or key', () => {
     const input = new URLSearchParams({ project: 'lab', local_kind: 'wiki', entity: 'DOC-1', local_offset: '20', body: 'private-marker', q: 'private-marker', path: 'private-marker', idempotency_key: 'private-marker' });
     const q = readLocalQuery(input);

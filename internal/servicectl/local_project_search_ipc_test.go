@@ -60,6 +60,10 @@ func TestLocalProjectSearchIPCRequestShapeRejectsNullBeforeStore(t *testing.T) {
 		{"Search", `{"project":"lab"}`},
 		{"Search", `{"project":"lab","query":null}`},
 		{"Search", `{"project":"lab","query":"x","mode":null}`},
+		{"Search", `{"project":"lab","labels":null}`},
+		{"Search", `{"project":"lab","labels":["bug","bug"]}`},
+		{"Get", `{"project":"lab","kind":"issue","id":"ISSUE-1","status":""}`},
+		{"History", `{"project":"lab","kind":"issue","id":"ISSUE-1","labels":[]}`},
 		{"Search", `{"project":"lab","query":"` + string([]byte{0xff}) + `"}`},
 		{"Index", `{"project":"lab","write_mode":"local","max_chunks":null}`},
 		{"Index", `{"project":"lab","write_mode":"local","cache_path":"private-coordinate"}`},
@@ -68,6 +72,28 @@ func TestLocalProjectSearchIPCRequestShapeRejectsNullBeforeStore(t *testing.T) {
 		coded, ok := err.(interface{ DiagnosticCode() string })
 		if !ok || coded.DiagnosticCode() != "local_git_invalid_argument" {
 			t.Fatal("invalid search/index request reached store resolution")
+		}
+	}
+}
+
+func TestLocalMetadataOnlyWireKeepsFalseSemanticReadinessRejected(t *testing.T) {
+	r := service.LocalProjectSearchResult{Project: "lab", ProjectID: "lab", Commit: strings.Repeat("a", 40), RequestedMode: "hybrid", EffectiveMode: "fulltext", IndexState: "not_requested", MetadataOnly: true, Fallback: "metadata_only", Coverage: repositorydocs.SearchCoverage{State: "lexical-only"}, Hits: []service.LocalProjectSearchHit{}}
+	raw, _ := json.Marshal(r)
+	if _, ok := validateLocalSearchResult("LocalProjects.Search", raw); !ok {
+		t.Fatal("valid metadata-only response rejected")
+	}
+	for _, change := range []func(map[string]any){
+		func(m map[string]any) { m["metadata_only"] = false },
+		func(m map[string]any) { m["metadata_only"] = nil },
+		func(m map[string]any) { m["effective_mode"] = "hybrid"; m["index_state"] = "ready"; m["fallback"] = "" },
+		func(m map[string]any) { m["coverage"].(map[string]any)["eligible_chunks"] = 1 },
+	} {
+		var fields map[string]any
+		_ = json.Unmarshal(raw, &fields)
+		change(fields)
+		bad, _ := json.Marshal(fields)
+		if _, ok := validateLocalSearchResult("LocalProjects.Search", bad); ok {
+			t.Fatal("false metadata/semantic readiness accepted")
 		}
 	}
 }

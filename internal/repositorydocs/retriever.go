@@ -26,18 +26,22 @@ type SearchStore interface {
 }
 
 type SearchRequest struct {
-	RepoID                       string      `json:"repo_id"`
-	RegistrationID               string      `json:"registration_id,omitempty"`
-	SourceRegistrationID         string      `json:"source_registration_id,omitempty"`
-	SourceRegistrationGeneration int64       `json:"source_registration_generation,omitempty"`
-	Repository                   *Repository `json:"-"`
-	Revision                     string      `json:"revision,omitempty"`
-	IncludeWorktree              bool        `json:"include_worktree,omitempty"`
-	Query                        string      `json:"query"`
-	Mode                         string      `json:"mode,omitempty"`
-	Limit                        int         `json:"limit,omitempty"`
-	MaxFileBytes                 int64       `json:"max_file_bytes,omitempty"`
-	ChunkBytes                   int         `json:"chunk_bytes,omitempty"`
+	// Trusted exact path/blob eligibility derived from a pinned Git snapshot.
+	// Nil is unrestricted. This is never a transport/query-language input and
+	// does not change the identity or coverage of the whole published index.
+	EligiblePinnedPaths          map[string]string `json:"-"`
+	RepoID                       string            `json:"repo_id"`
+	RegistrationID               string            `json:"registration_id,omitempty"`
+	SourceRegistrationID         string            `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64             `json:"source_registration_generation,omitempty"`
+	Repository                   *Repository       `json:"-"`
+	Revision                     string            `json:"revision,omitempty"`
+	IncludeWorktree              bool              `json:"include_worktree,omitempty"`
+	Query                        string            `json:"query"`
+	Mode                         string            `json:"mode,omitempty"`
+	Limit                        int               `json:"limit,omitempty"`
+	MaxFileBytes                 int64             `json:"max_file_bytes,omitempty"`
+	ChunkBytes                   int               `json:"chunk_bytes,omitempty"`
 }
 
 type SearchCoverage struct {
@@ -457,6 +461,18 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 	}
 	results := map[string]rankedHit{}
 	for _, candidate := range snapshot.Candidates {
+		// A pinned LocalGit query may expose only metadata-eligible files while
+		// reusing the whole-project immutable vector set. Exclude other paths
+		// and blobs before scoring/fusion, not merely during final hydration.
+		if req.EligiblePinnedPaths != nil {
+			blob, eligible := req.EligiblePinnedPaths[candidate.Path]
+			if !eligible {
+				continue
+			}
+			if blob != candidate.BlobOID {
+				return nil, SemanticProviderContractError{code: "pinned_corpus_citation_mismatch"}
+			}
+		}
 		if len(candidate.Vector) == 0 {
 			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
 		}

@@ -78,7 +78,7 @@ func localProjectAdminProvider(host *service.LocalProjects, receipts *AdminContr
 			return host.Status(ctx)
 		case "list", "get", "history":
 			var q service.LocalProjectQuery
-			if err = DecodeLocalProjectJSON(raw, &q); err != nil {
+			if err = decodeLocalProjectQuery(raw, &q, operation == "list"); err != nil {
 				return nil, err
 			}
 			switch operation {
