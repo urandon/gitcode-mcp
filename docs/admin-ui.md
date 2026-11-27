@@ -24,9 +24,16 @@ respective majors. It checks nested copies too; the old Vitest 3 tinypool and
 vite-node copies must be gone. This is a fixed regression baseline, **not** a
 live vulnerability scanner or a claim that future advisories cannot apply.
 
-Kit 2 still has audit findings whose prerequisites this SPA does not use:
+Audit data can lag a verified backport. For example, the npm/global advisory
+range for [prerender cache-header escaping](https://github.com/sveltejs/kit/security/advisories/GHSA-27mw-82g8-phjj)
+still flags Kit 2, but the maintainer advisory's version table and
+[2.70.4 release](https://github.com/sveltejs/kit/releases/tag/%40sveltejs%2Fkit%402.70.4)
+identify the backport. The installed renderer escapes the cache header in its
+HTML attribute. Classify that copy as patched, not as an unpatched exception;
+do not suppress the audit report to conceal the metadata discrepancy.
+
+Other Kit 2 findings have prerequisites this SPA does not use:
 [enhanced form actions](https://github.com/sveltejs/kit/security/advisories/GHSA-pfhg-q3qv-9q6r),
-[untrusted prerender cache headers](https://github.com/sveltejs/kit/security/advisories/GHSA-27mw-82g8-phjj),
 [remote form parsing](https://github.com/sveltejs/kit/security/advisories/GHSA-3r8g-jcqq-3p5j),
 and [private remote query batching](https://github.com/sveltejs/kit/security/advisories/GHSA-6cf5-gc4q-fm3x).
 Its transitive [cookie serializer](https://github.com/advisories/GHSA-pxg6-pf52-xh8x)

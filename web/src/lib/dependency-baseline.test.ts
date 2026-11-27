@@ -12,7 +12,7 @@ const copies = (name: string) => Object.entries(lock.packages).filter(([path]) =
 describe('reviewed Admin dependency baseline', () => {
   it.each([
     ['@sveltejs/adapter-static', '3.0.11'], // GHSA-jf9x-2fg2-hx4w
-    ['@sveltejs/kit', '2.70.4'], // backported route-resolution fixes
+    ['@sveltejs/kit', '2.70.4'], // route-resolution and cache-header escaping backports
     ['vite', '7.3.7'], // dev-server/editor boundary fixes
     ['vitest', '4.1.12'], // both mocker fixes; removes the old worker pool
     ['@vitest/mocker', '4.1.12'], // GHSA-82fw-gwwq-j7x9, GHSA-qxg6-89mg-rqv8
