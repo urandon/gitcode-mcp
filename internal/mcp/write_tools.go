@@ -15,8 +15,9 @@ import (
 
 type feedbackToolArgs struct {
 	feedback.Draft
-	WriteMode      string `json:"write_mode,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	PreparedDraft  json.RawMessage `json:"draft,omitempty"`
+	WriteMode      string          `json:"write_mode,omitempty"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
 }
 
 type writeToolArgs struct {
@@ -174,7 +175,16 @@ func feedbackInputSchema(submit bool) inputSchema {
 		props["reproduction_steps"] = reproduction
 		props["write_mode"] = schemaProp{Type: "string", Description: "Required live external-write intent.", Enum: []string{"live"}}
 		props["idempotency_key"] = schemaProp{Type: "string", Description: "Caller-provided idempotency key.", MinLength: 1}
-		required = append(required, "goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal", "write_mode", "idempotency_key")
+		required = append(required, "goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal")
+		draftProps := make(map[string]schemaProp, len(props))
+		for key, prop := range props {
+			if key != "write_mode" && key != "idempotency_key" {
+				draftProps[key] = prop
+			}
+		}
+		strict := false
+		props["draft"] = schemaProp{Type: "object", Properties: draftProps, Required: required, AdditionalProperties: &strict, Description: "Copy the whole sanitized draft returned by prepare_feedback. Data only: submission revalidates context, redaction, readiness and duplicates. Do not mix with flat report fields."}
+		return inputSchema{Type: "object", Properties: props, Required: []string{"write_mode", "idempotency_key"}, OneOf: []inputSchema{{Type: "object", Properties: map[string]schemaProp{}, Required: []string{"draft"}}, {Type: "object", Properties: map[string]schemaProp{}, Required: required}}}
 	}
 	return inputSchema{Type: "object", Properties: props, Required: required}
 }
@@ -281,6 +291,22 @@ func (s *Server) callSubmitFeedback(ctx context.Context, id *json.RawMessage, ar
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid feedback object"})
 		return
+	}
+	if len(a.PreparedDraft) != 0 {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(args, &fields)
+		for key := range fields {
+			if key != "draft" && key != "write_mode" && key != "idempotency_key" {
+				s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "draft cannot be mixed with flat feedback fields or other prepared-report output"})
+				return
+			}
+		}
+		draft, err := feedback.DecodeDraftJSON(a.PreparedDraft)
+		if err != nil {
+			s.writeDomainError(id, err)
+			return
+		}
+		a.Draft = draft
 	}
 	if strings.TrimSpace(a.WriteMode) != string(service.WriteModeLive) {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "write_mode must be live"})

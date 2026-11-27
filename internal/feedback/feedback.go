@@ -228,21 +228,23 @@ type Candidate struct {
 }
 
 type PreparedReport struct {
-	Status            string         `json:"status"`
-	Configured        bool           `json:"configured"`
-	Sink              string         `json:"sink,omitempty"`
-	RepoID            string         `json:"repo_id,omitempty"`
-	Title             string         `json:"title"`
-	Body              string         `json:"body"`
-	Fingerprint       string         `json:"fingerprint"`
-	DedupeDecision    string         `json:"dedupe_decision"`
-	Candidates        []Candidate    `json:"candidates,omitempty"`
-	Context           RuntimeContext `json:"context"`
-	RedactionsApplied int            `json:"redactions_applied,omitempty"`
-	MissingFields     []string       `json:"missing_fields,omitempty"`
-	FollowUpQuestions []string       `json:"follow_up_questions,omitempty"`
-	Remediation       string         `json:"remediation,omitempty"`
-	Readiness         Readiness      `json:"readiness"`
+	Status         string         `json:"status"`
+	Configured     bool           `json:"configured"`
+	Sink           string         `json:"sink,omitempty"`
+	RepoID         string         `json:"repo_id,omitempty"`
+	Title          string         `json:"title"`
+	Body           string         `json:"body"`
+	Fingerprint    string         `json:"fingerprint"`
+	DedupeDecision string         `json:"dedupe_decision"`
+	Candidates     []Candidate    `json:"candidates,omitempty"`
+	Context        RuntimeContext `json:"context"`
+	// Draft is portable sanitized data, never a trusted permission or receipt.
+	Draft             Draft     `json:"draft"`
+	RedactionsApplied int       `json:"redactions_applied,omitempty"`
+	MissingFields     []string  `json:"missing_fields,omitempty"`
+	FollowUpQuestions []string  `json:"follow_up_questions,omitempty"`
+	Remediation       string    `json:"remediation,omitempty"`
+	Readiness         Readiness `json:"readiness"`
 }
 
 type SubmissionResult struct {
@@ -344,7 +346,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	} else if decision == "exact_match" {
 		status = "duplicate"
 	}
-	return PreparedReport{Status: status, Configured: configured, Sink: cfg.Sink, RepoID: cfg.RepoID, Title: title, Body: body, Fingerprint: fingerprint, DedupeDecision: decision, Candidates: candidates, Context: context, RedactionsApplied: redactions, MissingFields: missingFields, FollowUpQuestions: followUpQuestions, Remediation: remediation}, nil
+	return PreparedReport{Status: status, Configured: configured, Sink: cfg.Sink, RepoID: cfg.RepoID, Title: title, Body: body, Fingerprint: fingerprint, DedupeDecision: decision, Candidates: candidates, Context: context, Draft: normalized, RedactionsApplied: redactions, MissingFields: missingFields, FollowUpQuestions: followUpQuestions, Remediation: remediation}, nil
 }
 
 func FingerprintMarker(value string) string {
@@ -360,6 +362,9 @@ func ExistingFingerprint(body string) string {
 }
 
 func normalizeDraft(draft Draft) (Draft, int, error) {
+	// Sanitizing a returned draft must not mutate a caller's input slices.
+	draft.ReproductionSteps = append([]string(nil), draft.ReproductionSteps...)
+	draft.Evidence = append([]string(nil), draft.Evidence...)
 	allowedCategories := map[string]bool{"bug": true, "feature_gap": true, "ux_friction": true, "diagnostics": true, "docs": true, "performance": true, "other": true}
 	allowedSurfaces := map[string]bool{"mcp": true, "cli": true, "daemon": true, "cache": true, "sync": true, "rag": true, "gitcode_adapter": true, "setup": true, "other": true}
 	allowedReporters := map[string]bool{"agent": true, "human": true, "mixed": true}

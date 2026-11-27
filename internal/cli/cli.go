@@ -3154,15 +3154,21 @@ func feedbackDraftFromOptions(opts options) (feedback.Draft, error) {
 		var data []byte
 		var err error
 		if opts.input == "-" {
-			data, err = io.ReadAll(os.Stdin)
+			data, err = io.ReadAll(io.LimitReader(os.Stdin, feedback.MaxDraftInputBytes+1))
 		} else {
-			data, err = os.ReadFile(opts.input)
+			var file *os.File
+			file, err = os.Open(opts.input)
+			if err == nil {
+				data, err = io.ReadAll(io.LimitReader(file, feedback.MaxDraftInputBytes+1))
+				_ = file.Close()
+			}
 		}
 		if err != nil {
-			return draft, service.ErrInvalidQuery{Field: "input", Message: err.Error()}
+			return draft, service.ErrInvalidQuery{Field: "input", Message: "cannot read feedback input"}
 		}
-		if err := json.Unmarshal(data, &draft); err != nil {
-			return draft, service.ErrInvalidQuery{Field: "input", Message: "feedback input must be a JSON object: " + err.Error()}
+		draft, err = feedback.DecodeDraftInput(data)
+		if err != nil {
+			return draft, err
 		}
 	}
 	setIfNotEmpty := func(value string, target *string) {

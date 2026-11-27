@@ -309,7 +309,52 @@ selects the live provider; missing credentials never fall back to fixture writes
 Use `--offline` or `--fixture` only for deterministic fixture sessions. `doctor`
 reports `tool_access`, provider mode, and an explicit cache bootstrap diagnostic
 when needed. Feedback submission readiness is evaluated by `feedback_status`,
-not as a hidden discovery-side credential lookup.
+not as a hidden discovery-side credential lookup. Explicit `prepare_feedback`
+uses that same readiness projection; neither operation probes GitCode.
+
+### Least-privilege cache refresh
+
+`read` is a coarse **no mutation** ceiling, not merely "no remote writes".
+It deliberately hides `sync_live`, which performs `remote_read` and
+`local_cache_write`, but **not** `remote_write`. Existing cached reads work
+without it. Sync/feedback discovery publishes these finite effects under
+`_meta.gitcode_mcp.effects`; denied calls include `effects` without executing
+the tool. These annotations describe effects, not permission or readiness.
+
+An operator who authorizes local refresh but not GitCode mutations can use this
+trusted machine/deployment policy (see [policy authority and restart rules](capability-policy.md)):
+
+```yaml
+mcp:
+  tools:
+    access: write
+capabilities:
+  schema: 1
+  profile: cached_reader_sync
+  profiles:
+    cached_reader_sync:
+      allow: [repo_status, sync_live, list_sources, get_source, search_sources]
+```
+
+Here `write` only lifts the coarse transport ceiling; the explicit allowlist
+still denies remote mutations, feedback submission, indexing and machine setup.
+An existing tighter trusted ceiling still wins. Clients cannot widen grants
+by changing arguments/environment; ask the operator and restart the instance.
+Do not replace a deliberate read-only role with broad write access.
+
+After the repository is already bound and a credential is configured, call:
+
+```json
+{"repo_id":"example/project","issues":true,"max_pages":1,"max_records":100,"per_page":100}
+```
+
+with `sync_live`, inspect its bounded traversal/continuation result, then use
+`get_source` with a returned stable id or `list_sources`/`search_sources`.
+For a known issue, `{"repo_id":"example/project","remote_alias":"issue:7"}`
+is a targeted sync instead. No `write_mode=live` is needed for this remote-read
+operation. Missing credential/binding/schema prerequisites need their explicit
+handoff; sync never silently grants authority or changes remote GitCode data.
+Use `mode=full_text` when search must avoid an embedding-provider request.
 
 ### MCP tools exposed
 
@@ -348,7 +393,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `repository_docs_status` | Inspect metadata-only revision-set and vector coverage using opaque Git/worktree references; `repo_id` auto-selects a sole authority |
 | `repository_docs_search` | Search exact local Git blobs with bounded digest-verified citations; `repo_id` auto-selects a sole authority and `mode=fulltext` requires no provider or index |
 | `repository_docs_index` | Submit daemon-owned indexing; `repo_id` auto-selects a sole authority, while ambiguous cases require an exact opaque selector; document text is never persisted |
-| `sync_live` | Synchronize selected collections; foreground omission is a bounded preview with traversal/continuation evidence |
+| `sync_live` | Explicit remote read + local cache write, never a remote mutation; foreground omission is a bounded preview with traversal/continuation evidence |
 | `feedback_status` | Report side-effect-free preparation/submission readiness, build-owned destination and prerequisite handoffs |
 | `prepare_feedback` | Prepare and deduplicate a context-rich public-safe dogfood report; incomplete context returns targeted questions without creating an issue |
 | `submit_feedback` | Submit a complete prepared report through the audited write lifecycle; missing context is a hard no-write boundary |
