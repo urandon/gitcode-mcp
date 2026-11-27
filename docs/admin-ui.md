@@ -2,6 +2,42 @@
 
 The admin UI is a Svelte 5/SvelteKit static SPA compiled into `internal/adminui/assets` and embedded in the Go binary. A source install (`go install ./...`) does not require Node.js because the reviewed production assets are checked in. Frontend contributors use `scripts/build-admin-ui.sh`; CI uses `scripts/check-admin-ui-assets.sh` to reject stale generated assets.
 
+## Dependency maintenance
+
+The manifest and lockfile describe both browser code and development tools.
+An npm audit count is not a product exploitability assessment: the installed
+console has no Node, Vite, Vitest, adapter-node or Vercel server. Conversely,
+`dev: true` in the lockfile is not proof that a dependency is absent from the
+browser bundle. Svelte/Kit client code can include transitive dependencies.
+
+For each advisory, trace every locked copy and its parent, compare the affected
+range with the maintainer's fixed release, and inspect the actual caller and
+deployment prerequisites. Use compatible backports rather than an unrelated
+framework upgrade or a forced transitive-major override. Rebuild the checked-in
+assets and run the license, type/unit, semantic browser and Go gates. A source
+merge does not update an already installed binary.
+
+The offline `dependency-baseline.test.ts` regression protects the reviewed
+release lines from #225: adapter-static 3.0.11, Kit 2.70.4, Vite 7.3.7, Vitest
+and mocker 4.1.12, devalue 5.9.3, and source-map-js 1.2.2 or newer within their
+respective majors. It checks nested copies too; the old Vitest 3 tinypool and
+vite-node copies must be gone. This is a fixed regression baseline, **not** a
+live vulnerability scanner or a claim that future advisories cannot apply.
+
+Kit 2 still has audit findings whose prerequisites this SPA does not use:
+[enhanced form actions](https://github.com/sveltejs/kit/security/advisories/GHSA-pfhg-q3qv-9q6r),
+[untrusted prerender cache headers](https://github.com/sveltejs/kit/security/advisories/GHSA-27mw-82g8-phjj),
+[remote form parsing](https://github.com/sveltejs/kit/security/advisories/GHSA-3r8g-jcqq-3p5j),
+and [private remote query batching](https://github.com/sveltejs/kit/security/advisories/GHSA-6cf5-gc4q-fm3x).
+Its transitive [cookie serializer](https://github.com/advisories/GHSA-pxg6-pf52-xh8x)
+is server-side; this console's session cookies are owned by Go. The UI has
+`ssr = false`, no server routes, remote functions, enhanced actions or untrusted
+`setHeaders` calls. These findings are **not patched or suppressed** by the
+dependency baseline. Re-triage before introducing any of those features,
+Node/Vercel deployment, or a new cookie/devalue caller; a Kit 3 migration must
+include its own compatibility and security assessment. Keep development servers
+loopback-only and never use them to serve an installed operator console.
+
 ## Runtime ownership
 
 The existing `gitcode-mcp service run` process owns both the local JSON-RPC control socket and the optional admin HTTP listener. `gitcode-mcp admin open` connects to that daemon; it never starts a second coordinator or opens the cache independently.
