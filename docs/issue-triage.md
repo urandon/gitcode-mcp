@@ -45,7 +45,7 @@ without task-specific authority; use an authorized disposable target when needed
 | **Needs information** | Ask targeted questions that change the diagnosis: version, mode, smallest sequence, expected result or sanitized failure class. | No automatic closure for silence. If later closed by explicit maintainer disposition, record what remains unknown and how to reopen. |
 | **Not reproduced** | State tested SHA/environment, exact attempted sequence and coverage limits; ask about the distinguishing circumstance. | A passing attempt is not proof of absence. Keep open if a credible signal remains; close only with a justified alternate resolution or explicit non-actionable disposition. |
 | **Duplicate** | Link the canonical issue, compare the actual signal, and transfer any distinct evidence/dependency without rewriting intake. | Canonical coverage must match. Close with a comment/link and existing `duplicate` label; keep a distinct uncovered case open. |
-| **Already fixed** | Link the fixing PR/commit and verified behavior; distinguish merged, released and installed versions. | Evidence must cover the reported case and required delivery gates. State the first containing release if verified, or explicitly say the fix is not yet released. |
+| **Already fixed** | Link the fixing PR/commit and verified behavior; distinguish merged, released and installed versions. | Evidence must cover the reported case and required delivery gates. Name the first containing release if verified, say not yet released only when verified, otherwise mark release status unknown/unverified. |
 | **Out of scope / not a product defect** | Explain the boundary with evidence; offer a safe configuration/support handoff or separate feature issue if justified. | Record the resolution and remaining uncertainty. A confusing product diagnostic may still warrant its own UX issue. Do not blame the reporter. |
 | **Declined / deferred** | Give rationale, tradeoff, decision authority and dependency/revisit trigger. Deferral keeps justified work visible without promising a release. | Close a deliberate decline only with a recorded authorized disposition. Deferred work normally stays open; closing it needs an explicit archival disposition and reopening condition. |
 
@@ -149,7 +149,8 @@ Link the prior resolution and new evidence; preserve the original task input.
    The finite result and regression test confirm a status-predicate violation;
    filter ordering remains a hypothesis until code inspection establishes it.
    Record S2/P2 if a verified explicit-filter workaround exists; implement the
-   narrow filter-order fix and close only after reviewed/green delivery. This
+   evidence-supported fix (a filter-order fix only if that cause is established)
+   and close only after reviewed/green delivery. This
    example is not a claim that the current product has this defect.
 2. **Blocked / not reproduced / needs information:** A reporter says “hybrid
    search fails.” Full-text succeeds on the tested SHA, but the embedding provider
