@@ -49,25 +49,34 @@ func metadataFilters(status, title string, labels []string, match string) (*Sour
 }
 
 func sourceMatchesMetadata(source cache.Source, req SearchSourcesRequest) bool {
-	if req.Kind != "" && source.Kind != req.Kind || req.Provenance != "" && string(source.Provenance) != req.Provenance || req.Status != "" && source.Status != req.Status || req.TitleContains != "" && !strings.Contains(source.Title, req.TitleContains) {
+	if req.Kind != "" && source.Kind != req.Kind || req.Provenance != "" && string(source.Provenance) != req.Provenance {
 		return false
 	}
-	if len(req.Labels) == 0 {
+	return matchesMetadata(source.Status, source.Title, source.Labels, req.Status, req.TitleContains, req.Labels, req.LabelsMatch)
+}
+
+// Pure matching shared by cache-backed and Git-backed authorities. This does
+// not fetch data or infer label membership from document text.
+func matchesMetadata(state, title string, actual []string, status, contains string, labels []string, match string) bool {
+	if status != "" && state != status || contains != "" && !strings.Contains(title, contains) {
+		return false
+	}
+	if len(labels) == 0 {
 		return true
 	}
 	count := 0
-	for _, label := range req.Labels {
-		for _, actual := range source.Labels {
-			if label == actual {
+	for _, label := range labels {
+		for _, value := range actual {
+			if label == value {
 				count++
 				break
 			}
 		}
 	}
-	if req.LabelsMatch == "any" {
+	if match == "any" {
 		return count > 0
 	}
-	return count == len(req.Labels)
+	return count == len(labels)
 }
 
 func (s *Service) searchMetadataOnly(ctx context.Context, req SearchSourcesRequest, filters *SourceMetadataFilters, mode string, limit int) (SearchSourcesResult, error) {

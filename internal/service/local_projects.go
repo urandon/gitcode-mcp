@@ -86,12 +86,16 @@ func NewLocalProjects(ctx context.Context, cfg map[string]config.LocalProjectCon
 }
 
 type LocalProjectQuery struct {
-	Project    string        `json:"project"`
-	Kind       localgit.Kind `json:"kind,omitempty"`
-	ID         string        `json:"id,omitempty"`
-	Limit      int           `json:"limit,omitempty"`
-	Offset     int           `json:"offset,omitempty"`
-	MaxCommits int           `json:"max_commits,omitempty"`
+	Project       string        `json:"project"`
+	Kind          localgit.Kind `json:"kind,omitempty"`
+	ID            string        `json:"id,omitempty"`
+	Limit         int           `json:"limit,omitempty"`
+	Offset        int           `json:"offset,omitempty"`
+	MaxCommits    int           `json:"max_commits,omitempty"`
+	Status        string        `json:"status,omitempty"`
+	Labels        []string      `json:"labels,omitempty"`
+	LabelsMatch   string        `json:"labels_match,omitempty"`
+	TitleContains string        `json:"title_contains,omitempty"`
 }
 type LocalProjectMutation struct {
 	Project  string            `json:"project"`
@@ -170,6 +174,9 @@ func (s *LocalProjects) Get(ctx context.Context, q LocalProjectQuery) (localgit.
 	if policyErr := s.authorizePolicy("Get"); policyErr != nil {
 		return zeroPolicyValue[localgit.Entity](), policyErr
 	}
+	if localQueryHasMetadata(q) {
+		return localgit.Entity{}, localProjectError("invalid_argument", "filters")
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return localgit.Entity{}, err
@@ -184,6 +191,13 @@ func (s *LocalProjects) List(ctx context.Context, q LocalProjectQuery) ([]localg
 	if policyErr := s.authorizePolicy("List"); policyErr != nil {
 		return zeroPolicyValue[[]localgit.Entity](), policyErr
 	}
+	predicate, err := localIssuePredicate(q.Status, q.TitleContains, q.Labels, q.LabelsMatch)
+	if err != nil {
+		return nil, err
+	}
+	if predicate != nil && q.Kind != localgit.Issue {
+		return nil, localProjectError("invalid_argument", "kind")
+	}
 	b, err := s.binding(q.Project)
 	if err != nil {
 		return nil, err
@@ -192,11 +206,14 @@ func (s *LocalProjects) List(ctx context.Context, q LocalProjectQuery) ([]localg
 	if err != nil {
 		return nil, err
 	}
-	return snap.List(ctx, q.Kind, q.Offset, q.Limit)
+	return snap.ListWhere(ctx, q.Kind, q.Offset, q.Limit, predicate)
 }
 func (s *LocalProjects) History(ctx context.Context, q LocalProjectQuery) ([]localgit.Citation, error) {
 	if policyErr := s.authorizePolicy("History"); policyErr != nil {
 		return zeroPolicyValue[[]localgit.Citation](), policyErr
+	}
+	if localQueryHasMetadata(q) {
+		return nil, localProjectError("invalid_argument", "filters")
 	}
 	b, err := s.binding(q.Project)
 	if err != nil {

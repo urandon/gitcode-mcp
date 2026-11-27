@@ -19,10 +19,14 @@ import (
 )
 
 type LocalProjectSearchRequest struct {
-	Project string `json:"project"`
-	Query   string `json:"query"`
-	Mode    string `json:"mode,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Project       string   `json:"project"`
+	Query         string   `json:"query"`
+	Mode          string   `json:"mode,omitempty"`
+	Limit         int      `json:"limit,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	Labels        []string `json:"labels,omitempty"`
+	LabelsMatch   string   `json:"labels_match,omitempty"`
+	TitleContains string   `json:"title_contains,omitempty"`
 }
 type LocalProjectIndexRequest struct {
 	Project   string `json:"project"`
@@ -38,6 +42,7 @@ type LocalProjectSearchHit struct {
 	Score     float64           `json:"score"`
 }
 type LocalProjectSearchResult struct {
+	MetadataOnly  bool                          `json:"metadata_only,omitempty"`
 	Project       string                        `json:"project"`
 	ProjectID     string                        `json:"project_id"`
 	Commit        string                        `json:"commit"`
@@ -80,7 +85,12 @@ func (s *LocalProjects) Search(ctx context.Context, q LocalProjectSearchRequest)
 	if q.Limit == 0 {
 		q.Limit = 10
 	}
-	if !utf8.ValidString(q.Query) || strings.TrimSpace(q.Query) == "" || len(q.Query) > 4096 || q.Limit < 1 || q.Limit > 32 || q.Mode != "fulltext" && q.Mode != "hybrid" {
+	predicate, err := localIssuePredicate(q.Status, q.TitleContains, q.Labels, q.LabelsMatch)
+	if err != nil {
+		return zero, err
+	}
+	metadataOnly := strings.TrimSpace(q.Query) == ""
+	if !utf8.ValidString(q.Query) || metadataOnly && predicate == nil || len(q.Query) > 4096 || q.Limit < 1 || q.Limit > 32 || q.Mode != "fulltext" && q.Mode != "hybrid" {
 		return zero, localProjectError("invalid_argument", "search")
 	}
 	b, err := s.binding(q.Project)
@@ -91,9 +101,12 @@ func (s *LocalProjects) Search(ctx context.Context, q LocalProjectSearchRequest)
 	if err != nil {
 		return zero, err
 	}
-	repo, citations, err := snap.SearchCorpus(ctx)
+	repo, citations, err := snap.SearchCorpusWhere(ctx, predicate)
 	if err != nil {
 		return zero, err
+	}
+	if metadataOnly {
+		return localMetadataSearch(ctx, q, b.runtime.projectID, snap.Commit(), repo, citations)
 	}
 	var store *cache.SQLiteStore
 	var searchStore repositorydocs.SearchStore
@@ -119,6 +132,12 @@ func (s *LocalProjects) Search(ctx context.Context, q LocalProjectSearchRequest)
 		}
 	}
 	req := repositorydocs.SearchRequest{RepoID: localProjectIndexScope(b), SourceRegistrationID: b.runtime.projectID, SourceRegistrationGeneration: 1, Repository: repo, Revision: snap.Commit(), Query: q.Query, Mode: q.Mode, Limit: q.Limit}
+	if predicate != nil {
+		req.EligiblePinnedPaths = make(map[string]string, len(citations))
+		for path, citation := range citations {
+			req.EligiblePinnedPaths[path] = citation.Blob
+		}
+	}
 	r, err := repositorydocs.NewRetriever(searchStore, provider).Search(ctx, req)
 	if err != nil && ctx.Err() == nil {
 		// A broken disposable index cannot hide current Git-backed matches.
@@ -128,6 +147,9 @@ func (s *LocalProjects) Search(ctx context.Context, q LocalProjectSearchRequest)
 	}
 	if err != nil {
 		return zero, localProjectSearchError(ctx)
+	}
+	if r.Fallback == "pinned_corpus_citation_mismatch" {
+		fallback = "index_unavailable"
 	}
 	out := LocalProjectSearchResult{Project: q.Project, ProjectID: b.runtime.projectID, Commit: snap.Commit(), RequestedMode: q.Mode, EffectiveMode: r.EffectiveMode, IndexState: "not_requested", Coverage: r.Coverage, Hits: []LocalProjectSearchHit{}}
 	if q.Mode == "hybrid" {

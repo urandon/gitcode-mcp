@@ -7,7 +7,16 @@ export type LocalMutation = { operation: string; id?: string; parent_id?: string
 export type LocalMutationIntent = { project: string; mutation: LocalMutation; plan_id?: string };
 export type LocalIndexIntent = { project: string; write_mode: 'local'; max_chunks: number; idempotency_key: string; plan_id?: string };
 export type LocalPlan = { plan_id: string; project: string; project_id: string; operation: string; target_id?: string; commit: string; data_boundary: string; max_chunks?: number; effects: string[] };
-export type LocalSearch = { project: string; commit: string; requested_mode: string; effective_mode: string; index_state: string; fallback?: string; hits: Array<{ citation: LocalCitation; snippet: string; line_start: number; line_end: number }> };
+export type LocalIssueFilters = { status?: string; labels?: string[]; labels_match?: 'all' | 'any'; title_contains?: string };
+export type LocalSearch = { project: string; commit: string; requested_mode: string; effective_mode: string; index_state: string; fallback?: string; metadata_only?: boolean; hits: Array<{ citation: LocalCitation; snippet: string; line_start: number; line_end: number }> };
+
+// One exact name per line, never comma splitting or trimming meaningful spaces.
+// These selectors are ephemeral query data, not URLs, storage or mutation input.
+export function localIssueFilters(status: string, lines: string, match: 'all' | 'any', title: string): LocalIssueFilters {
+  const labels = lines.split(/\r?\n/).filter(value => value.trim() !== '');
+  if (!['', 'open', 'closed', 'deleted'].includes(status) || !['all', 'any'].includes(match) || labels.length > 32 || new Set(labels).size !== labels.length || labels.some(value => Array.from(value).length > 128 || /[\0\r\n]/.test(value)) || Array.from(title).length > 512 || title.includes('\0')) throw new LocalProjectError('local_git_invalid_argument');
+  return { ...(status ? { status } : {}), ...(labels.length ? { labels, labels_match: match } : {}), ...(title ? { title_contains: title } : {}) };
+}
 export const emptyLocalQuery = (): LocalQuery => ({ project: '', kind: 'issue', id: '', offset: 0 });
 export const localSelector = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value);
 export const localEntityID = (value: string, kind: LocalKind): boolean => new RegExp(`^${{ issue: 'ISSUE', comment: 'COMMENT', wiki: 'DOC' }[kind]}-[1-9][0-9]{0,15}$`).test(value) && Number.isSafeInteger(Number(value.split('-')[1]));
@@ -52,7 +61,7 @@ const failures: Record<string, string> = {
   local_git_writer_busy: 'Writer busy. Retry the exact confirmed action and key.',
   local_git_publication_ambiguous: 'Publication is uncertain. Retry the exact confirmed action and key; do not generate another key.',
   local_git_invalid_argument: 'Correct the typed request fields; your draft is retained.',
-  local_git_limit_exceeded: 'The bounded request or response exceeds its limit. Use a smaller page or draft.',
+  local_git_limit_exceeded: 'The bounded request or source scan exceeds its limit. Reduce the request/draft or use a project within the source-byte cap; filtered scans are not made smaller by page size alone.',
   local_git_not_found: 'The selected entity is unavailable.',
   local_git_unknown_project: 'The configured project is unavailable. Refresh the project list.',
   local_git_invalid_configuration: 'Trusted local configuration is unavailable. Use the CLI handoff.',

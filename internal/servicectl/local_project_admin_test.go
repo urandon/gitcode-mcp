@@ -175,6 +175,19 @@ func TestLocalProjectAdminRealIPCProtectedHTTPGitReplayAndIndex(t *testing.T) {
 		t.Fatal("bounded read-only list failed")
 	}
 	var search service.LocalProjectSearchResult
+	b.operation(t, "list", service.LocalProjectQuery{Project: "lab", Kind: localgit.Issue, Limit: 20, Status: "open", TitleContains: "Question"}, &list)
+	if len(list) != 1 || list[0].Citation != entity.Citation {
+		t.Fatal("protected Admin metadata list lost Git identity")
+	}
+	b.operation(t, "search", service.LocalProjectSearchRequest{Project: "view", Status: "open", TitleContains: "Question", Mode: "hybrid"}, &search)
+	if !search.MetadataOnly || search.IndexState != "not_requested" || len(search.Hits) != 1 || search.Hits[0].Citation != entity.Citation {
+		t.Fatal("protected read-only metadata search failed")
+	}
+	code, _ = b.request(t, "POST", "/local-projects/get", map[string]any{"project": "lab", "kind": "issue", "id": "ISSUE-1", "status": ""}, nil)
+	if code != http.StatusBadRequest {
+		t.Fatal("Admin silently ignored get metadata fields")
+	}
+	search = service.LocalProjectSearchResult{}
 	b.operation(t, "search", service.LocalProjectSearchRequest{Project: "lab", Query: "AdminPrivateBodyMarker", Mode: "hybrid", Limit: 8}, &search)
 	if search.EffectiveMode != "fulltext" || len(search.Hits) != 1 || search.Fallback != "index_unavailable" {
 		t.Fatal("missing RAG hid lexical evidence")

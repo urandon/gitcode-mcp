@@ -39,6 +39,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	var index service.LocalProjectIndexRequest
 	var bundle string
 	var format, kind, labels, links, bodyFile string
+	var filterLabels multiFlag
 	fs.StringVar(&q.Project, "project", "", "opaque project selector")
 	fs.StringVar(&format, "format", "json", "json or text")
 	fs.StringVar(&kind, "kind", "", "issue, comment or wiki")
@@ -46,6 +47,10 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	fs.IntVar(&q.Offset, "offset", 0, "list offset")
 	fs.IntVar(&q.Limit, "limit", 20, "list bound")
 	fs.IntVar(&q.MaxCommits, "max-commits", 64, "history bound")
+	fs.StringVar(&q.Status, "status", "", "exact issue metadata state")
+	fs.Var(&filterLabels, "filter-label", "exact issue label; repeatable, no comma splitting")
+	fs.StringVar(&q.LabelsMatch, "labels-match", "", "all (default) or any exact labels")
+	fs.StringVar(&q.TitleContains, "title-contains", "", "literal case-sensitive issue-title substring")
 	fs.StringVar(&setup.ProjectID, "project-id", "", "stable project identity")
 	fs.StringVar(&setup.StorageRef, "storage-ref", "", "opaque managed storage reference")
 	fs.StringVar(&setup.Ref, "ref", "refs/heads/main", "local branch")
@@ -83,13 +88,13 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 	case "get":
 		fields = "kind id"
 	case "list":
-		fields = "kind offset limit"
+		fields = "kind offset limit status filter-label labels-match title-contains"
 	case "history":
 		fields = "kind id max-commits"
 	case "mutate":
 		fields = "operation id parent-id title body body-file state labels milestone links expected-head expected-revision idempotency-key write-mode"
 	case "search":
-		fields = "query mode limit"
+		fields = "query mode limit status filter-label labels-match title-contains"
 	case "index":
 		fields = "max-chunks write-mode"
 	case "export":
@@ -129,7 +134,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 			bad = true
 			break
 		}
-		if seen[key] {
+		if seen[key] && key != "filter-label" {
 			bad = true
 		}
 		seen[key] = true
@@ -194,6 +199,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		return writeError(stderr, format, &localgit.Error{Code: "unavailable", Field: "service"})
 	}
 	q.Kind = localgit.Kind(kind)
+	q.Labels = append([]string(nil), filterLabels...)
 	var params, result any
 	method := "LocalProjects."
 	switch verb {
@@ -256,6 +262,7 @@ func executeProjectCommand(ctx context.Context, args []string, stdout, stderr io
 		method += "Search"
 		search.Project = q.Project
 		search.Limit = q.Limit
+		search.Status, search.Labels, search.LabelsMatch, search.TitleContains = q.Status, q.Labels, q.LabelsMatch, q.TitleContains
 		if !seen["limit"] {
 			search.Limit = 10
 		}

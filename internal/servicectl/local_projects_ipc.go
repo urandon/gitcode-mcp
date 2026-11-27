@@ -30,6 +30,24 @@ func DecodeLocalProjectJSON(raw []byte, dst any) error {
 	return nil
 }
 
+// Query predicates belong to list/search, never get/history. Preserve closed
+// per-operation input even though the legacy query DTO is shared.
+func decodeLocalProjectQuery(raw []byte, q *service.LocalProjectQuery, list bool) error {
+	if err := DecodeLocalProjectJSON(raw, q); err != nil {
+		return err
+	}
+	if !list {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &fields)
+		for _, key := range []string{"status", "labels", "labels_match", "title_contains"} {
+			if _, present := fields[key]; present {
+				return localHostError("invalid_argument")
+			}
+		}
+	}
+	return nil
+}
+
 // DecodeLocalProjectLinks is the CLI's array-shaped metadata boundary. Object
 // requests keep their own closed shape; null roots/items and aliased, duplicate
 // or unknown fields never become silently empty link metadata.
@@ -106,7 +124,7 @@ func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw 
 	switch method {
 	case "LocalProjects.Search":
 		var q service.LocalProjectSearchRequest
-		if !localSearchRequestShape(raw, "project", "query") || strictObservationResponse(raw, &q) != nil {
+		if !localSearchRequestShape(raw, "project") || strictObservationResponse(raw, &q) != nil {
 			return nil, localHostError("invalid_argument")
 		}
 		return s.LocalProjects.Search(ctx, q)
@@ -118,7 +136,7 @@ func (s RPCServer) dispatchLocalProject(ctx context.Context, method string, raw 
 		return s.LocalProjects.Index(ctx, q)
 	case "LocalProjects.Get", "LocalProjects.List", "LocalProjects.History":
 		var q service.LocalProjectQuery
-		if strictObservationResponse(raw, &q) != nil {
+		if decodeLocalProjectQuery(raw, &q, method == "LocalProjects.List") != nil {
 			return nil, localHostError("invalid_argument")
 		}
 		switch method {

@@ -185,6 +185,22 @@ func TestLocalProjectCLIAndMCPRealGitVerticalSlice(t *testing.T) {
 	if read.Citation != created.Entity.Citation || read.Body != "Original evidence" {
 		t.Fatal("MCP did not read exact CLI result")
 	}
+	var filtered []localgit.Entity
+	json.Unmarshal(localProjectCLI(t, src, "", "list", "--project", "lab", "--kind", "issue", "--status", "open", "--filter-label", "research", "--filter-label", "ready", "--labels-match", "all", "--title-contains", "--body"), &filtered)
+	if len(filtered) != 1 || filtered[0].Citation != created.Entity.Citation {
+		t.Fatal("CLI issue metadata query lost exact-label/title semantics")
+	}
+	var metadata service.LocalProjectSearchResult
+	json.Unmarshal(localProjectMCP(t, src, "tools/call", projectTool("local_project_search", map[string]any{"project": "lab", "status": "open", "labels": []string{"research", "ready"}, "labels_match": "all", "title_contains": "--body", "mode": "hybrid"}), ""), &metadata)
+	if !metadata.MetadataOnly || metadata.IndexState != "not_requested" || len(metadata.Hits) != 1 || metadata.Hits[0].Citation != created.Entity.Citation {
+		t.Fatal("MCP metadata-only search diverged from CLI list")
+	}
+	json.Unmarshal(localProjectCLI(t, src, "", "search", "--project", "lab", "--status", "open", "--filter-label", "research", "--mode", "hybrid"), &metadata)
+	if !metadata.MetadataOnly || len(metadata.Hits) != 1 {
+		t.Fatal("CLI metadata-only search failed")
+	}
+	localProjectCLI(t, src, "local_git_invalid_argument", "get", "--project", "lab", "--kind", "issue", "--id", "ISSUE-1", "--status", "open")
+	localProjectMCP(t, src, "tools/call", projectTool("local_project_history", map[string]any{"project": "lab", "kind": "issue", "id": "ISSUE-1", "labels": []string{}}), "local_git_invalid_argument")
 	update := service.LocalProjectMutation{Project: "lab", Mutation: localgit.Mutation{Operation: "update_issue", ID: "ISSUE-1", Title: "Answered", State: "closed", Body: "Later evidence", ExpectedRevision: read.Citation.Blob, WriteMode: "local", IdempotencyKey: "answer"}}
 	var updated localgit.MutationResult
 	json.Unmarshal(localProjectMCP(t, src, "tools/call", projectTool("local_project_mutate", update), ""), &updated)

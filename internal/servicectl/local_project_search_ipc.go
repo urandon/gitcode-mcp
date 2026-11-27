@@ -67,28 +67,42 @@ func validateLocalSearchResult(method string, raw []byte) (any, bool) {
 		return nil, false
 	}
 	switch r.Fallback {
-	case "", "profile_disabled", "profile_unavailable", "index_unavailable", "index_missing", "index_stale", "index_partial", "index_failed", "semantic_unavailable":
+	case "", "profile_disabled", "profile_unavailable", "index_unavailable", "index_missing", "index_stale", "index_partial", "index_failed", "semantic_unavailable", "metadata_only":
 	default:
 		return nil, false
 	}
-	if r.RequestedMode == "fulltext" && (r.EffectiveMode != "fulltext" || r.IndexState != "not_requested" || r.Fallback != "") || r.EffectiveMode == "hybrid" && (r.IndexState != "ready" || r.Fallback != "") || r.RequestedMode == "hybrid" && r.EffectiveMode == "fulltext" && r.Fallback == "" {
+	if r.MetadataOnly {
+		if r.EffectiveMode != "fulltext" || r.IndexState != "not_requested" || r.RequestedMode == "hybrid" && r.Fallback != "metadata_only" || r.RequestedMode == "fulltext" && r.Fallback != "" {
+			return nil, false
+		}
+	} else if r.Fallback == "metadata_only" || r.RequestedMode == "fulltext" && (r.EffectiveMode != "fulltext" || r.IndexState != "not_requested" || r.Fallback != "") || r.EffectiveMode == "hybrid" && (r.IndexState != "ready" || r.Fallback != "") || r.RequestedMode == "hybrid" && r.EffectiveMode == "fulltext" && r.Fallback == "" {
 		return nil, false
 	}
 	var wire struct {
-		Coverage json.RawMessage   `json:"coverage"`
-		Hits     []json.RawMessage `json:"hits"`
+		Coverage     json.RawMessage   `json:"coverage"`
+		Hits         []json.RawMessage `json:"hits"`
+		MetadataOnly json.RawMessage   `json:"metadata_only"`
 	}
 	if json.Unmarshal(raw, &wire) != nil || !localJSONRequired(wire.Coverage, "state", "eligible_files", "eligible_chunks", "embedded_chunks", "reused_chunks", "failed_chunks", "missing_objects") {
+		return nil, false
+	}
+	if string(wire.MetadataOnly) == "null" {
 		return nil, false
 	}
 	c := r.Coverage
 	if c.State != "lexical-only" && c.State != "ready" || c.EligibleFiles < 0 || c.EligibleFiles > 10000 || !localSearchChunkCounts(c.EligibleChunks, c.EmbeddedChunks, c.ReusedChunks, c.FailedChunks) || c.MissingObjects < 0 || c.MissingObjects > 10000 {
 		return nil, false
 	}
-	if r.EffectiveMode == "hybrid" && (c.State != "ready" || c.EmbeddedChunks+c.ReusedChunks != c.EligibleChunks || c.FailedChunks != 0 || c.MissingObjects != 0) || r.EffectiveMode == "fulltext" && c.State != "lexical-only" || r.RequestedMode == "hybrid" && r.IndexState == "not_requested" {
+	if r.EffectiveMode == "hybrid" && (c.State != "ready" || c.EmbeddedChunks+c.ReusedChunks != c.EligibleChunks || c.FailedChunks != 0 || c.MissingObjects != 0) || r.EffectiveMode == "fulltext" && c.State != "lexical-only" || !r.MetadataOnly && r.RequestedMode == "hybrid" && r.IndexState == "not_requested" {
+		return nil, false
+	}
+	if r.MetadataOnly && (c.EligibleChunks != 0 || c.EmbeddedChunks != 0 || c.ReusedChunks != 0 || c.FailedChunks != 0 || c.MissingObjects != 0 || c.EligibleFiles < len(r.Hits)) {
 		return nil, false
 	}
 	for i, hit := range r.Hits {
+		if r.MetadataOnly && hit.Citation.Kind != localgit.Issue {
+			return nil, false
+		}
 		if !localJSONRequired(wire.Hits[i], "citation", "snippet", "line_start", "line_end", "digest", "score") || localgit.ValidateCitationResponse(hit.Citation) != nil || hit.Citation.ProjectID != r.ProjectID || hit.Citation.Commit != r.Commit || len(hit.Snippet) > 800 || !utf8.ValidString(hit.Snippet) || hit.LineStart < 1 || hit.LineEnd < hit.LineStart || hit.LineEnd > localgit.MaxFileBytes+1 || len(hit.Digest) != 64 || strings.Trim(hit.Digest, "0123456789abcdef") != "" || math.IsNaN(hit.Score) || math.IsInf(hit.Score, 0) || hit.Score < 0 || hit.Score > 2 {
 			return nil, false
 		}

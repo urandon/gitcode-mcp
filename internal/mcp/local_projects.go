@@ -48,10 +48,9 @@ func localProjectToolDefinition(name string) (toolDefinition, bool) {
 	}
 	str := func(desc string) schemaProp { return schemaProp{Type: "string", Description: desc} }
 	if name == "local_project_search" {
-		props["query"] = str("Required UTF-8 query, maximum4096 bytes.")
+		props["query"] = str("UTF-8 text, maximum4096 bytes; omit with actual issue metadata predicates for provider-free metadata-only search.")
 		props["mode"] = schemaProp{Type: "string", Enum: []string{"fulltext", "hybrid"}, Default: "fulltext"}
 		props["limit"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(32), Default: 10}
-		required = append(required, "query")
 	} else if name == "local_project_index" {
 		props["write_mode"] = schemaProp{Type: "string", Enum: []string{"local"}}
 		props["max_chunks"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(128), Default: 64}
@@ -84,6 +83,12 @@ func localProjectToolDefinition(name string) (toolDefinition, bool) {
 		if name == "local_project_history" {
 			props["max_commits"] = schemaProp{Type: "integer", Minimum: float64Ptr(1), Maximum: float64Ptr(256), Default: 64}
 		}
+	}
+	if name == "local_project_search" || name == "local_project_list" {
+		props["status"] = str("Exact issue metadata state (open/closed/deleted); predicates are issue-only, search remains active-only.")
+		props["labels"] = schemaProp{Type: "array", Items: &schemaProp{Type: "string"}, Description: "At most32 distinct exact issue labels; no comma splitting or body matching."}
+		props["labels_match"] = schemaProp{Type: "string", Enum: []string{"all", "any"}, Default: "all"}
+		props["title_contains"] = str("Literal case-sensitive issue-title substring, at most512 characters. Combined with status and labels before pagination/candidates.")
 	}
 	return toolDefinition{Name: name, Description: cap.Description, InputSchema: inputSchema{Type: "object", Properties: props, Required: required, AdditionalProperties: &strict}, Annotations: map[string]bool{"readOnlyHint": cap.Safety == capability.SafetyReadOnly, "openWorldHint": false}}, true
 }

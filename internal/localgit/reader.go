@@ -230,6 +230,54 @@ func (s *Snapshot) List(ctx context.Context, kind Kind, offset, limit int) ([]En
 	return result, nil
 }
 
+// ListWhere filters exact snapshot metadata before pagination. The whole scan
+// retains the existing source-byte/time bound; exhaustion never returns a
+// misleading partial page. Unfiltered reads preserve their cheaper page path.
+func (s *Snapshot) ListWhere(ctx context.Context, kind Kind, offset, limit int, predicate func(Metadata) bool) ([]Entity, error) {
+	if predicate == nil {
+		return s.List(ctx, kind, offset, limit)
+	}
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	if offset < 0 || offset > s.store.limits.Entries || limit < 1 || limit > 128 {
+		return nil, fail("invalid_argument", "pagination")
+	}
+	if kind != Issue && kind != Comment && kind != Wiki {
+		return nil, fail("invalid_argument", "kind")
+	}
+	ids := []string{}
+	for id, path := range s.entities {
+		ref, _, _ := parseEntityPath(path)
+		if ref.Kind == kind {
+			ids = append(ids, id)
+		}
+	}
+	sortIDs(ids, kind)
+	matches := []Entity{}
+	total := int64(0)
+	for _, id := range ids {
+		total += s.entries[s.entities[id]].Size
+		if total > int64(s.store.limits.ReadBytes) {
+			return nil, fail("limit_exceeded", "read_bytes")
+		}
+		entity, err := s.Get(ctx, kind, id)
+		if err != nil {
+			return nil, err
+		}
+		if predicate(entity.Metadata) {
+			matches = append(matches, entity)
+		}
+	}
+	if offset >= len(matches) {
+		return []Entity{}, nil
+	}
+	end := offset + limit
+	if end > len(matches) {
+		end = len(matches)
+	}
+	return matches[offset:end], nil
+}
+
 func (s *Snapshot) Receipt(ctx context.Context, keyHash string) (Receipt, Citation, error) {
 	if !hashValid(keyHash, 64) {
 		return Receipt{}, Citation{}, fail("invalid_argument", "key_hash")

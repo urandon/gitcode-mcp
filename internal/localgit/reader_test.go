@@ -103,6 +103,21 @@ func pinFixture(t *testing.T, s *Store) *Snapshot {
 	}
 	return snap
 }
+
+func TestFilteredListNeverPublishesPageBeforeBoundedScanCompletes(t *testing.T) {
+	dir := newFixture(t)
+	files := fixtureFiles()
+	fixtureCommit(t, dir, files, "")
+	snap := pinFixture(t, openFixture(t, dir, Limits{ReadBytes: len(files["issues/ISSUE-1/issue.md"]) + 1}))
+	if page, err := snap.List(context.Background(), Issue, 0, 1); err != nil || len(page) != 1 {
+		t.Fatal("unfiltered bounded-page control failed")
+	}
+	page, err := snap.ListWhere(context.Background(), Issue, 0, 1, func(m Metadata) bool { return m.State == "open" })
+	var local *Error
+	if !errors.As(err, &local) || local.Code != "limit_exceeded" || len(page) != 0 {
+		t.Fatal("filtered scan emitted a partial page after exhausting its byte budget")
+	}
+}
 func requireCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var e *Error

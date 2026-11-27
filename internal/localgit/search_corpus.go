@@ -10,6 +10,10 @@ import (
 // SearchCorpus hydrates one validated snapshot into bounded request-local
 // memory for the existing search/index engine. No content is persisted here.
 func (s *Snapshot) SearchCorpus(ctx context.Context) (*repositorydocs.Repository, map[string]Citation, error) {
+	return s.SearchCorpusWhere(ctx, nil)
+}
+
+func (s *Snapshot) SearchCorpusWhere(ctx context.Context, predicate func(Metadata) bool) (*repositorydocs.Repository, map[string]Citation, error) {
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	paths := make([]string, 0, len(s.entities))
@@ -34,7 +38,7 @@ func (s *Snapshot) SearchCorpus(ctx context.Context) (*repositorydocs.Repository
 		if err != nil {
 			return nil, nil, err
 		}
-		if entity.Metadata.State == "deleted" {
+		if entity.Metadata.State == "deleted" || predicate != nil && !predicate(entity.Metadata) {
 			continue
 		}
 		files = append(files, repositorydocs.PinnedFile{Entry: entry, Data: data})
