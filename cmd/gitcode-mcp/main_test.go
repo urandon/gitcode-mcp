@@ -1208,7 +1208,7 @@ func TestEntrypointMCPToolAccessDefaultAndReadOnlyConfig(t *testing.T) {
 		if err := json.Unmarshal([]byte(lines[1]), &blocked); err != nil {
 			t.Fatalf("decode blocked call: %v line=%q", err, lines[1])
 		}
-		if blocked.Error.Data.Code != "tool_disabled_by_policy" || blocked.Error.Data.AccessMode != "read" || !strings.Contains(blocked.Error.Data.Remediation, "read-only override") {
+		if blocked.Error.Data.Code != "tool_disabled_by_policy" || blocked.Error.Data.AccessMode != "read" || !strings.Contains(blocked.Error.Data.Remediation, "ask the operator") || strings.Contains(blocked.Error.Data.Remediation, "GITCODE_MCP_TOOL_ACCESS=write") {
 			t.Fatalf("blocked call=%+v", blocked.Error.Data)
 		}
 	})

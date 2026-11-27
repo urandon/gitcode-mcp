@@ -298,24 +298,25 @@ type rpcError struct {
 }
 
 type errorData struct {
-	IssueReadback        *gitcode.IssueUpdateReadback `json:"issue_readback,omitempty"`
-	Observation          *observability.QueryError    `json:"observation,omitempty"`
-	Code                 string                       `json:"code"`
-	Message              string                       `json:"message"`
-	FailureClass         string                       `json:"failure_class,omitempty"`
-	HTTPAttempted        *bool                        `json:"http_attempted,omitempty"`
-	Operation            string                       `json:"operation,omitempty"`
-	RepoID               string                       `json:"repo_id,omitempty"`
-	StartedAt            string                       `json:"started_at,omitempty"`
-	PID                  int                          `json:"pid,omitempty"`
-	CacheRef             string                       `json:"cache_ref,omitempty"`
-	AccessMode           string                       `json:"access_mode,omitempty"`
-	Remediation          string                       `json:"remediation,omitempty"`
-	IdempotencyKey       string                       `json:"idempotency_key,omitempty"`
-	RemotePath           string                       `json:"remote_path,omitempty"`
-	WritePhase           string                       `json:"write_phase,omitempty"`
-	MutationAttempted    *bool                        `json:"mutation_attempted,omitempty"`
-	ProviderFailureClass string                       `json:"provider_failure_class,omitempty"`
+	Effects              *capability.OnboardingEffects `json:"effects,omitempty"`
+	IssueReadback        *gitcode.IssueUpdateReadback  `json:"issue_readback,omitempty"`
+	Observation          *observability.QueryError     `json:"observation,omitempty"`
+	Code                 string                        `json:"code"`
+	Message              string                        `json:"message"`
+	FailureClass         string                        `json:"failure_class,omitempty"`
+	HTTPAttempted        *bool                         `json:"http_attempted,omitempty"`
+	Operation            string                        `json:"operation,omitempty"`
+	RepoID               string                        `json:"repo_id,omitempty"`
+	StartedAt            string                        `json:"started_at,omitempty"`
+	PID                  int                           `json:"pid,omitempty"`
+	CacheRef             string                        `json:"cache_ref,omitempty"`
+	AccessMode           string                        `json:"access_mode,omitempty"`
+	Remediation          string                        `json:"remediation,omitempty"`
+	IdempotencyKey       string                        `json:"idempotency_key,omitempty"`
+	RemotePath           string                        `json:"remote_path,omitempty"`
+	WritePhase           string                        `json:"write_phase,omitempty"`
+	MutationAttempted    *bool                         `json:"mutation_attempted,omitempty"`
+	ProviderFailureClass string                        `json:"provider_failure_class,omitempty"`
 }
 
 type toolDefinition struct {
@@ -327,6 +328,7 @@ type toolDefinition struct {
 }
 
 type inputSchema struct {
+	OneOf                []inputSchema         `json:"oneOf,omitempty"`
 	AdditionalProperties *bool                 `json:"additionalProperties,omitempty"`
 	Type                 string                `json:"type"`
 	Properties           map[string]schemaProp `json:"properties"`
@@ -958,7 +960,7 @@ func (s *Server) toolsList(ctx context.Context, req request) {
 		if name == "submit_feedback" {
 			if s.toolBootstrap != nil && s.svc == nil {
 				definition.Description += " Runtime readiness is not evaluated during discovery; call feedback_status explicitly."
-				tools = append(tools, definition)
+				tools = append(tools, withOnboardingEffects(definition))
 				continue
 			}
 			readiness, err := s.feedbackReadiness(ctx)
@@ -976,7 +978,7 @@ func (s *Server) toolsList(ctx context.Context, req request) {
 			}
 			definition.Meta = map[string]any{"gitcode_mcp": map[string]any{"availability": readiness}}
 		}
-		tools = append(tools, definition)
+		tools = append(tools, withOnboardingEffects(definition))
 	}
 	result := toolsListResult{Tools: tools}
 	if s.startupDiagnostic.present() {
@@ -2582,16 +2584,41 @@ func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 }
 
 func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
+	var effects *capability.OnboardingEffects
+	if value, ok := capability.ToolOnboardingEffects(name); ok {
+		effects = &value
+	}
 	if s.policy != nil && len(capability.Requirements("mcp", name)) == 0 {
 		s.writeError(id, -32601, "Capability not mapped", &errorData{Code: "capability_policy_unmapped", Message: "The trusted instance policy has no mapping for this operation."})
 		return
 	}
 	if s.policy != nil {
-		s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: "capability denied by the trusted instance policy", Remediation: "ask the operator to review the trusted instance policy; client requests cannot change grants"})
+		s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: "capability denied by the trusted instance policy", Effects: effects, Remediation: "ask the operator to review the trusted instance policy; client requests cannot change grants"})
 		return
 	}
 	access := string(s.activeToolAccess())
-	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "remove the explicit read-only override, or set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write"})
+	remediation := "ask the operator to review the coarse read ceiling and trusted capability allowlist; clients cannot grant themselves access"
+	if name == "sync_live" {
+		remediation += "; sync_live needs local cache write plus remote read, not remote write; see the least-privilege sync role in docs/mcp-setup.md"
+	}
+	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), Effects: effects, AccessMode: access, Remediation: remediation})
+}
+
+func withOnboardingEffects(definition toolDefinition) toolDefinition {
+	effects, ok := capability.ToolOnboardingEffects(definition.Name)
+	if !ok {
+		return definition
+	}
+	definition.Description += " " + effects.Description()
+	meta := map[string]any{}
+	if existing, ok := definition.Meta["gitcode_mcp"].(map[string]any); ok {
+		for key, value := range existing {
+			meta[key] = value
+		}
+	}
+	meta["effects"] = effects
+	definition.Meta = map[string]any{"gitcode_mcp": meta}
+	return definition
 }
 
 func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {

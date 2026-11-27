@@ -61,6 +61,24 @@ unrelated YAML, uses private atomic replacement and bounded durable receipts
 (90 days, at most 256 claims). Retained receipts replay without another write;
 pending crash claims are reconciled before compaction.
 
+The operator handoff is explicit, not an MCP permission grant:
+
+1. Call `feedback_status` (or `gitcode-mcp feedback status --format json`).
+2. If disabled, the operator runs `gitcode-mcp feedback setup --format json`,
+   reviews the local effects and returned `plan_id`, then applies that exact plan:
+   `gitcode-mcp feedback setup --yes --plan-id PLAN_ID --idempotency-key CALLER_KEY --format json`.
+   Replace the two placeholders with the returned id and a new caller-owned key.
+   If the build-owned repository is unbound, use the returned binding handoff
+   first; never choose another destination.
+3. Re-check status. A long-running MCP instance retains its startup configuration:
+   restart it after trusted configuration changes. Credential/provider readiness
+   is evaluated afresh for each explicit status/prepare call. Submission performs
+   its own checks again. A ready observation is not authorization to submit.
+
+Setup changes trusted local configuration only. It does not submit a report,
+install a provider, or relax an instance capability policy. A restricted role may
+need an operator to perform setup or to use a separate feedback-enabled instance.
+
 Admin **Maintenance → Feedback delivery** shows the destination and readiness
 read-only, with prerequisite handoffs. It has no destination selector, setup
 plan, confirmation or report submission control. Deprecated setup backend
@@ -96,7 +114,7 @@ also read-only and remains available in every state:
 }
 ```
 
-Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. The result includes the same readiness DTO and returns one of:
+Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. The result includes the normalized sanitized `draft` and the same readiness DTO, and returns one of:
 
 - `prepared`: a new report is prepared; inspect its independent readiness DTO before submission;
 - `needs_context`: the worksheet is missing actionable circumstances; ask the returned follow-up questions and prepare it again;
@@ -108,7 +126,8 @@ Preparation validates the shape, redacts secrets, replaces URLs outside approved
 because a credential or live provider is currently unavailable. Duplicate
 classification is likewise preserved while submission is unavailable.
 
-After external issue creation is authorized, call `submit_feedback` with the same fields plus:
+After external issue creation is authorized, copy the **whole returned `draft`
+object** into the `draft` argument of `submit_feedback`, plus:
 
 ```json
 {
@@ -117,7 +136,24 @@ After external issue creation is authorized, call `submit_feedback` with the sam
 }
 ```
 
-The submission re-prepares the report, resolves only the configured sink, creates the issue through the normal audited write lifecycle, performs sanitized cache readback, and returns the issue receipt. Replaying the same idempotency key does not repeat the provider write even when the generated observation timestamp changes. With the default `duplicate_policy: suggest`, pass `duplicate_override: "create"` only after reviewing likely candidates and confirming the report is distinct. `return_existing` instead returns the strongest likely match without writing. An exact fingerprint match is never duplicated.
+There is no need to reconstruct individual report fields or forward rendered
+`body`, destination, fingerprint, runtime context or readiness as input. The
+portable draft is sanitized data, not a permission token, trusted receipt or
+server-side handle; no draft store, TTL or cache write is added to preparation.
+Legacy flat submissions remain supported, but cannot be mixed with `draft`.
+Null drafts, unknown nested fields and mixed envelopes are rejected. Incomplete drafts
+still return targeted questions and never create an issue. Answer those questions
+in the draft and prepare again before submission.
+
+The submission re-prepares the report, resolves only the configured sink, creates the issue through the normal audited write lifecycle, performs sanitized cache readback, and returns the issue receipt. Replaying the same idempotency key does not repeat the provider write even when the generated observation timestamp changes. With the default `duplicate_policy: suggest`, set `draft.duplicate_override: "create"` only after reviewing likely candidates and confirming the report is distinct, then prepare again. `return_existing` instead returns the strongest likely match without writing. An exact fingerprint match is never duplicated.
+
+`feedback_status` and `prepare_feedback` use the same submission readiness inputs
+without HTTP or a live-adapter probe. `context.provider_mode` is the preparation
+service's cache/read adapter (it can be `fixture`); it is **not** submission
+readiness or evidence of a remote call. Inspect `readiness.state` and its checks
+for the latter. Discovery is credential-free; an explicit status/prepare call
+may inspect configured credential readiness, and explicit offline mode cannot
+enable a live submission.
 
 ### Agent worksheet
 
@@ -149,20 +185,24 @@ available even in that state.
 The CLI accepts individual flags or a JSON draft. Preparation does not require live mode:
 
 ```sh
-gitcode-mcp feedback prepare --input feedback.json --format json
+gitcode-mcp feedback prepare --input feedback.json --format json > feedback-prepared.json
 ```
 
 Submission is explicit:
 
 ```sh
 gitcode-mcp feedback submit \
-  --input feedback.json \
+  --input feedback-prepared.json \
   --live \
   --idempotency-key dogfood-sync-partial-20260818 \
   --format json
 ```
 
 `feedback submit --dry-run` prepares and validates the report without writing.
+`--input` accepts a plain draft or the complete prepared JSON output (at most
+1 MiB); only its `draft` is used. Claimed body/destination/readiness are ignored
+and recomputed. Keep explicit flag overrides deliberate and review the new
+prepared output after changes. An input file never grants live-write authority.
 
 ## Intake immutability
 

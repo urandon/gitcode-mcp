@@ -3549,6 +3549,25 @@ func TestFeedbackPrepareLoadsStructuredJSONAndAllowsFlagOverrides(t *testing.T) 
 	}
 }
 
+func TestFeedbackInputAcceptsPreparedOutputWithoutTrustingItsBody(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "prepared.json")
+	report := feedback.PreparedReport{Body: "untrusted rendered text", RepoID: "example/untrusted", Draft: feedback.Draft{Summary: "Reusable report", Category: "ux_friction", Surface: "mcp", ReporterType: "agent", Goal: "Read cached issues"}}
+	data, _ := json.Marshal(report)
+	if os.WriteFile(input, data, 0o600) != nil {
+		t.Fatal("cannot create input fixture")
+	}
+	draft, err := feedbackDraftFromOptions(options{input: input})
+	if err != nil || draft.Summary != report.Draft.Summary || draft.Goal != report.Draft.Goal {
+		t.Fatal("CLI did not reuse prepared draft")
+	}
+	if os.WriteFile(input, []byte(strings.Repeat(" ", feedback.MaxDraftInputBytes+1)), 0o600) != nil {
+		t.Fatal("cannot create bounded input fixture")
+	}
+	if _, err := feedbackDraftFromOptions(options{input: input}); err == nil {
+		t.Fatal("oversized input accepted")
+	}
+}
+
 func TestFeedbackSubmitDelegatesExplicitLiveWrite(t *testing.T) {
 	spy := &spyService{}
 	args := []string{"feedback", "submit", "--title", "fallback required", "--category", "ux_friction", "--surface", "mcp", "--reporter-type", "agent", "--observed", "MCP failed", "--expected", "MCP succeeds", "--impact", "CLI fallback", "--live", "--idempotency-key", "feedback-submit-99", "--format", "json"}

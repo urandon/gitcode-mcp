@@ -61,7 +61,7 @@ func TestFeedbackToolsListFailsClosedWhenReadinessCannotBeEvaluated(t *testing.T
 
 func (s *feedbackSpyService) PrepareFeedback(_ context.Context, draft feedback.Draft) (feedback.PreparedReport, error) {
 	s.prepared = append(s.prepared, draft)
-	return feedback.PreparedReport{Status: "prepared", Configured: true, Sink: feedback.SinkGitCodeIssues, RepoID: "example/feedback", Title: "feedback", Body: "body", Fingerprint: "fingerprint", DedupeDecision: "none"}, nil
+	return feedback.PreparedReport{Status: "prepared", Configured: true, Sink: feedback.SinkGitCodeIssues, RepoID: "example/feedback", Title: "feedback", Body: "body", Fingerprint: "fingerprint", DedupeDecision: "none", Draft: draft}, nil
 }
 
 func (s *feedbackSpyService) SubmitFeedback(_ context.Context, req service.SubmitFeedbackRequest) (feedback.SubmissionResult, error) {
@@ -86,9 +86,12 @@ func TestFeedbackToolsExposeSafePolicyAndDelegate(t *testing.T) {
 		t.Fatalf("required=%v", prepareSchema.Required)
 	}
 	submitSchema := writeToolInputSchema("submit_feedback")
+	if len(submitSchema.OneOf) != 2 || !containsString(submitSchema.OneOf[0].Required, "draft") {
+		t.Fatal("submit schema lost draft/legacy alternatives")
+	}
 	for _, field := range []string{"goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal"} {
-		if !containsString(submitSchema.Required, field) {
-			t.Fatalf("submit required=%v, want %s", submitSchema.Required, field)
+		if !containsString(submitSchema.OneOf[1].Required, field) || !containsString(submitSchema.Properties["draft"].Required, field) {
+			t.Fatalf("submit worksheet lost required %s", field)
 		}
 	}
 	steps := submitSchema.Properties["reproduction_steps"]
@@ -136,8 +139,76 @@ func TestFeedbackToolsExposeSafePolicyAndDelegate(t *testing.T) {
 	if submittedResult.TicketNumber != 42 || len(spy.submits) != 1 || spy.submits[0].Mode != service.WriteModeLive || spy.submits[0].IdempotencyKey != "feedback-42" {
 		t.Fatalf("submitted=%#v calls=%#v", submittedResult, spy.submits)
 	}
+	wrapped := call("submit-draft", "submit_feedback", map[string]any{"draft": preparedResult.Draft, "write_mode": "live", "idempotency_key": "feedback-draft-42"})
+	decodeStructured(t, wrapped, &submittedResult)
+	if len(spy.submits) != 2 || spy.submits[1].Draft.Goal != preparedResult.Draft.Goal || spy.submits[1].Draft.FallbackUsed != "CLI" {
+		t.Fatal("portable draft was not delegated unchanged")
+	}
 	_ = r.Close()
 	wg.Wait()
+}
+
+func TestFeedbackDraftEnvelopeRejectsAmbiguityBeforeSubmission(t *testing.T) {
+	spy := &feedbackSpyService{}
+	h := NewRPCHandlerWithToolAccess(spy, ToolAccessWrite)
+	for _, args := range []string{
+		`{"draft":null,"write_mode":"live","idempotency_key":"negative"}`,
+		`{"draft":{},"summary":"mixed","write_mode":"live","idempotency_key":"negative"}`,
+		`{"draft":{"body":"untrusted markdown"},"write_mode":"live","idempotency_key":"negative"}`,
+		`{"draft":{},"body":"untrusted rendered report","write_mode":"live","idempotency_key":"negative"}`,
+		`{"draft":{},"write_mode":"dry_run","idempotency_key":"negative"}`,
+		`{"draft":{},"write_mode":"live"}`,
+	} {
+		resp := mcpObservationCall(t, h, "submit_feedback", args)
+		if resp.Error == nil || len(spy.submits) != 0 {
+			t.Fatal("invalid/ambiguous draft reached submission")
+		}
+	}
+}
+
+func TestOnboardingEffectsDoNotBroadenReadPolicy(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		h := NewRPCHandlerWithToolAccess(nil, ToolAccessRead)
+		if managed {
+			h.SetCapabilityPolicy(testInstancePolicy(t, "repo_status"))
+		}
+		resp := mcpObservationCall(t, h, "sync_live", `{}`)
+		if resp.Error == nil || resp.Error.Data.Code != "tool_disabled_by_policy" || resp.Error.Data.Effects == nil {
+			t.Fatal("sync denial lost its explicit effect boundary")
+		}
+		effects := resp.Error.Data.Effects
+		if !effects.LocalCacheWrite || !effects.RemoteRead || effects.RemoteWrite || strings.Contains(resp.Error.Data.Remediation, "GITCODE_MCP_TOOL_ACCESS=write") {
+			t.Fatal("sync effects or operator remediation broaden remote authority")
+		}
+	}
+	spy := &feedbackSpyService{}
+	srv := NewWithToolAccess(strings.NewReader(""), io.Discard, io.Discard, spy, nil, ToolAccessWrite)
+	var out bytes.Buffer
+	srv.writer = &out
+	srv.toolsList(context.Background(), request{JSONRPC: "2.0"})
+	var wire struct {
+		Result toolsListResult `json:"result"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(out.Bytes()), &wire) != nil {
+		t.Fatal("invalid discovery")
+	}
+	found := 0
+	for _, tool := range wire.Result.Tools {
+		if _, ok := capability.ToolOnboardingEffects(tool.Name); !ok {
+			continue
+		}
+		meta, ok := tool.Meta["gitcode_mcp"].(map[string]any)
+		if !ok || meta["effects"] == nil {
+			t.Fatal("discovery lost onboarding effects")
+		}
+		if tool.Name == "submit_feedback" && meta["availability"] == nil {
+			t.Fatal("effects replaced readiness")
+		}
+		found++
+	}
+	if found != 4 {
+		t.Fatal("missing onboarding discovery cohort")
+	}
 }
 
 func TestFeedbackToolsListAdvertisesRuntimeSubmissionReadiness(t *testing.T) {

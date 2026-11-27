@@ -65,6 +65,39 @@ func TestSubmitFeedbackUsesAuditedIssueWriteAndReplays(t *testing.T) {
 	}
 }
 
+func TestSubmitPreparedDraftRevalidatesContextAndKeepsWriteGuards(t *testing.T) {
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-91", Number: 91, State: "open"}, Confirmed: true, RemoteID: "91", RemoteNumber: 91}}
+	svc, _ := feedbackService(t, client)
+	draft := feedbackDraft()
+	draft.Evidence = []string{"Authorization: Bearer synthetic-feedback-secret"}
+	prepared, err := svc.PrepareFeedback(context.Background(), draft)
+	if err != nil {
+		t.Fatal("preparation failed")
+	}
+	// Completing preparation grants nothing; current policy/readiness still wins.
+	svc.ConfigureFeedback(feedback.DefaultConfig())
+	req := SubmitFeedbackRequest{Draft: prepared.Draft, Mode: WriteModeLive, IdempotencyKey: "prepared-feedback-91"}
+	result, err := svc.SubmitFeedback(context.Background(), req)
+	if err != nil || result.Status != "submission_unavailable" || client.createIssueCalls != 0 {
+		t.Fatal("prepared draft bypassed current readiness")
+	}
+	svc.ConfigureFeedback(feedback.Config{Enabled: true})
+	incomplete := req
+	incomplete.Draft.Goal = ""
+	result, err = svc.SubmitFeedback(context.Background(), incomplete)
+	if err != nil || result.Status != "needs_context" || client.createIssueCalls != 0 {
+		t.Fatal("prepared draft bypassed worksheet revalidation")
+	}
+	result, err = svc.SubmitFeedback(context.Background(), req)
+	if err != nil || result.Status != "submitted" || client.createIssueCalls != 1 || strings.Contains(client.lastCreateIssueRequest.Body, "synthetic-feedback-secret") {
+		t.Fatal("prepared submission failed or leaked input")
+	}
+	result, err = svc.SubmitFeedback(context.Background(), req)
+	if err != nil || !result.Replayed || client.createIssueCalls != 1 {
+		t.Fatal("portable draft replay repeated provider write")
+	}
+}
+
 func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	svc, _ := feedbackService(t, &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }})
 	if _, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeDryRun, IdempotencyKey: "k"}); err == nil {

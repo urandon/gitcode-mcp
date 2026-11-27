@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/auth"
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/mcp"
 	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/servicectl"
@@ -26,6 +28,118 @@ import (
 )
 
 type observationCredentialSpy struct{ calls atomic.Int64 }
+
+func TestMCPFeedbackStatusPrepareReadinessParity(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		present, offline bool
+	}{{name: "missing"}, {name: "present", present: true}, {name: "explicit-offline", present: true, offline: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newTestSource(t)
+			cfgPath := filepath.Join(src.configDir, "fixture.yaml")
+			src.env[config.EnvMCPConfigPath] = cfgPath
+			src.files[cfgPath] = []byte("credential: {store: env}\nfeedback: {enabled: true}\n")
+			if tc.present {
+				src.env[config.EnvToken] = "synthetic-feedback-credential"
+			}
+			var requests atomic.Int64
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer api.Close()
+			src.env[config.EnvAPIURL] = api.URL
+			path := filepath.Join(t.TempDir(), "cache.db")
+			store, err := cache.NewSQLiteStore(context.Background(), path)
+			if err != nil {
+				t.Fatal("fixture cache unavailable")
+			}
+			if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "urandon/gitcode-mcp", Owner: "urandon", Name: "gitcode-mcp", APIBaseURL: api.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+				t.Fatal("fixture binding unavailable")
+			}
+			_ = store.Close()
+			input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"feedback_status","arguments":{}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prepare_feedback","arguments":{"summary":"Bounded cache sync needs clearer permission guidance","category":"ux_friction","surface":"mcp","reporter_type":"agent","observed":"Sync is hidden by the read ceiling","expected":"Explain the local cache effect","impact":"The agent used a CLI fallback"}}}` + "\n"
+			var out, errOut bytes.Buffer
+			args := []string{"--mcp", "--cache-path", path}
+			if tc.offline {
+				args = append(args, "--offline")
+			}
+			if run(args, strings.NewReader(input), &out, &errOut, src) != 0 || errOut.Len() != 0 {
+				t.Fatal("feedback fixture entrypoint failed")
+			}
+			lines := nonEmptyLines(out.String())
+			if len(lines) != 2 {
+				t.Fatal("missing feedback responses")
+			}
+			var states []feedback.Readiness
+			for i, line := range lines {
+				var wire struct {
+					Error  json.RawMessage `json:"error"`
+					Result struct {
+						Structured json.RawMessage `json:"structuredContent"`
+					} `json:"result"`
+				}
+				if json.Unmarshal([]byte(line), &wire) != nil || len(wire.Error) != 0 {
+					t.Fatal("feedback returned an operational error")
+				}
+				var state feedback.Readiness
+				if i == 0 {
+					err = json.Unmarshal(wire.Result.Structured, &state)
+				} else {
+					var report feedback.PreparedReport
+					err = json.Unmarshal(wire.Result.Structured, &report)
+					state = report.Readiness
+				}
+				if err != nil {
+					t.Fatal("malformed feedback result")
+				}
+				states = append(states, state)
+			}
+			want := feedback.ReadinessCredentialMissing
+			if tc.present && !tc.offline {
+				want = feedback.ReadinessReady
+			}
+			if states[0].State != want || !reflect.DeepEqual(states[0], states[1]) {
+				t.Fatalf("feedback readiness diverged: status=%s prepare=%s want=%s", states[0].State, states[1].State, want)
+			}
+			if requests.Load() != 0 || strings.Contains(out.String()+errOut.String(), "synthetic-feedback-credential") {
+				t.Fatal("readiness/prepare contacted provider or exposed credential")
+			}
+		})
+	}
+}
+
+func TestMCPFeedbackPreparationDoesNotConstructLiveAdapter(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "synthetic-feedback-credential"
+	cfg := config.Default()
+	cfg.CachePath = filepath.Join(t.TempDir(), "cache.db")
+	cfg.Feedback.Enabled = true
+	deps := buildStartupDeps(cfg, "", false)
+	deps.Source = src
+	deps.CredentialResolver = auth.NewCredentialResolver(src)
+	// Invalid only at the adapter boundary, after effective config validation.
+	deps.GitCode.BaseURL = "%synthetic-private-provider"
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"feedback_status","arguments":{}}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"prepare_feedback","arguments":{"summary":"Readiness must not probe provider","category":"ux_friction","surface":"mcp","reporter_type":"agent","observed":"Preparation required provider setup","expected":"Preparation stays local","impact":"Feedback could not be prepared"}}}` + "\n"
+	var out, errOut bytes.Buffer
+	if runMCPStdio(context.Background(), strings.NewReader(input), &out, &errOut, deps) != 0 || errOut.Len() != 0 {
+		t.Fatal("feedback preparation unavailable without adapter")
+	}
+	lines := nonEmptyLines(out.String())
+	if len(lines) != 2 {
+		t.Fatal("missing feedback responses")
+	}
+	for _, line := range lines {
+		var wire struct {
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &wire) != nil || len(wire.Error) != 0 || strings.Contains(line, "synthetic-private") || strings.Contains(line, "synthetic-feedback-credential") {
+			t.Fatal("preparation constructed provider or leaked authority")
+		}
+	}
+}
 
 func (p *observationCredentialSpy) Resolve(context.Context, config.EffectiveConfig) (config.SecretString, config.CredentialStatus, error) {
 	p.calls.Add(1)

@@ -100,7 +100,9 @@ func (b *mcpBootstrap) ForTool(ctx context.Context, name string, _ json.RawMessa
 	deps.GitCode.Token = ""
 	deps.GitCode.token = ""
 	liveRequired := mcpToolRequiresLive(name)
-	liveReadiness := name == "feedback_status" && !deps.GitCode.Offline
+	feedbackReadiness := name == "feedback_status" || name == "prepare_feedback"
+	liveReadiness := feedbackReadiness && !deps.GitCode.Offline
+	credentialPresent := false
 	if liveRequired || liveReadiness {
 		if deps.GitCode.Offline {
 			return nil, servicectl.RPCDomainError{Code: "live_disabled", Message: "requested live operation is unavailable in explicit offline mode"}
@@ -118,9 +120,14 @@ func (b *mcpBootstrap) ForTool(ctx context.Context, name string, _ json.RawMessa
 		if liveRequired && (!credential.Present || strings.TrimSpace(credential.Token) == "") {
 			return nil, servicectl.RPCDomainError{Code: "credential_unavailable", Message: "requested live operation needs a configured GitCode credential"}
 		}
-		deps.GitCode.Live = credential.Present && strings.TrimSpace(credential.Token) != ""
-		deps.GitCode.Token = credential.Token
-		deps.GitCode.token = credential.Token
+		credentialPresent = credential.Present && strings.TrimSpace(credential.Token) != ""
+		// Readiness is a projection, not a live-adapter probe. In particular,
+		// preparation remains available without constructing a live provider.
+		if liveRequired {
+			deps.GitCode.Live = credentialPresent
+			deps.GitCode.Token = credential.Token
+			deps.GitCode.token = credential.Token
+		}
 	}
 	if b.store == nil {
 		if err := ensureParentDir(deps.Config.CachePath); err != nil {
@@ -139,6 +146,9 @@ func (b *mcpBootstrap) ForTool(ctx context.Context, name string, _ json.RawMessa
 	svc, err := resolveService(b.store, deps)
 	if err != nil {
 		return nil, b.fail(err)
+	}
+	if feedbackReadiness {
+		svc.ConfigureFeedbackReadiness(credentialPresent, !deps.GitCode.Offline)
 	}
 	h := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	h.SetCapabilityPolicy(deps.Config.CapabilityPolicy)
